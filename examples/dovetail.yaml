@@ -1,0 +1,69 @@
+# Dovetail configuration. All keys shown with their defaults unless noted.
+# Secrets may be given inline, as "file:/path", or with ${ENV_VAR} substitution.
+
+# Modes this process runs. Split modes over processes to scale each one.
+modes: [lmtp, api, postfix]
+
+ceph:
+  backend: librados            # librados | memory (volatile, development only)
+  # config_file: /etc/ceph/ceph.conf
+  monitors: ["[2001:db8::10]:6789", "[2001:db8::11]:6789", "[2001:db8::12]:6789"]
+  user: dovetail               # CephX user without "client."
+  key: ${DOVETAIL_CEPH_KEY}    # or keyring: /etc/ceph/ceph.client.dovetail.keyring
+  pools:
+    messages: dovetail.messages
+    attachments: dovetail.attachments
+    index: dovetail.index
+    meta: dovetail.meta
+
+listen:
+  # proxy_protocol: off | optional | required. HAProxy sends PROXY on every
+  # connection, so "required" is the production setting.
+  lmtp:       {address: "[::]:24",    proxy_protocol: required}
+  imap:       {address: "[::]:143",   proxy_protocol: required}
+  pop3:       {address: "[::]:110",   proxy_protocol: required}
+  api:        {address: "[::]:8080",  proxy_protocol: required}
+  postfix:    {address: "[::1]:2525", proxy_protocol: off}   # socketmap, private network only
+  management: {address: "[::1]:9090", proxy_protocol: off}   # /metrics /healthz /readyz
+
+proxy:
+  trusted_addresses: []        # proxies whose X-Forwarded-For is trusted (HTTP fallback)
+
+smtp:
+  relay_host: "[::1]:25"       # outbound submissions go here (Postfix)
+  # username / password for SASL, starttls: true
+
+mail:
+  max_message_size: 52428800   # 50 MiB
+  inline_attachment_max: 4096  # parts up to this size stay inline in the raw skeleton
+  force_full_raw: false
+  trash_retention: 720h        # 30 days
+  post_hold_grace: 168h        # 7 days after a hold is released before purges resume
+  spam_header: X-Spam-Flag
+  spam_value: "YES"
+  over_quota_tempfail: false   # true: 4xx so the MTA retries
+  disabled_tempfail: false
+  max_alias_depth: 5
+
+quota:                         # defaults for mailboxes without their own limits; 0 = unlimited
+  soft_bytes: 0
+  hard_bytes: 0
+  soft_messages: 0
+  hard_messages: 0
+
+session:
+  access_token_lifetime: 15m
+  refresh_token_lifetime: 720h
+  key_rotation_interval: 2160h
+  issuer: https://mail.example.org   # also the JMAP base URL
+
+audit:
+  retention: 8760h             # 365 days
+  detail: {}                   # per protocol: full (default) | session, e.g. {imap: session}
+
+export:
+  directory: /var/lib/dovetail/exports
+
+log:
+  level: info                  # debug | info | warn | error
+  format: json                 # json | text

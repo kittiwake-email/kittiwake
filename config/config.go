@@ -32,6 +32,9 @@ type Config struct {
 
 // Ceph is the cluster connection and pool layout.
 type Ceph struct {
+	// Backend is "librados" (default) or "memory" (in-process, volatile;
+	// for development and tests only).
+	Backend    string            `yaml:"backend"`
 	ConfigFile string            `yaml:"config_file"`
 	Monitors   []string          `yaml:"monitors"`
 	User       string            `yaml:"user"`
@@ -157,7 +160,8 @@ func (s Secret) Resolve() (string, error) {
 func Default() Config {
 	return Config{
 		Ceph: Ceph{
-			User: "dovetail",
+			Backend: "librados",
+			User:    "dovetail",
 			Pools: Pools{
 				Messages:    "dovetail.messages",
 				Attachments: "dovetail.attachments",
@@ -233,6 +237,11 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("config: listen.%s.proxy_protocol must be off, optional or required", name)
 		}
+	}
+	switch c.Ceph.Backend {
+	case "librados", "memory":
+	default:
+		return fmt.Errorf("config: ceph.backend %q must be librados or memory", c.Ceph.Backend)
 	}
 	if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" || c.Ceph.Pools.Meta == "" {
 		return errors.New("config: all four ceph pools must be named")

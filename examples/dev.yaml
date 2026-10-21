@@ -1,0 +1,16 @@
+# Development config: everything in one process on the in-memory backend.
+# Data is lost when the process exits. Start with:
+#   dovetail serve --config examples/dev.yaml --seed-account wido@example.org:devpassword
+modes: [lmtp, api, postfix]
+ceph:
+  backend: memory
+listen:
+  lmtp:       {address: "127.0.0.1:2424", proxy_protocol: optional}
+  api:        {address: "127.0.0.1:8080", proxy_protocol: optional}
+  postfix:    {address: "127.0.0.1:2525", proxy_protocol: off}
+  management: {address: "127.0.0.1:9090", proxy_protocol: off}
+session:
+  issuer: http://127.0.0.1:8080
+log:
+  level: debug
+  format: text

@@ -1,0 +1,31 @@
+# Postfix integration with Dovetail.
+#
+# Dovetail's "postfix" mode serves a socketmap on [::1]:2525 (see
+# listen.postfix in dovetail.yaml). Postfix uses it to know which domains and
+# recipients exist, so unknown recipients are rejected at SMTP time. Mail is
+# then handed to Dovetail over LMTP.
+
+# Domains Dovetail hosts (enabled domains only).
+virtual_mailbox_domains = socketmap:inet:[::1]:2525:domains
+
+# Recipients that resolve to a mailbox (accounts, aliases, catch-all).
+virtual_mailbox_maps = socketmap:inet:[::1]:2525:mailboxes
+
+# Optional: let Postfix expand aliases itself. Dovetail already fans out
+# aliases at LMTP time, so this is only needed if you want alias expansion
+# visible in Postfix logs/queues (e.g. forwarding to external addresses).
+virtual_alias_maps = socketmap:inet:[::1]:2525:aliases
+
+# Deliver over LMTP. With HAProxy in front use its address and have it send
+# the PROXY protocol; direct connection example:
+virtual_transport = lmtp:inet:[::1]:24
+lmtp_destination_recipient_limit = 1    # one recipient per LMTP transaction
+
+# Spam routing: Dovetail files messages carrying this header/value into Junk
+# (mail.spam_header / mail.spam_value in dovetail.yaml). rspamd and
+# SpamAssassin can add it.
+#   X-Spam-Flag: YES
+
+# Submission: Dovetail submits outbound mail to smtp.relay_host; point that at
+# this Postfix instance's submission port and allow it in mynetworks or with
+# SASL credentials.
