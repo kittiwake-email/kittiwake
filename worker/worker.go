@@ -1,0 +1,507 @@
+// Package worker runs background tasks from the RADOS task queue: retention
+// purge, attachment garbage collection, mailbox removal, quota
+// recalculation, audit purge, orphan sweep and search-index events. One
+// worker at a time (elected with a RADOS lock) also acts as the scheduler
+// that enqueues the periodic tasks. See README.md "Workers and background
+// tasks".
+package worker
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
+
+	"github.com/google/uuid"
+
+	"dovetail/mail"
+	"dovetail/metrics"
+	"dovetail/rados"
+	"dovetail/service/actor"
+	"dovetail/service/admin"
+	"dovetail/service/auditor"
+	"dovetail/service/delivery"
+	"dovetail/store/attach"
+	"dovetail/store/audit"
+	"dovetail/store/identity"
+	"dovetail/store/index"
+	"dovetail/store/message"
+	"dovetail/store/queue"
+)
+
+// Task types handled here (plus those defined by services).
+const (
+	TaskPurgeTrash    = admin.TaskPurgeTrash
+	TaskRemoveMailbox = admin.TaskRemoveMailbox
+	TaskRecalcQuota   = admin.TaskRecalcQuota
+	TaskSearchIndex   = delivery.TaskSearchIndex
+	TaskAttachmentGC  = "attachment-gc"
+	TaskPurgeAudit    = "purge-audit"
+	TaskOrphanSweep   = "orphan-sweep"
+)
+
+// AllTypes lists every queue the worker drains.
+var AllTypes = []string{TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota, TaskSearchIndex, TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep}
+
+// Config for the worker.
+type Config struct {
+	// PostHoldGrace delays purges after a hold is released.
+	PostHoldGrace time.Duration
+	// AuditRetention is how long audit objects are kept.
+	AuditRetention time.Duration
+	// AttachmentGCGrace: unreferenced attachments younger than this are kept
+	// (a delivery may still be in flight).
+	AttachmentGCGrace time.Duration
+	// OrphanAge: message objects older than this without an index entry
+	// are removed.
+	OrphanAge time.Duration
+	// PollInterval between queue checks when idle.
+	PollInterval time.Duration
+	// LeaseDuration for claimed tasks.
+	LeaseDuration time.Duration
+	// Schedule intervals for periodic tasks.
+	PurgeInterval time.Duration // per-mailbox trash purge
+	GCInterval    time.Duration // attachment GC, audit purge, orphan sweep
+	ScanBatch     int
+}
+
+// Worker drains the task queues.
+type Worker struct {
+	ID    string
+	cfg   Config
+	ids   *identity.Store
+	idx   *index.Store
+	msgs  *message.Store
+	atts  *attach.Store
+	audit *audit.Store
+	queue *queue.Store
+	aud   *auditor.Auditor
+	lock  rados.IOContext // index pool, for the scheduler lock object
+	log   *slog.Logger
+	Now   func() time.Time
+}
+
+// Stores needed by the worker.
+type Stores struct {
+	Identity    *identity.Store
+	Index       *index.Store
+	Messages    *message.Store
+	Attachments *attach.Store
+	Audit       *audit.Store
+	Queue       *queue.Store
+}
+
+// New returns a worker. indexPool is used for the scheduler lock.
+func New(cfg Config, st Stores, aud *auditor.Auditor, indexPool rados.IOContext, log *slog.Logger) *Worker {
+	if cfg.PostHoldGrace <= 0 {
+		cfg.PostHoldGrace = 7 * 24 * time.Hour
+	}
+	if cfg.AuditRetention <= 0 {
+		cfg.AuditRetention = 365 * 24 * time.Hour
+	}
+	if cfg.AttachmentGCGrace <= 0 {
+		cfg.AttachmentGCGrace = 24 * time.Hour
+	}
+	if cfg.OrphanAge <= 0 {
+		cfg.OrphanAge = 24 * time.Hour
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 5 * time.Second
+	}
+	if cfg.LeaseDuration <= 0 {
+		cfg.LeaseDuration = 10 * time.Minute
+	}
+	if cfg.PurgeInterval <= 0 {
+		cfg.PurgeInterval = time.Hour
+	}
+	if cfg.GCInterval <= 0 {
+		cfg.GCInterval = 24 * time.Hour
+	}
+	if cfg.ScanBatch <= 0 {
+		cfg.ScanBatch = 500
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	host, _ := os.Hostname()
+	return &Worker{
+		ID: fmt.Sprintf("%s-%d-%s", host, os.Getpid(), uuid.NewString()[:8]), cfg: cfg,
+		ids: st.Identity, idx: st.Index, msgs: st.Messages, atts: st.Attachments, audit: st.Audit, queue: st.Queue,
+		aud: aud, lock: indexPool, log: log, Now: time.Now,
+	}
+}
+
+// Run drains queues and schedules periodic tasks until ctx is cancelled.
+func (w *Worker) Run(ctx context.Context) error {
+	w.log.Info("worker starting", slog.String("worker", w.ID))
+	t := time.NewTicker(w.cfg.PollInterval)
+	defer t.Stop()
+	for {
+		busy := w.RunOnce(ctx)
+		w.schedule(ctx)
+		if busy {
+			continue // drain without waiting
+		}
+		select {
+		case <-ctx.Done():
+			w.log.Info("worker stopping", slog.String("worker", w.ID))
+			return nil
+		case <-t.C:
+		}
+	}
+}
+
+// RunOnce claims and executes due tasks from every queue once. Returns
+// whether any task ran.
+func (w *Worker) RunOnce(ctx context.Context) bool {
+	busy := false
+	for _, typ := range AllTypes {
+		tasks, err := w.queue.Claim(ctx, typ, w.ID, 10, w.cfg.LeaseDuration)
+		if err != nil {
+			if !errors.Is(err, queue.ErrLocked) {
+				w.log.Warn("claim failed", slog.String("type", typ), slog.String("error", err.Error()))
+			}
+			continue
+		}
+		for _, task := range tasks {
+			busy = true
+			w.execute(ctx, task)
+		}
+	}
+	return busy
+}
+
+func (w *Worker) execute(ctx context.Context, task queue.Task) {
+	start := w.Now()
+	err := w.handle(ctx, task)
+	if err != nil {
+		dead, ferr := w.queue.Fail(ctx, task, err)
+		res := "retry"
+		if dead {
+			res = "dead"
+		}
+		metrics.Tasks.WithLabelValues(task.Type, res).Inc()
+		w.log.Warn("task failed", slog.String("type", task.Type), slog.String("id", task.ID), slog.Int("attempt", task.Attempts),
+			slog.Bool("dead", dead), slog.String("error", err.Error()), slog.Any("requeue_error", ferr))
+		return
+	}
+	if err := w.queue.Complete(ctx, task); err != nil {
+		w.log.Warn("complete failed", slog.String("type", task.Type), slog.String("error", err.Error()))
+	}
+	metrics.Tasks.WithLabelValues(task.Type, "ok").Inc()
+	w.log.Debug("task done", slog.String("type", task.Type), slog.String("id", task.ID), slog.Duration("took", w.Now().Sub(start)))
+}
+
+type mailboxPayload struct {
+	Mailbox uuid.UUID `json:"mailbox"`
+}
+
+func (w *Worker) handle(ctx context.Context, task queue.Task) error {
+	ctx = actor.With(ctx, actor.System(audit.ProtoCLI))
+	var mp mailboxPayload
+	switch task.Type {
+	case TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota:
+		if err := json.Unmarshal(task.Payload, &mp); err != nil || mp.Mailbox == uuid.Nil {
+			return fmt.Errorf("bad payload: %v", err)
+		}
+	}
+	switch task.Type {
+	case TaskPurgeTrash:
+		return w.purgeTrash(ctx, mp.Mailbox)
+	case TaskRemoveMailbox:
+		return w.removeMailbox(ctx, mp.Mailbox)
+	case TaskRecalcQuota:
+		_, err := w.idx.Recalculate(ctx, mp.Mailbox)
+		if errors.Is(err, index.ErrNotFound) {
+			return nil
+		}
+		return err
+	case TaskSearchIndex:
+		return nil // no search backend configured
+	case TaskAttachmentGC:
+		return w.attachmentGC(ctx)
+	case TaskPurgeAudit:
+		return w.purgeAudit(ctx)
+	case TaskOrphanSweep:
+		return w.orphanSweep(ctx)
+	}
+	return fmt.Errorf("unknown task type %q", task.Type)
+}
+
+// ---- handlers ----
+
+// purgeTrash deletes the message objects of due retention entries unless
+// the mailbox is on hold or within the post-hold grace period.
+func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
+	if v, err := w.ids.GetMailbox(ctx, mb); err == nil {
+		if v.Value.Hold != nil {
+			w.log.Debug("purge skipped: on hold", slog.String("mailbox", mb.String()))
+			return nil
+		}
+		if v.Value.Released != nil && w.Now().Sub(*v.Value.Released) < w.cfg.PostHoldGrace {
+			w.log.Debug("purge skipped: post-hold grace", slog.String("mailbox", mb.String()))
+			return nil
+		}
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		return err
+	}
+	purged := 0
+	for {
+		entries, keys, more, err := w.idx.ListRetention(ctx, mb, w.Now(), w.cfg.ScanBatch)
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			break
+		}
+		for i, e := range entries {
+			if err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
+				return err
+			}
+			if err := w.idx.DropRetention(ctx, mb, keys[i]); err != nil {
+				return err
+			}
+			purged++
+		}
+		if !more {
+			break
+		}
+	}
+	if purged > 0 {
+		w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "purge", Detail: fmt.Sprintf("messages=%d", purged)})
+	}
+	return nil
+}
+
+// deleteMessage removes attachment references and both message objects.
+func (w *Worker) deleteMessage(ctx context.Context, mb, msg uuid.UUID) error {
+	skel, err := w.msgs.GetRaw(ctx, mb, msg)
+	if err == nil {
+		refs, _ := mail.SkeletonRefs(skel)
+		for _, h := range refs {
+			if err := w.atts.RemoveRef(ctx, h, mb, msg); err != nil {
+				return err
+			}
+		}
+	} else if !errors.Is(err, message.ErrNotFound) {
+		return err
+	}
+	return w.msgs.Delete(ctx, mb, msg)
+}
+
+// removeMailbox purges every object of a mailbox whose record is gone.
+func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
+	if v, err := w.ids.GetMailbox(ctx, mb); err == nil {
+		if v.Value.Hold != nil {
+			return fmt.Errorf("mailbox %s on hold; refusing removal", mb)
+		}
+		return fmt.Errorf("mailbox %s still exists; refusing removal", mb)
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		return err
+	}
+	n := 0
+	root, err := w.idx.GetRoot(ctx, mb)
+	if err == nil {
+		for _, f := range root.Folders {
+			for {
+				recs, _, err := w.idx.ListFolder(ctx, mb, f.ID, 0, w.cfg.ScanBatch)
+				if err != nil || len(recs) == 0 {
+					break
+				}
+				for _, r := range recs {
+					if err := w.deleteMessage(ctx, mb, r.MessageID); err != nil {
+						return err
+					}
+					if _, err := w.idx.Remove(ctx, mb, f.ID, r.UID, "remove-mailbox", w.Now()); err != nil {
+						return err
+					}
+					n++
+				}
+			}
+		}
+		entries, keys, _, err := w.idx.ListRetention(ctx, mb, time.Time{}, 0)
+		if err != nil {
+			return err
+		}
+		for i, e := range entries {
+			if err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
+				return err
+			}
+			if err := w.idx.DropRetention(ctx, mb, keys[i]); err != nil {
+				return err
+			}
+			n++
+		}
+		if err := w.idx.DeleteAll(ctx, mb); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, index.ErrNotFound) {
+		return err
+	}
+	// Anything left in the messages pool for this mailbox (orphans).
+	var leftover []uuid.UUID
+	if err := w.msgs.List(ctx, func(i message.Info) error {
+		if i.Mailbox == mb {
+			leftover = append(leftover, i.Message)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, id := range leftover {
+		if err := w.deleteMessage(ctx, mb, id); err != nil {
+			return err
+		}
+		n++
+	}
+	w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "remove-mailbox", Detail: fmt.Sprintf("messages=%d", n)})
+	return nil
+}
+
+// attachmentGC deletes attachment objects nobody references any more.
+func (w *Worker) attachmentGC(ctx context.Context) error {
+	var hashes []string
+	if err := w.atts.List(ctx, func(h string) error { hashes = append(hashes, h); return nil }); err != nil {
+		return err
+	}
+	deleted := 0
+	for _, h := range hashes {
+		ok, err := w.atts.DeleteIfUnreferenced(ctx, h, w.cfg.AttachmentGCGrace)
+		if err != nil {
+			return err
+		}
+		if ok {
+			deleted++
+		}
+	}
+	w.log.Info("attachment gc", slog.Int("scanned", len(hashes)), slog.Int("deleted", deleted))
+	return nil
+}
+
+// purgeAudit drops audit objects past the retention period.
+func (w *Worker) purgeAudit(ctx context.Context) error {
+	cutoff := w.Now().Add(-w.cfg.AuditRetention)
+	days := 60
+	n, err := w.audit.PurgeBefore(ctx, uuid.Nil, cutoff, days)
+	if err != nil {
+		return err
+	}
+	err = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+		// Mailboxes on hold keep everything.
+		if v, err := w.ids.GetMailbox(ctx, id); err == nil && v.Value.Hold != nil {
+			return nil
+		}
+		m, err := w.audit.PurgeBefore(ctx, id, cutoff, days)
+		n += m
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	w.log.Info("audit purge", slog.Int("objects", n))
+	return nil
+}
+
+// orphanSweep removes message objects that never reached an index and are
+// not waiting in a retention set.
+func (w *Worker) orphanSweep(ctx context.Context) error {
+	cutoff := w.Now().Add(-w.cfg.OrphanAge)
+	retention := map[uuid.UUID]map[uuid.UUID]bool{}
+	inRetention := func(mb, msg uuid.UUID) bool {
+		set, ok := retention[mb]
+		if !ok {
+			set = map[uuid.UUID]bool{}
+			entries, _, _, err := w.idx.ListRetention(ctx, mb, time.Time{}, 0)
+			if err == nil {
+				for _, e := range entries {
+					set[e.MessageID] = true
+				}
+			}
+			retention[mb] = set
+		}
+		return set[msg]
+	}
+	var orphans []message.Info
+	err := w.msgs.List(ctx, func(i message.Info) error {
+		if i.Created.After(cutoff) {
+			return nil
+		}
+		if _, err := w.idx.Locate(ctx, i.Mailbox, i.Message); err == nil {
+			return nil
+		} else if !errors.Is(err, index.ErrNotFound) {
+			return err
+		}
+		if inRetention(i.Mailbox, i.Message) {
+			return nil
+		}
+		orphans = append(orphans, i)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, o := range orphans {
+		if err := w.deleteMessage(ctx, o.Mailbox, o.Message); err != nil {
+			return err
+		}
+	}
+	w.log.Info("orphan sweep", slog.Int("removed", len(orphans)))
+	return nil
+}
+
+// ---- scheduler ----
+
+const schedulerOID = "scheduler"
+
+// schedule, when this worker holds the scheduler lock, enqueues periodic
+// tasks whose interval has elapsed. Timestamps live in the scheduler
+// object's omap so a new leader continues where the old one stopped.
+func (w *Worker) schedule(ctx context.Context) {
+	if err := w.lock.Lock(ctx, schedulerOID, "leader", w.ID, 2*w.cfg.PollInterval+time.Minute); err != nil {
+		return // somebody else leads
+	}
+	now := w.Now()
+	due := func(name string, every time.Duration) bool {
+		m, err := w.lock.OmapGet(ctx, schedulerOID, []string{name})
+		if err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return false
+		}
+		if v, ok := m[name]; ok {
+			var last time.Time
+			if last.UnmarshalText(v) == nil && now.Sub(last) < every {
+				return false
+			}
+		}
+		b, _ := now.UTC().MarshalText()
+		_, _ = w.lock.Write(ctx, schedulerOID, rados.NewWriteTx().OmapSet(map[string][]byte{name: b}))
+		return true
+	}
+	if due("purge", w.cfg.PurgeInterval) {
+		n := 0
+		_ = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+			if _, err := w.queue.Enqueue(ctx, TaskPurgeTrash, mailboxPayload{Mailbox: id}, time.Time{}); err == nil {
+				n++
+			}
+			return nil
+		})
+		w.log.Info("scheduled trash purges", slog.Int("mailboxes", n))
+	}
+	for _, typ := range []string{TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep} {
+		if due(typ, w.cfg.GCInterval) {
+			_, _ = w.queue.Enqueue(ctx, typ, struct{}{}, time.Time{})
+			w.log.Info("scheduled", slog.String("task", typ))
+		}
+	}
+}
+
+// SchedulerLockHolder reports who holds the scheduler lock (for status).
+func SchedulerLockHolder(ctx context.Context, indexPool rados.IOContext) (string, error) {
+	m, err := indexPool.OmapGet(ctx, schedulerOID, []string{"purge"})
+	if err != nil {
+		return "", err
+	}
+	return string(m["purge"]), nil
+}

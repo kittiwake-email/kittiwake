@@ -34,10 +34,31 @@ import (
 	"dovetail/store/message"
 	"dovetail/store/queue"
 	"dovetail/store/session"
+	"dovetail/worker"
 )
 
 // Version is set at build time.
 var Version = "dev"
+
+// ModeFunc starts a mode. It must mark the mode handled via MarkHandled and
+// register closers with AddCloser.
+type ModeFunc func(ctx context.Context, a *App, start func(name string, f func() error)) error
+
+// MarkHandled records that a mode was started by an ExtraModes func.
+func (a *App) MarkHandled(mode string) {
+	a.mu.Lock()
+	if a.handled == nil {
+		a.handled = map[string]bool{}
+	}
+	a.handled[mode] = true
+	a.mu.Unlock()
+}
+
+// AddCloser registers a shutdown function.
+func (a *App) AddCloser(f func(context.Context) error) { a.addCloser(f) }
+
+// Listen opens a listener with the configured PROXY protocol mode.
+func Listen(l config.Listener) (net.Listener, error) { return listen(l) }
 
 // Stores bundles every store.
 type Stores struct {
@@ -69,6 +90,10 @@ type App struct {
 	// APIHandler is mounted by the api mode; set by cmd (keeps app free of
 	// the JMAP/REST packages' construction details).
 	APIHandler http.Handler
+	// ExtraModes lets cmd register protocol servers (IMAP, POP3) without
+	// app importing them. Each is called from Run with the start helper.
+	ExtraModes []ModeFunc
+	handled    map[string]bool
 
 	mu      sync.Mutex
 	closers []func(context.Context) error
@@ -236,8 +261,28 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, m := range []string{"imap", "pop3", "worker"} {
-		if a.Cfg.HasMode(m) {
+	if a.Cfg.HasMode("worker") {
+		idxp, err := a.Client.Pool(a.Cfg.Ceph.Pools.Index)
+		if err != nil {
+			return err
+		}
+		w := worker.New(worker.Config{
+			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention,
+		}, worker.Stores{
+			Identity: a.Stores.Identity, Index: a.Stores.Index, Messages: a.Stores.Messages,
+			Attachments: a.Stores.Attachments, Audit: a.Stores.Audit, Queue: a.Stores.Queue,
+		}, a.Services.Auditor, idxp, a.Log)
+		wctx, wcancel := context.WithCancel(ctx)
+		a.addCloser(func(context.Context) error { wcancel(); return nil })
+		start("worker", func() error { return w.Run(wctx) })
+	}
+	for _, m := range a.ExtraModes {
+		if err := m(ctx, a, start); err != nil {
+			return err
+		}
+	}
+	for _, m := range []string{"imap", "pop3"} {
+		if a.Cfg.HasMode(m) && !a.handled[m] {
 			a.Log.Warn("mode not implemented yet; ignoring", slog.String("mode", m))
 		}
 	}
