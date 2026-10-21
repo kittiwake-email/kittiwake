@@ -1,0 +1,476 @@
+// Package delivery stores inbound (LMTP) and imported (JMAP, IMAP APPEND,
+// Sent copies) messages: recipient resolution, domain/mailbox/hold/quota
+// checks, parsing, attachment dedup, message objects, index entry, change
+// log, search events, notifications and audit. See README.md "LMTP
+// delivery" and "Delivery ordering and crash safety".
+package delivery
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"dovetail/mail"
+	"dovetail/service/actor"
+	"dovetail/service/auditor"
+	"dovetail/store/attach"
+	"dovetail/store/audit"
+	"dovetail/store/identity"
+	"dovetail/store/index"
+	"dovetail/store/message"
+	"dovetail/store/queue"
+)
+
+// Errors. LMTP maps them to reply codes with Status.
+var (
+	ErrUnknownDomain    = errors.New("delivery: unknown or disabled domain")
+	ErrUnknownRecipient = errors.New("delivery: no such recipient")
+	ErrMailboxDisabled  = errors.New("delivery: mailbox disabled")
+	ErrHold             = errors.New("delivery: mailbox on hold, delivery suspended")
+	ErrOverQuota        = errors.New("delivery: mailbox over quota")
+	ErrTooLarge         = errors.New("delivery: message too large")
+	ErrAliasLoop        = errors.New("delivery: alias loop or too deep")
+	ErrNoFolder         = errors.New("delivery: folder not found")
+)
+
+// Config for the service.
+type Config struct {
+	MaxMessageSize    int64
+	InlineMax         int64
+	ForceFullRaw      bool
+	SpamHeader        string
+	SpamValue         string
+	MaxAliasDepth     int
+	DefaultQuota      identity.QuotaLimits
+	OverQuotaTempFail bool
+	DisabledTempFail  bool
+}
+
+// Task types this service enqueues.
+const (
+	TaskSearchIndex = "search-index"
+)
+
+// SearchIndexTask is the payload of a search-index task.
+type SearchIndexTask struct {
+	Mailbox uuid.UUID `json:"mailbox"`
+	Message uuid.UUID `json:"message"`
+	Op      string    `json:"op"` // "index" or "remove"
+}
+
+// Service is the delivery service.
+type Service struct {
+	ids   *identity.Store
+	idx   *index.Store
+	msgs  *message.Store
+	atts  *attach.Store
+	queue *queue.Store
+	audit *auditor.Auditor
+	log   *slog.Logger
+	cfg   Config
+	Now   func() time.Time
+}
+
+// New returns the service. queue may be nil (events dropped).
+func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attach.Store, q *queue.Store, aud *auditor.Auditor, log *slog.Logger, cfg Config) *Service {
+	if cfg.MaxAliasDepth <= 0 {
+		cfg.MaxAliasDepth = 5
+	}
+	if cfg.MaxMessageSize <= 0 {
+		cfg.MaxMessageSize = 50 << 20
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Service{ids: ids, idx: idx, msgs: msgs, atts: atts, queue: q, audit: aud, log: log, cfg: cfg, Now: time.Now}
+}
+
+// Target is one mailbox an address resolves to.
+type Target struct {
+	MailboxID uuid.UUID
+	// Via describes the resolution: the account username, the alias
+	// address, or "@domain" for the catch-all.
+	Via string
+}
+
+// Resolve maps a recipient address to mailboxes: exact account → alias →
+// catch-all → reject. Disabled domains and mailboxes are reported.
+func (s *Service) Resolve(ctx context.Context, address string) ([]Target, error) {
+	addr, domain, err := identity.NormalizeAddress(address)
+	if err != nil {
+		return nil, ErrUnknownRecipient
+	}
+	d, err := s.ids.GetDomain(ctx, domain)
+	if err != nil {
+		if errors.Is(err, identity.ErrNotFound) {
+			return nil, ErrUnknownDomain
+		}
+		return nil, err
+	}
+	if !d.Value.Enabled {
+		return nil, ErrUnknownDomain
+	}
+	seen := map[string]bool{}
+	return s.resolve(ctx, addr, domain, 0, seen)
+}
+
+func (s *Service) resolve(ctx context.Context, addr, domain string, depth int, seen map[string]bool) ([]Target, error) {
+	if depth > s.cfg.MaxAliasDepth || seen[addr] {
+		return nil, ErrAliasLoop
+	}
+	seen[addr] = true
+	// 1. Exact account.
+	if v, err := s.ids.GetAccountByUsername(ctx, addr); err == nil {
+		if v.Value.MailboxID != uuid.Nil {
+			return []Target{{MailboxID: v.Value.MailboxID, Via: v.Value.Username}}, nil
+		}
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		return nil, err
+	}
+	// 2. Alias, 3. catch-all.
+	for _, key := range []string{addr, "@" + domain} {
+		v, err := s.ids.GetAlias(ctx, key)
+		if err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if !v.Value.Enabled {
+			continue
+		}
+		var out []Target
+		for _, dst := range v.Value.Destinations {
+			if dst.MailboxID != uuid.Nil {
+				out = append(out, Target{MailboxID: dst.MailboxID, Via: key})
+				continue
+			}
+			_, ddom, err := identity.NormalizeAddress(dst.Address)
+			if err != nil {
+				continue
+			}
+			sub, err := s.resolve(ctx, dst.Address, ddom, depth+1, seen)
+			if err != nil {
+				if errors.Is(err, ErrUnknownRecipient) {
+					continue
+				}
+				return nil, err
+			}
+			out = append(out, sub...)
+		}
+		if len(out) > 0 {
+			return dedupTargets(out), nil
+		}
+	}
+	return nil, ErrUnknownRecipient
+}
+
+func dedupTargets(in []Target) []Target {
+	seen := map[uuid.UUID]bool{}
+	var out []Target
+	for _, t := range in {
+		if !seen[t.MailboxID] {
+			seen[t.MailboxID] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// CheckRecipient validates that the address can receive mail right now
+// (used by LMTP RCPT TO and the Postfix socketmap). It returns the targets
+// or the same errors Deliver would.
+func (s *Service) CheckRecipient(ctx context.Context, address string, size int64) ([]Target, error) {
+	targets, err := s.Resolve(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range targets {
+		if _, err := s.admission(ctx, t.MailboxID, size); err != nil {
+			return nil, err
+		}
+	}
+	return targets, nil
+}
+
+// admission checks mailbox enabled, hold and quota for an incoming size.
+func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (identity.Mailbox, error) {
+	v, err := s.ids.GetMailbox(ctx, mb)
+	if err != nil {
+		if errors.Is(err, identity.ErrNotFound) {
+			return identity.Mailbox{}, ErrUnknownRecipient
+		}
+		return identity.Mailbox{}, err
+	}
+	m := v.Value
+	if !m.Enabled {
+		return m, ErrMailboxDisabled
+	}
+	if m.Hold != nil && !m.Hold.AcceptDelivery {
+		return m, ErrHold
+	}
+	if size > s.cfg.MaxMessageSize {
+		return m, ErrTooLarge
+	}
+	limits := s.effectiveQuota(m.Quota)
+	if limits.HardBytes > 0 || limits.HardMessages > 0 {
+		root, err := s.idx.GetRoot(ctx, mb)
+		if err != nil && !errors.Is(err, index.ErrNotFound) {
+			return m, err
+		}
+		if err == nil {
+			if limits.HardBytes > 0 && root.Usage.Bytes+size > limits.HardBytes {
+				return m, ErrOverQuota
+			}
+			if limits.HardMessages > 0 && root.Usage.Messages+1 > limits.HardMessages {
+				return m, ErrOverQuota
+			}
+			if (limits.SoftBytes > 0 && root.Usage.Bytes+size > limits.SoftBytes) || (limits.SoftMessages > 0 && root.Usage.Messages+1 > limits.SoftMessages) {
+				s.log.WarnContext(ctx, "mailbox over soft quota", slog.String("mailbox", mb.String()),
+					slog.Int64("bytes", root.Usage.Bytes), slog.Int64("messages", root.Usage.Messages))
+			}
+		}
+	}
+	return m, nil
+}
+
+func (s *Service) effectiveQuota(q identity.QuotaLimits) identity.QuotaLimits {
+	d := s.cfg.DefaultQuota
+	if q.SoftBytes == 0 {
+		q.SoftBytes = d.SoftBytes
+	}
+	if q.HardBytes == 0 {
+		q.HardBytes = d.HardBytes
+	}
+	if q.SoftMessages == 0 {
+		q.SoftMessages = d.SoftMessages
+	}
+	if q.HardMessages == 0 {
+		q.HardMessages = d.HardMessages
+	}
+	return q
+}
+
+// EffectiveQuota returns the limits that apply to a mailbox.
+func (s *Service) EffectiveQuota(m identity.Mailbox) identity.QuotaLimits {
+	return s.effectiveQuota(m.Quota)
+}
+
+// Request is an inbound delivery.
+type Request struct {
+	Recipient string
+	Sender    string // MAIL FROM, for audit
+	Raw       []byte
+	ClientIP  string // the MTA's address
+}
+
+// Delivered describes one stored copy.
+type Delivered struct {
+	MailboxID uuid.UUID
+	MessageID uuid.UUID
+	FolderID  string
+	UID       uint32
+	Via       string
+}
+
+// Deliver stores an inbound message in every mailbox the recipient resolves
+// to. It fails as a whole if any target refuses admission (checked before
+// anything is written), so the MTA gets one answer per recipient.
+func (s *Service) Deliver(ctx context.Context, req Request) ([]Delivered, error) {
+	if int64(len(req.Raw)) > s.cfg.MaxMessageSize {
+		return nil, ErrTooLarge
+	}
+	targets, err := s.Resolve(ctx, req.Recipient)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range targets {
+		if _, err := s.admission(ctx, t.MailboxID, int64(len(req.Raw))); err != nil {
+			return nil, err
+		}
+	}
+	parsed, err := mail.Parse(req.Raw, mail.Options{InlineMax: s.cfg.InlineMax, ForceFullRaw: s.cfg.ForceFullRaw})
+	if err != nil {
+		return nil, fmt.Errorf("delivery: parse: %w", err)
+	}
+	spam := s.isSpam(parsed.Doc)
+	sys := actor.System(audit.ProtoLMTP)
+	sys.ClientIP = req.ClientIP
+	actx := actor.With(ctx, sys)
+	var out []Delivered
+	for _, t := range targets {
+		root, err := s.idx.EnsureRoot(ctx, t.MailboxID)
+		if err != nil {
+			return out, err
+		}
+		folder := root.FolderByRole(index.RoleInbox)
+		if spam {
+			if j := root.FolderByRole(index.RoleJunk); j != nil {
+				folder = j
+			}
+		}
+		if folder == nil {
+			return out, ErrNoFolder
+		}
+		d, err := s.store(actx, t.MailboxID, folder.ID, parsed, nil, s.Now().UTC())
+		if err != nil {
+			s.audit.Log(actx, auditor.Event{Mailbox: t.MailboxID, Action: "deliver", Target: req.Recipient, Detail: "from=" + req.Sender + " error=" + err.Error(), Result: audit.ResultError})
+			return out, err
+		}
+		d.Via = t.Via
+		out = append(out, d)
+		s.audit.Log(actx, auditor.Event{Mailbox: t.MailboxID, Action: "deliver", Target: fmt.Sprintf("%s/%d", d.FolderID, d.UID),
+			Detail: fmt.Sprintf("rcpt=%s via=%s from=%s msg=%s spam=%v", req.Recipient, t.Via, req.Sender, d.MessageID, spam)})
+	}
+	return out, nil
+}
+
+func (s *Service) isSpam(doc *mail.Document) bool {
+	if s.cfg.SpamHeader == "" {
+		return false
+	}
+	for _, h := range doc.Headers {
+		if strings.EqualFold(h.Name, s.cfg.SpamHeader) && strings.EqualFold(strings.TrimSpace(h.Value), s.cfg.SpamValue) {
+			return true
+		}
+	}
+	return false
+}
+
+// Import stores a message supplied by the user (JMAP Email/import, IMAP
+// APPEND, drafts, Sent copies) into a folder with the given flags. The
+// actor in ctx is audited. Quota and hold are enforced.
+func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw []byte, flags []string, internalDate time.Time) (Delivered, error) {
+	if int64(len(raw)) > s.cfg.MaxMessageSize {
+		return Delivered{}, ErrTooLarge
+	}
+	m, err := s.admission(ctx, mb, int64(len(raw)))
+	if err != nil && !errors.Is(err, ErrHold) {
+		return Delivered{}, err
+	}
+	if m.Hold != nil {
+		return Delivered{}, ErrHold // user mutations are refused on hold
+	}
+	parsed, err := mail.Parse(raw, mail.Options{InlineMax: s.cfg.InlineMax, ForceFullRaw: s.cfg.ForceFullRaw})
+	if err != nil {
+		return Delivered{}, fmt.Errorf("delivery: parse: %w", err)
+	}
+	if _, err := s.idx.EnsureRoot(ctx, mb); err != nil {
+		return Delivered{}, err
+	}
+	if internalDate.IsZero() {
+		internalDate = s.Now().UTC()
+	}
+	d, err := s.store(ctx, mb, folderID, parsed, flags, internalDate)
+	if err != nil {
+		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "append", Target: folderID, Detail: err.Error(), Result: audit.ResultError})
+		return Delivered{}, err
+	}
+	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "append", Target: fmt.Sprintf("%s/%d", d.FolderID, d.UID), Detail: "msg=" + d.MessageID.String()})
+	return d, nil
+}
+
+// store writes attachments, message objects, the index entry and refs, in
+// the crash-safe order from the README.
+func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, parsed *mail.Parsed, flags []string, internalDate time.Time) (Delivered, error) {
+	msgID := uuid.New()
+	// 1. Attachments (content), without references yet.
+	for _, a := range parsed.Attachments {
+		if err := s.atts.Put(ctx, a.Hash, a.Data, a.ContentType, mb, msgID); err != nil {
+			return Delivered{}, fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
+		}
+	}
+	// 2+3. Message JSON and raw skeleton.
+	docJSON, err := json.Marshal(parsed.Doc)
+	if err != nil {
+		return Delivered{}, err
+	}
+	if err := s.msgs.Put(ctx, mb, msgID, docJSON, parsed.Skeleton); err != nil {
+		return Delivered{}, fmt.Errorf("delivery: message objects: %w", err)
+	}
+	// 4. Index entry (commit point).
+	rec := recordFor(msgID, parsed.Doc, flags, internalDate)
+	rec, err = s.idx.Append(ctx, mb, folderID, rec)
+	if err != nil {
+		if errors.Is(err, index.ErrNotFound) {
+			err = ErrNoFolder
+		}
+		// Leave the objects for the orphan sweep; do not try to be clever here.
+		return Delivered{}, err
+	}
+	// 5. Attachment references are already recorded by Put (idempotent omap
+	// keys), so nothing to do; a crash before here leaves refs that the GC
+	// treats as live until the orphan sweep removes the message.
+	// Events and notifications.
+	if s.queue != nil {
+		if _, err := s.queue.Enqueue(ctx, TaskSearchIndex, SearchIndexTask{Mailbox: mb, Message: msgID, Op: "index"}, time.Time{}); err != nil {
+			s.log.WarnContext(ctx, "enqueue search-index failed", slog.String("error", err.Error()))
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{"type": "email", "folder": folderID, "uid": rec.UID, "modseq": rec.ModSeq})
+	if err := s.idx.Notify(ctx, mb, payload); err != nil {
+		s.log.DebugContext(ctx, "notify failed", slog.String("error", err.Error()))
+	}
+	return Delivered{MailboxID: mb, MessageID: msgID, FolderID: folderID, UID: rec.UID}, nil
+}
+
+// recordFor builds the index record from the parsed document.
+func recordFor(msgID uuid.UUID, doc *mail.Document, flags []string, internalDate time.Time) index.Record {
+	rec := index.Record{
+		MessageID: msgID, Flags: flags, Size: doc.Size, InternalDate: internalDate,
+		Subject: doc.Subject, Date: doc.Date, MsgIDHeader: doc.MessageID, InReplyTo: doc.InReplyTo, References: doc.References,
+		HasAttachments: doc.HasAttachments, Preview: doc.Preview,
+	}
+	if len(doc.From) > 0 {
+		f := doc.From[0]
+		rec.FromEmail = f.Email
+		if f.Name != "" {
+			rec.From = f.Name + " <" + f.Email + ">"
+		} else {
+			rec.From = f.Email
+		}
+	}
+	if rec.Date.IsZero() {
+		rec.Date = internalDate
+	}
+	if len(rec.Preview) > 160 {
+		rec.Preview = rec.Preview[:160]
+	}
+	return rec
+}
+
+// Status maps a delivery error to an SMTP/LMTP reply: code, enhanced status
+// code and text. Unknown errors are temporary failures.
+func (s *Service) Status(err error) (code int, enhanced, text string) {
+	switch {
+	case err == nil:
+		return 250, "2.0.0", "OK"
+	case errors.Is(err, ErrUnknownDomain):
+		return 550, "5.1.2", "Domain not handled here"
+	case errors.Is(err, ErrUnknownRecipient), errors.Is(err, ErrAliasLoop):
+		return 550, "5.1.1", "No such user"
+	case errors.Is(err, ErrMailboxDisabled):
+		if s.cfg.DisabledTempFail {
+			return 450, "4.2.1", "Mailbox disabled, try again later"
+		}
+		return 550, "5.2.1", "Mailbox disabled"
+	case errors.Is(err, ErrHold):
+		return 450, "4.2.1", "Mailbox temporarily not accepting mail"
+	case errors.Is(err, ErrOverQuota):
+		if s.cfg.OverQuotaTempFail {
+			return 452, "4.2.2", "Mailbox full, try again later"
+		}
+		return 552, "5.2.2", "Mailbox full"
+	case errors.Is(err, ErrTooLarge):
+		return 552, "5.3.4", "Message too large"
+	case errors.Is(err, ErrNoFolder):
+		return 451, "4.3.0", "Mailbox folder missing"
+	}
+	return 451, "4.3.0", "Temporary failure"
+}
