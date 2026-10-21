@@ -62,7 +62,14 @@ These are settled. Do not design around them.
   POP3, JMAP later.
 - **Quotas:** soft and hard limits on size and message count; hard limit rejects at LMTP.
 - **Retention:** deleted mail goes to Trash and is purged by a worker after a configurable
-  period.
+  period. IMAP EXPUNGE / POP3 DELE are lazy: the message leaves the index but is kept in a
+  retention set for the same period. Nothing is destroyed immediately.
+- **Spam routing:** a configurable header/value from the MTA files the message into Junk at
+  LMTP time. No Sieve-style user rules.
+- **Brute-force protection** is HAProxy's job; just log failed logins with the client address.
+- **Attachment refcounts** are omap keys per referencing message on the hash-named attachment
+  object. **Delivery order:** attachments, message JSON, raw, index entry (commit point), refs.
+- **IMAP IDLE / push** uses RADOS watch/notify on the mailbox root object.
 - **No TLS in the daemon** (HAProxy terminates it). **IPv6-first.** Single YAML config file.
 - **Observability:** structured JSON logging and Prometheus metrics in every component.
 

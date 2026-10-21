@@ -92,6 +92,12 @@ endpoints. Postfix is expected to enforce its own limit first.
 
 TLS is not handled by this daemon; a proxy like HAProxy does this.
 
+## Brute-force protection
+
+Dovetail does not rate-limit or lock out failed logins; stateless daemons have no shared
+counters. This is left to HAProxy (and tools like fail2ban on the structured logs). Every
+failed authentication is logged with the client address so those tools have what they need.
+
 ## IPv6-first
 
 Assume an IPv6-only environment. IPv4 is nice to have, not mandatory.
@@ -222,6 +228,18 @@ build conversation views and IMAP can offer THREAD later without fetching messag
 Deleted messages go to Trash and are purged after a configurable trash period by a background
 worker.
 
+IMAP EXPUNGE (and POP3 DELE) never destroys data immediately. An expunged message is removed
+from its folder index and parked in the retention set of the mailbox, where it stays for the
+same retention period before the worker purges it (lazy expunge, as Dovecot calls it). Deleting
+from Trash via the API behaves the same way.
+
+## Spam routing
+
+If the MTA (Postfix with rspamd, SpamAssassin, …) marks a message as spam, LMTP delivery files
+it into the Junk folder instead of INBOX. The header name and the value that means "spam" are
+configurable (for example `X-Spam-Flag: YES` or `X-Spam: Yes`). User-defined filter rules
+(Sieve-style) are not in scope for now.
+
 ## Workers and background tasks
 
 The `worker` mode executes background tasks:
@@ -244,6 +262,11 @@ Each mailbox has quotas:
 
 Exceeding a soft limit produces warnings (logged, exposed via API); exceeding a hard limit
 rejects delivery at LMTP time.
+
+Limits are per mailbox and come from SQL (columns on the mailbox row, read through a
+configurable query); a config-wide default applies when the row has no limit. Usage counters
+(bytes and message count) live in the mailbox root object in RADOS and are updated atomically
+with every delivery and deletion; a worker task can recalculate them from the folder indexes.
 
 # Mailboxes, Accounts and Domains
 
@@ -333,6 +356,8 @@ The daemon takes a single YAML file as configuration:
   - SQL queries, with variables such as username, domain, address
 - Outbound SMTP relay host
 - Trash retention period
+- Spam header name and value for Junk routing
+- Default quota limits
 - Maximum message size
 - Management listener (metrics, health)
 - Logging and metrics settings
