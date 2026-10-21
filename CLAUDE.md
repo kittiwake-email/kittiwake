@@ -55,7 +55,12 @@ These are settled. Do not design around them.
   (Dovecot-style scheme prefixes: bcrypt, argon2, SHA512-CRYPT, ...) and API tokens. Tokens
   are stored hashed (SHA-256), prefixed `dvt_`, need an expiration date and a comment, and
   may only narrow the account's roles. Admin accounts have the `admin` role and no mailbox.
-  IMAP/POP3 use passwords; the API uses basic auth or bearer tokens.
+  IMAP/POP3 use passwords or OAUTHBEARER/XOAUTH2 with a session access token.
+- **Sessions (OAuth 2.0 shaped, RFC 9700):** `POST /v1/oauth/token` with password gives a
+  15-minute Ed25519-signed JWT access token (verified locally by every daemon, no lookup) plus
+  an opaque refresh token stored hashed in RADOS (`sessions/<account-id>`), rotated on every
+  use with reuse detection. `POST /v1/oauth/revoke` (RFC 7009). Signing keys live in RADOS
+  (`keys/jwt`) and rotate. Keep the endpoint OAuth-standard so PKCE/OIDC can be added later.
 - **Sending:** `From` must be an address the account may use (SQL query). Sent copy goes to
   Sent. Relay failure = API error, nothing stored.
 - **Workers:** tasks have run-after, retry with backoff, dead-letter set. One worker holds a
