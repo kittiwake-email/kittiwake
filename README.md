@@ -211,7 +211,8 @@ reached an index. LMTP only acknowledges after the index write succeeds.
 - Raw skeleton or full raw: `<mailbox-uuid>/<message-uuid>.raw` in the messages pool
 - Attachment: `<sha256-hex>` in the attachments pool
 - Mailbox root: `<mailbox-uuid>` in the index pool
-- Sessions: `sessions/<account-id>` in the index pool; signing keys: `keys/jwt`
+- Sessions: `sessions/<account-id>` in the index pool; signing keys: `keys/jwt`; TOTP replay
+  state: `totp/<account-id>`
 - Folder index: `<mailbox-uuid>/<folder-id>` in the index pool
 - Task queues: `queue/<task-type>` in the index pool
 - Retention set (expunged and trashed messages waiting for purge): `<mailbox-uuid>/retention`
@@ -363,7 +364,8 @@ an admin-configurable SQL query, so a different schema can express the same thin
 
 **Accounts** are created and linked to a mailbox. Multiple accounts can point to the same
 mailbox, allowing multiple credentials to access one mailbox. An account consists of a username
-(usually the e-mail address) and zero or more passwords (allowing application passwords).
+(usually the e-mail address), zero or more passwords (each marked primary or application) and
+optionally a TOTP secret.
 
 ## Roles
 
@@ -417,7 +419,27 @@ hashes the presented token and looks it up through the configured query. They ar
 prefixed `dvt_` so they are recognisable in logs and secret scanners.
 
 **HTTP basic auth** with username and password is also accepted on the mailbox API for scripts
-and curl, but clients are expected to use sessions.
+and curl, but clients are expected to use sessions. Basic auth is refused for passwords that
+require TOTP.
+
+## Two-factor authentication (TOTP)
+
+Accounts can require a time-based one-time password (TOTP, RFC 6238) with their password:
+
+- The TOTP secret (and its parameters: digits, period, algorithm) is stored in SQL per account
+  and read through a configurable query. Whether TOTP is enabled is simply whether a secret
+  exists. Enrolment and recovery codes are managed outside Dovetail, like passwords.
+- Each password in SQL has a kind: **primary** or **application**. When an account has a TOTP
+  secret, a primary password is only accepted together with a valid code; application
+  passwords never require a code (that is what they are for).
+- At the token endpoint the client sends the code in a `totp_code` field. If the password is
+  correct but the code is missing, the response is the error `totp_required` so the client can
+  prompt for it; a wrong code is a failed login and is audited as such.
+- IMAP and POP3 cannot carry a code. On those protocols a primary password that requires TOTP
+  is rejected; clients must use an application password or OAUTHBEARER with a session token.
+- Codes are verified with a configurable clock skew window (default one period either way).
+  Replay of the same code within its window is rejected; the last used time step is recorded
+  per account in RADOS (`totp/<account-id>` in the index pool), since SQL is read-only.
 
 ## Credentials per protocol
 

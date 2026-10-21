@@ -56,6 +56,10 @@ These are settled. Do not design around them.
   are stored hashed (SHA-256), prefixed `dvt_`, need an expiration date and a comment, and
   may only narrow the account's roles. Admin accounts have the `admin` role and no mailbox.
   IMAP/POP3 use passwords or OAUTHBEARER/XOAUTH2 with a session access token.
+- **TOTP (RFC 6238):** secret in SQL per account. Passwords are `primary` or `application`;
+  with a TOTP secret present, primary passwords need a code (`totp_code` at the token
+  endpoint, error `totp_required` when missing) and are rejected on IMAP/POP3; application
+  passwords never need a code. Replay state in RADOS `totp/<account-id>`.
 - **Sessions (OAuth 2.0 shaped, RFC 9700):** `POST /v1/oauth/token` with password gives a
   15-minute Ed25519-signed JWT access token (verified locally by every daemon, no lookup) plus
   an opaque refresh token stored hashed in RADOS (`sessions/<account-id>`), rotated on every
