@@ -72,9 +72,14 @@ These are settled. Do not design around them.
 - **SQL lookups are admin-configurable queries** with variables (`%{username}`, `%{domain}`,
   `%{address}`), Dovecot-style; a default schema must work out of the box. Expose as many
   lookups as possible as queries.
-- **Protocols:** LMTP inbound (one recipient per transaction), REST (primary; OpenAPI spec
-  kept in the repo; separate mailbox API and admin API), IMAP4rev1 + IDLE, UIDPLUS, MOVE,
-  POP3, JMAP later.
+- **Protocols:** LMTP inbound (one recipient per transaction), **JMAP is the mailbox API**
+  (RFC 8620/8621, plus 8887 WebSocket, 9425 Quotas, 9404 Blob; later 9610 Contacts and
+  Calendars). No custom mailbox REST API. A small custom REST surface (OpenAPI spec in repo)
+  covers only OAuth/session/TOTP endpoints and the admin API. IMAP4rev1 + IDLE, UIDPLUS,
+  MOVE; POP3 INBOX only. The JMAP server layer is written in this repo (no mature Go lib).
+- **Change tracking:** mailbox-wide `modseq` in the root object, modseq on every index
+  record, bounded change log `<mailbox>/changes` keyed by modseq. Needed by JMAP `/changes`
+  and later IMAP CONDSTORE/QRESYNC. Every mutation must bump modseq and append to the log.
 - **Quotas:** soft and hard limits on size and message count; hard limit rejects at LMTP.
 - **Retention:** deleted mail goes to Trash and is purged by a worker after a configurable
   period. IMAP EXPUNGE / POP3 DELE are lazy: the message leaves the index but is kept in a
@@ -103,8 +108,10 @@ These are settled. Do not design around them.
 ## Roadmap
 
 Milestone 1: config loading, SQL auth/lookup layer, LMTP delivery into RADOS (parse,
-attachments, index), REST mailbox API read paths. Then IMAP/POP3, sending, workers, admin API,
-search backend, integration tests, JMAP.
+attachments, index, change log), sessions/TOTP, JMAP read side (session resource,
+Mailbox/get, Email/get, Email/query, Email/changes, blob download). Then JMAP write side and
+push, IMAP/POP3, workers, admin API, search backend, integration tests, DAV and JMAP
+contacts/calendars.
 
 ## Reference implementations
 

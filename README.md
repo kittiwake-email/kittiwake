@@ -31,7 +31,7 @@ separately scalable component:
 - `lmtp` – inbound delivery from the MTA
 - `imap` – IMAP server for legacy clients
 - `pop3` – POP3 server for legacy clients
-- `api` – REST API (mailbox API and admin API)
+- `api` – JMAP (mailbox API), authentication endpoints and the admin REST API
 - `worker` – background task execution (trash purge, attachment garbage collection, quota
   recalculation, mailbox removal, …)
 - `dav` – CalDAV/CardDAV (future)
@@ -68,25 +68,26 @@ the internet before delivering it to this daemon. One recipient per LMTP transac
 Supported protocols:
 
 - LMTP (inbound)
-- REST API (primary interface)
+- **JMAP** (primary interface): the standard JSON mail API (RFC 8620 core, RFC 8621 mail)
 - IMAP: IMAP4rev1 plus IDLE, UIDPLUS and MOVE to start; more extensions later as needed
 - POP3: serves INBOX only; UIDL is derived from the folder UID and UIDVALIDITY; DELE is lazy
   (see Retention)
-- JMAP as an option (later)
 
 IMAP and POP3 must work but are not the primary target; they serve legacy clients. Each mailbox
-is fully accessible through the REST API, which is the basis for a modern webmail and a mobile
-app.
+is fully accessible through JMAP, which is the basis for a modern webmail and a mobile app.
+Dovetail does not invent its own mailbox API: JMAP already covers mailboxes, messages, threads,
+search, flags, blobs, sending, quotas and push, and its newer extensions cover contacts and
+calendars.
 
 ## Sending mail
 
-Sending is in scope. The REST API accepts outbound messages and submits them over SMTP to a
-configurable relay host (typically Postfix), optionally with SASL credentials. The platform does
+Sending is in scope. JMAP `EmailSubmission` accepts outbound messages and submits them over
+SMTP to a configurable relay host (typically Postfix), optionally with SASL credentials. The platform does
 not queue or retry outbound mail itself beyond the submission; that is the MTA's job. If the
 relay rejects or is unreachable the API returns an error and nothing is stored. A copy of every
 sent message is stored in the Sent folder, going through the same parse-and-store path as
-inbound mail. The mailbox API also supports appending an arbitrary message to a folder (drafts,
-imports, IMAP APPEND).
+inbound mail. Arbitrary messages can be added to a folder with JMAP `Email/import` or
+`Email/set` (drafts), and IMAP APPEND.
 
 The `From` address (and `Sender`, if present) must be one of the addresses the account is
 allowed to use, as returned by a configurable SQL query (normally the account's own address and
@@ -95,8 +96,8 @@ header naming the authenticated account so the MTA logs can be tied to the audit
 
 ## Message size limit
 
-A configurable maximum message size is enforced at LMTP and at the API append and send
-endpoints. Postfix is expected to enforce its own limit first.
+A configurable maximum message size is enforced at LMTP, JMAP blob upload, `Email/import` and
+`EmailSubmission`. Postfix is expected to enforce its own limit first.
 
 ## TLS
 
@@ -211,6 +212,7 @@ reached an index. LMTP only acknowledges after the index write succeeds.
 - Raw skeleton or full raw: `<mailbox-uuid>/<message-uuid>.raw` in the messages pool
 - Attachment: `<sha256-hex>` in the attachments pool
 - Mailbox root: `<mailbox-uuid>` in the index pool
+- Change log: `<mailbox-uuid>/changes` in the index pool, omap keyed by modseq
 - Sessions: `sessions/<account-id>` in the index pool; signing keys: `keys/jwt`; TOTP replay
   state: `totp/<account-id>`
 - Folder index: `<mailbox-uuid>/<folder-id>` in the index pool
@@ -229,9 +231,9 @@ object carries, with atomic compare-and-set and prefix listing).
 **Design:**
 
 - One **mailbox root object** per mailbox UUID in the index pool. It holds the folder list,
-  per-folder UIDVALIDITY and UIDNEXT counters and quota usage totals. Counters are advanced
-  with atomic RADOS write transactions so concurrent LMTP and API processes never hand out the
-  same UID.
+  per-folder UIDVALIDITY and UIDNEXT counters, the mailbox-wide `modseq` counter and quota
+  usage totals. Counters are advanced with atomic RADOS write transactions so concurrent LMTP
+  and API processes never hand out the same UID or modseq.
 - One **folder index object** per folder. Omap key is the zero-padded UID; value is a compact
   record with the message object name, flags, size, internal date (UTC) and a few list-view
   headers (subject, from, date) so listing a folder needs no message fetches.
@@ -249,8 +251,9 @@ matching over the index until the full-text search component exists.
 
 Full-text search will be required in the future, so the design plans for it from the start:
 
-- Search is behind a Go interface with a pluggable backend. The first backend is the simple
-  header matcher over the folder index; a real engine (for example OpenSearch, Meilisearch or an
+- Search is behind a Go interface with a pluggable backend, exposed through JMAP
+  `Email/query` filters and `SearchSnippet`. The first backend is the simple header matcher
+  over the folder index; a real engine (for example OpenSearch, Meilisearch or an
   embedded Bleve index) is added later as an optional, separately scalable component.
 - The parsed message JSON already contains the plain-text body and the attachment list, so an
   indexer never has to re-parse raw mail.
@@ -371,9 +374,9 @@ optionally a TOTP secret.
 
 Accounts and API tokens carry a set of roles. The role set is:
 
-- `read` – list folders, read messages and attachments, search
-- `write` – change flags, move/copy/delete messages, manage folders, append messages
-- `send` – submit outbound mail
+- `read` – list folders, read messages and attachments, search (JMAP get/query/changes)
+- `write` – change flags, move/copy/delete messages, manage folders, import messages (JMAP set)
+- `send` – submit outbound mail (JMAP `EmailSubmission`)
 - `admin` – admin API (never combined with a mailbox)
 
 A normal full-access account has `read`, `write` and `send`. A token's roles may only narrow
@@ -418,8 +421,8 @@ way, as a bearer token, and are stored **hashed** in SQL (SHA-256 of the token);
 hashes the presented token and looks it up through the configured query. They are random and
 prefixed `dvt_` so they are recognisable in logs and secret scanners.
 
-**HTTP basic auth** with username and password is also accepted on the mailbox API for scripts
-and curl, but clients are expected to use sessions. Basic auth is refused for passwords that
+**HTTP basic auth** with username and password is also accepted on JMAP for scripts and curl,
+but clients are expected to use sessions. Basic auth is refused for passwords that
 require TOTP.
 
 ## Two-factor authentication (TOTP)
@@ -448,8 +451,8 @@ Accounts can require a time-based one-time password (TOTP, RFC 6238) with their 
   SASL `OAUTHBEARER` mechanism (RFC 7628, plus Google-style `XOAUTH2` for client
   compatibility). This lets a mobile app that already holds a session use IMAP without ever
   storing the password.
-- The REST API authenticates with a bearer token (session access token or long-lived API
-  token) or HTTP basic auth.
+- JMAP and the REST endpoints authenticate with a bearer token (session access token or
+  long-lived API token) or HTTP basic auth.
 - Accounts and mailboxes have an `enabled` flag. A disabled account cannot log in. Delivery to
   a disabled mailbox is rejected with a permanent LMTP error by default (configurable to a
   temporary error).
@@ -467,7 +470,8 @@ room for them now:
   audit and retention machinery.
 - Object name prefixes `<mailbox-uuid>/cal/` and `<mailbox-uuid>/card/` are reserved.
 - The role set can grow with `calendar` and `contacts` roles.
-- A future `dav` mode serves CalDAV/CardDAV from the same binary.
+- A future `dav` mode serves CalDAV/CardDAV from the same binary; JMAP Contacts (RFC 9610)
+  and JMAP Calendars are added to the `api` mode at the same time.
 
 Nothing of this is built in the first milestones, but nothing in the mail design may block it.
 
@@ -516,17 +520,56 @@ When a message is delivered (by Postfix) the platform queries the database to re
 recipient address to a mailbox, checks the quota, stores the message in RADOS, updates the
 mailbox index and acknowledges delivery.
 
-# REST API
+# APIs
 
-The REST API is described by an OpenAPI specification that is maintained in this repository.
-All paths are versioned (`/v1/...`), list endpoints are paginated with cursors, and errors use
-a single JSON problem format. There are two distinct APIs:
+## Mailbox API: JMAP
 
-- **Mailbox API** – authenticated as an account (password or API token), scoped to that
-  account's mailbox and roles. Folders, messages, flags, search, attachments, sending.
-- **Admin API** – authenticated with an API token belonging to an account with the `admin`
-  role, for operating the platform. Because SQL is read-only, the admin API does not create
-  accounts or mailboxes. Scope:
+The mailbox API **is JMAP**. Rather than designing a custom REST API, Dovetail implements the
+IETF standard that was built for exactly this purpose (webmail and mobile clients) and is
+served by Fastmail, Cyrus, Stalwart and others:
+
+- RFC 8620 JMAP core: session resource at `/.well-known/jmap`, batched method calls, state
+  strings and `/changes` for efficient sync, blob upload/download, push via EventSource
+- RFC 8621 JMAP for Mail: `Mailbox`, `Thread`, `Email` (get/query/changes/set/import/parse),
+  `SearchSnippet`, `Identity`, `EmailSubmission` (sending), `VacationResponse` (later)
+- RFC 8887 JMAP over WebSocket (push and lower latency for mobile apps)
+- RFC 9425 JMAP Quotas
+- RFC 9404 JMAP Blob extensions
+- Later: RFC 9610 JMAP Contacts and the JMAP Calendars specification, alongside CardDAV and
+  CalDAV, so one API serves mail, contacts and calendars
+
+How JMAP maps onto the design:
+
+- JMAP `Mailbox` = folder; `Email` = message in the index plus the parsed JSON; `Thread` =
+  the threading headers already kept in the index; `blobId` = attachment hash or message
+  part; `Identity` = the From addresses the account may use (SQL query); `EmailSubmission` =
+  the SMTP relay; `Quota` = the mailbox quota; keywords (`$seen`, `$flagged`, …) = IMAP flags.
+- JMAP `StateChange` push is driven by the RADOS watch/notify on the mailbox root object.
+- JMAP authenticates with bearer tokens, which is exactly the session and API-token model
+  above.
+
+**Change tracking.** JMAP's `/changes` methods (and IMAP CONDSTORE/QRESYNC later) need every
+mailbox to have a monotonically increasing modification sequence and a change log. The mailbox
+root object keeps a `modseq` counter, each folder index record stores the modseq of its last
+change, and a bounded change log (`<mailbox-uuid>/changes` in the index pool, omap keyed by
+modseq) records created/updated/destroyed ids. Clients with a state older than the log's
+horizon get `cannotCalculateChanges` and resync.
+
+Because there is no mature JMAP server library in Go, the JMAP layer is written in this
+repository as its own module, with the JMAP method handlers as the only consumer of the
+mailbox storage interface besides IMAP and POP3.
+
+## Authentication REST endpoints
+
+A small custom REST surface, described by an OpenAPI specification in this repository, covers
+what JMAP does not: the OAuth token and revoke endpoints, session listing and revocation, and
+TOTP. Paths are versioned (`/v1/...`) and errors use a single JSON problem format.
+
+## Admin API
+
+A custom REST API (also in the OpenAPI specification), authenticated with an API token
+belonging to an account with the `admin` role, for operating the platform. Because SQL is
+read-only, the admin API does not create accounts or mailboxes. Scope:
   1. Mailbox inspection: storage usage, message and folder counts, quota status, index health
   2. Mailbox maintenance: verify or rebuild the index, force quota recalculation, purge Trash now
   3. Mailbox removal: delete all RADOS data for a mailbox removed from SQL
@@ -583,18 +626,21 @@ substitution.
 
 - Configuration loading
 - SQL auth and lookup layer with admin-configurable queries
-- LMTP delivery into RADOS (parsing, attachment extraction, index update)
-- REST mailbox API: read folders and messages
+- LMTP delivery into RADOS (parsing, attachment extraction, index update, change log)
+- Sessions: OAuth token endpoint, JWT access tokens, refresh tokens, TOTP
+- JMAP read side: session resource, `Mailbox/get`, `Email/get`, `Email/query`,
+  `Email/changes`, blob download
 
 ## Later
 
+- JMAP write side: `Email/set`, `Mailbox/set`, `Email/import`, `EmailSubmission`, push
+  (EventSource, WebSocket)
 - IMAP, POP3
-- Sending via SMTP relay
 - Workers: trash purge, attachment GC, quota recalculation
 - Admin API
 - Full-text search backend
 - Real integration tests against Ceph and MariaDB
-- JMAP
+- CalDAV/CardDAV and JMAP Contacts/Calendars
 
 # Inspiration
 
