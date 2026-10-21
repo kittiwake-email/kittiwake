@@ -44,6 +44,9 @@ type methodFunc func(ctx context.Context, req *requestState, args map[string]any
 type requestState struct {
 	createdIds map[string]string
 	responses  []invocation
+	// after holds implicit responses a method wants emitted right after its
+	// own (e.g. the Email/set that EmailSubmission/set triggers).
+	after []invocation
 }
 
 type invocation struct {
@@ -132,7 +135,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, c := range req.Using {
-		if !knownCapabilities[c] {
+		if !s.knownCapability(c) {
 			writeRequestError(w, http.StatusBadRequest, "unknownCapability", "unknown capability "+c, nil)
 			return
 		}
@@ -170,6 +173,11 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		st.responses = append(st.responses, invocation{name: call.name, args: result, callID: call.callID})
+		for _, extra := range st.after {
+			extra.callID = call.callID
+			st.responses = append(st.responses, extra)
+		}
+		st.after = nil
 	}
 	act := actor.From(ctx)
 	resp := response{MethodResponses: st.responses, SessionState: "0"}

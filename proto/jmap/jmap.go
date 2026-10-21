@@ -18,6 +18,7 @@ import (
 	"dovetail/service/actor"
 	"dovetail/service/delivery"
 	"dovetail/service/mailbox"
+	"dovetail/service/submit"
 )
 
 // Capability URNs.
@@ -39,6 +40,9 @@ type Config struct {
 	// session resource can mark the account read-only. Writes are refused by
 	// the mailbox service regardless.
 	HoldCheck func(ctx context.Context, mb uuid.UUID) bool
+	// Submit enables sending (Identity and EmailSubmission methods, the
+	// submission capability). nil = sending unsupported.
+	Submit *submit.Service
 }
 
 func (c *Config) defaults() {
@@ -91,6 +95,7 @@ func New(cfg Config, mb *mailbox.Service, del *delivery.Service, log *slog.Logge
 		"Quota/get":          s.quotaGet,
 		"Identity/get":       s.identityGet,
 	}
+	s.registerSubmission()
 	return s
 }
 
@@ -160,25 +165,34 @@ func (s *Server) session(ctx context.Context) map[string]any {
 		if s.cfg.HoldCheck != nil && s.cfg.HoldCheck(ctx, act.MailboxID) {
 			readOnly = true
 		}
+		acctCaps := map[string]any{
+			CapMail:  mailCap,
+			CapQuota: map[string]any{},
+		}
+		if s.submissionEnabled() {
+			acctCaps[CapSubmission] = map[string]any{"maxDelayedSend": 0, "submissionExtensions": map[string]any{}}
+			primary[CapSubmission] = id
+		}
 		accounts[id] = map[string]any{
-			"name":       act.Username,
-			"isPersonal": true,
-			"isReadOnly": readOnly,
-			"accountCapabilities": map[string]any{
-				CapMail:  mailCap,
-				CapQuota: map[string]any{},
-			},
+			"name":                act.Username,
+			"isPersonal":          true,
+			"isReadOnly":          readOnly,
+			"accountCapabilities": acctCaps,
 		}
 		primary[CapMail] = id
 		primary[CapQuota] = id
 		state = s.state(ctx, act.MailboxID)
 	}
+	caps := map[string]any{
+		CapCore:  coreCap,
+		CapMail:  map[string]any{},
+		CapQuota: map[string]any{},
+	}
+	if s.submissionEnabled() {
+		caps[CapSubmission] = map[string]any{"maxDelayedSend": 0, "submissionExtensions": map[string]any{}}
+	}
 	return map[string]any{
-		"capabilities": map[string]any{
-			CapCore:  coreCap,
-			CapMail:  map[string]any{},
-			CapQuota: map[string]any{},
-		},
+		"capabilities":    caps,
 		"accounts":        accounts,
 		"primaryAccounts": primary,
 		"username":        act.Username,

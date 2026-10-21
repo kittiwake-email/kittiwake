@@ -32,6 +32,8 @@ type fixture struct {
 	t     *testing.T
 	srv   *Server
 	ids   *identity.Store
+	idx   *index.Store
+	aud   *auditor.Auditor
 	del   *delivery.Service
 	mbsvc *mailbox.Service
 	mb    identity.Mailbox
@@ -60,15 +62,16 @@ func newFixture(t *testing.T) *fixture {
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
 	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
 	acct, _ := ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{"read", "write", "send"}, Enabled: true})
-	f := &fixture{t: t, ids: ids, del: del, mbsvc: mbsvc, mb: mb, acct: acct}
+	f := &fixture{t: t, ids: ids, idx: idx, aud: aud, del: del, mbsvc: mbsvc, mb: mb, acct: acct}
 	f.act = actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: mb.ID, Roles: acct.Roles, Protocol: "jmap", ClientIP: "::1"}
 	f.srv = New(Config{BaseURL: "https://mail.example.org", HoldCheck: func(ctx context.Context, id uuid.UUID) bool {
 		v, err := ids.GetMailbox(ctx, id)
 		return err == nil && v.Value.Hold != nil
 	}}, mbsvc, del, log)
 	mux := http.NewServeMux()
-	mux.Handle("/.well-known/jmap", f.withActor(f.srv.SessionHandler()))
-	mux.Handle("/jmap/", f.withActor(f.srv))
+	// Route through f.srv dynamically so tests may swap the server (withSubmit).
+	mux.Handle("/.well-known/jmap", f.withActor(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { f.srv.SessionHandler().ServeHTTP(w, r) })))
+	mux.Handle("/jmap/", f.withActor(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { f.srv.ServeHTTP(w, r) })))
 	f.ts = httptest.NewServer(mux)
 	t.Cleanup(f.ts.Close)
 	return f

@@ -1075,19 +1075,35 @@ func (s *Server) identityGet(ctx context.Context, _ *requestState, args map[stri
 		return nil, merr
 	}
 	act := actor.From(ctx)
-	ident := map[string]any{
-		"id": "default", "name": act.Username, "email": act.Username, "replyTo": nil, "bcc": nil,
-		"textSignature": "", "htmlSignature": "", "mayDelete": false,
+	var idents []map[string]any
+	if s.submissionEnabled() {
+		var err error
+		if idents, err = s.identities(ctx, mb); err != nil {
+			return nil, mapErr(err)
+		}
+	} else {
+		idents = []map[string]any{{
+			"id": "default", "name": act.Username, "email": act.Username, "replyTo": nil, "bcc": nil,
+			"textSignature": "", "htmlSignature": "", "mayDelete": false,
+		}}
 	}
 	list := []any{}
 	notFound := []string{}
 	if g.allIDs {
-		list = append(list, filterProps(ident, g.properties))
+		for _, ident := range idents {
+			list = append(list, filterProps(ident, g.properties))
+		}
 	} else {
 		for _, id := range g.ids {
-			if id == "default" {
-				list = append(list, filterProps(ident, g.properties))
-			} else {
+			found := false
+			for _, ident := range idents {
+				if ident["id"] == id {
+					list = append(list, filterProps(ident, g.properties))
+					found = true
+					break
+				}
+			}
+			if !found {
 				notFound = append(notFound, id)
 			}
 		}
