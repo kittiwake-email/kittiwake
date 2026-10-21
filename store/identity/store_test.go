@@ -202,6 +202,22 @@ func TestAliases(t *testing.T) {
 	if len(addrs) != 2 || addrs[0] != "@example.org" || addrs[1] != "info@example.org" {
 		t.Fatalf("list: %v", addrs)
 	}
+	mal, _ := s.ListMailboxAliases(ctx, mb.ID)
+	if len(mal) != 2 || mal[0] != "@example.org" || mal[1] != "info@example.org" {
+		t.Fatalf("mailbox aliases: %v", mal)
+	}
+	mb2, _ := s.CreateMailbox(ctx, Mailbox{Enabled: true})
+	_, _ = s.UpdateAlias(ctx, "info@example.org", func(a *Alias) error { a.Destinations = []Destination{{MailboxID: mb2.ID}}; return nil })
+	if mal, _ = s.ListMailboxAliases(ctx, mb.ID); len(mal) != 1 {
+		t.Fatalf("mailbox aliases after retarget: %v", mal)
+	}
+	if mal, _ = s.ListMailboxAliases(ctx, mb2.ID); len(mal) != 1 || mal[0] != "info@example.org" {
+		t.Fatalf("new mailbox aliases: %v", mal)
+	}
+	_, _ = s.UpdateAlias(ctx, "info@example.org", func(a *Alias) error {
+		a.Destinations = []Destination{{MailboxID: mb.ID}, {Address: "wido@example.org"}}
+		return nil
+	})
 	if _, err := s.UpdateAlias(ctx, "info@example.org", func(a *Alias) error { a.Enabled = false; return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +234,9 @@ func TestAliases(t *testing.T) {
 	addrs, _, _ = s.ListDomainAliases(ctx, "example.org", "", 10)
 	if len(addrs) != 1 {
 		t.Fatalf("list after delete: %v", addrs)
+	}
+	if mal, _ := s.ListMailboxAliases(ctx, mb.ID); len(mal) != 1 || mal[0] != "@example.org" {
+		t.Fatalf("mailbox aliases after delete: %v", mal)
 	}
 }
 

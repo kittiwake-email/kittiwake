@@ -606,7 +606,54 @@ func (s *Store) CreateAlias(ctx context.Context, al Alias) (Alias, error) {
 	if _, err := s.domains.Write(ctx, domain, rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"alias/" + address: nil})); err != nil {
 		return Alias{}, mapErr(err)
 	}
+	if err := s.setMailboxAliasListings(ctx, address, nil, al.Destinations); err != nil {
+		return Alias{}, err
+	}
 	return al, nil
+}
+
+// setMailboxAliasListings maintains the reverse listing `alias/<address>` on
+// every destination mailbox (used for sender identities).
+func (s *Store) setMailboxAliasListings(ctx context.Context, address string, old, cur []Destination) error {
+	was := map[uuid.UUID]bool{}
+	for _, d := range old {
+		if d.MailboxID != uuid.Nil {
+			was[d.MailboxID] = true
+		}
+	}
+	now := map[uuid.UUID]bool{}
+	for _, d := range cur {
+		if d.MailboxID != uuid.Nil {
+			now[d.MailboxID] = true
+		}
+	}
+	for id := range now {
+		if _, err := s.mailboxes.Write(ctx, id.String(), rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"alias/" + address: nil})); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return mapErr(err)
+		}
+	}
+	for id := range was {
+		if now[id] {
+			continue
+		}
+		if _, err := s.mailboxes.Write(ctx, id.String(), rados.NewWriteTx().OmapRemove("alias/"+address)); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return mapErr(err)
+		}
+	}
+	return nil
+}
+
+// ListMailboxAliases lists alias addresses that deliver to the mailbox.
+func (s *Store) ListMailboxAliases(ctx context.Context, id uuid.UUID) ([]string, error) {
+	kv, _, err := listOmap(ctx, s.mailboxes, id.String(), "alias/", "", 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(kv))
+	for _, e := range kv {
+		out = append(out, e.Key)
+	}
+	return out, nil
 }
 
 func normalizeAliasAddress(addr string) (string, string, error) {
@@ -656,6 +703,9 @@ func (s *Store) UpdateAlias(ctx context.Context, address string, fn func(*Alias)
 			}
 			return Alias{}, err
 		}
+		if err := s.setMailboxAliasListings(ctx, address, cur.Value.Destinations, al.Destinations); err != nil {
+			return Alias{}, err
+		}
 		return al, nil
 	}
 	return Alias{}, ErrConflict
@@ -667,11 +717,15 @@ func (s *Store) DeleteAlias(ctx context.Context, address string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := getJSON[Alias](ctx, s.aliases, address); err != nil {
+	cur, err := getJSON[Alias](ctx, s.aliases, address)
+	if err != nil {
 		return err
 	}
 	if _, err := s.domains.Write(ctx, domain, rados.NewWriteTx().OmapRemove("alias/"+address)); err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return mapErr(err)
+	}
+	if err := s.setMailboxAliasListings(ctx, address, cur.Value.Destinations, nil); err != nil {
+		return err
 	}
 	return mapErr(s.aliases.Delete(ctx, address))
 }
