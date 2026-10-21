@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"dovetail/mail"
+	"dovetail/metrics"
 	"dovetail/service/actor"
 	"dovetail/service/auditor"
 	"dovetail/store/attach"
@@ -283,6 +284,33 @@ type Delivered struct {
 // to. It fails as a whole if any target refuses admission (checked before
 // anything is written), so the MTA gets one answer per recipient.
 func (s *Service) Deliver(ctx context.Context, req Request) ([]Delivered, error) {
+	out, err := s.deliver(ctx, req)
+	metrics.Deliveries.WithLabelValues(resultLabel(err)).Inc()
+	if err == nil {
+		metrics.DeliveryBytes.Add(float64(len(req.Raw) * len(out)))
+	}
+	return out, err
+}
+
+func resultLabel(err error) string {
+	switch {
+	case err == nil:
+		return "delivered"
+	case errors.Is(err, ErrUnknownDomain), errors.Is(err, ErrUnknownRecipient), errors.Is(err, ErrAliasLoop):
+		return "unknown-recipient"
+	case errors.Is(err, ErrOverQuota):
+		return "over-quota"
+	case errors.Is(err, ErrMailboxDisabled):
+		return "disabled"
+	case errors.Is(err, ErrHold):
+		return "hold"
+	case errors.Is(err, ErrTooLarge):
+		return "too-large"
+	}
+	return "error"
+}
+
+func (s *Service) deliver(ctx context.Context, req Request) ([]Delivered, error) {
 	if int64(len(req.Raw)) > s.cfg.MaxMessageSize {
 		return nil, ErrTooLarge
 	}

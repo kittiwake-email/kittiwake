@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	cryptoauth "dovetail/auth"
+	"dovetail/metrics"
 	"dovetail/service/actor"
 	"dovetail/service/auditor"
 	"dovetail/store/audit"
@@ -139,6 +140,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 	}
 	auditCtx := actor.With(ctx, actor.Actor{Username: strings.ToLower(strings.TrimSpace(req.Username)), Protocol: proto, ClientIP: req.ClientIP, Credential: "password"})
 	fail := func(detail string, err error) (Tokens, error) {
+		metrics.Auth.WithLabelValues(proto, "failed").Inc()
 		s.audit.Log(auditCtx, auditor.Event{Action: "login-failed", Detail: detail, Result: audit.ResultDenied})
 		return Tokens{}, err
 	}
@@ -183,6 +185,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 	if err != nil {
 		return Tokens{}, err
 	}
+	metrics.Auth.WithLabelValues(proto, "ok").Inc()
 	s.audit.Log(actor.With(ctx, s.actorFor(&acct, roles, cred, "", sess.ID, proto, req.ClientIP)),
 		auditor.Event{Mailbox: acct.MailboxID, Action: "login", Detail: "client=" + req.Client})
 	// Opportunistic hash upgrade.
@@ -524,6 +527,7 @@ func (s *Service) VerifyBearer(ctx context.Context, token string) (actor.Actor, 
 func (s *Service) VerifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error) {
 	auditCtx := actor.With(ctx, actor.Actor{Username: strings.ToLower(strings.TrimSpace(username)), Protocol: proto, ClientIP: clientIP, Credential: "password"})
 	fail := func(detail string, err error) (actor.Actor, error) {
+		metrics.Auth.WithLabelValues(proto, "failed").Inc()
 		s.audit.Log(auditCtx, auditor.Event{Action: "login-failed", Detail: detail, Result: audit.ResultDenied})
 		return actor.Actor{}, err
 	}
@@ -551,6 +555,7 @@ func (s *Service) VerifyPassword(ctx context.Context, username, password, proto,
 		cred = "app-password"
 	}
 	a := s.actorFor(&acct, acct.Roles, cred, "", "", proto, clientIP)
+	metrics.Auth.WithLabelValues(proto, "ok").Inc()
 	s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: acct.MailboxID, Action: "login"})
 	if cryptoauth.NeedsRehash(pw.Hash) {
 		s.rehash(ctx, acct.ID, pw.ID, password)
