@@ -1,0 +1,4 @@
+/dovetail
+/bin/
+*.test
+*.out
