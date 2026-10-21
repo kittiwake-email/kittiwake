@@ -250,9 +250,10 @@ storage.
 replaced by a reference to the attachment object. All MIME framing, boundaries and the
 original `Content-Transfer-Encoding` stay in place, so the exact bytes can be rebuilt by
 re-encoding the attachment and splicing it back in. At delivery time the platform rebuilds the
-message immediately and compares it with the original; if the bytes match, the skeleton is
-stored, otherwise the full raw message is stored for that one message. A config switch can
-force full raw storage.
+message immediately and compares it with the original; if the bytes of a part do not match
+after re-encoding, that part stays inline in the skeleton (per-part fallback), so the raw
+bytes are always exact and only the mismatching part loses dedup. A config switch can force
+full raw storage.
 
 ## Attachments
 
@@ -716,6 +717,8 @@ How JMAP maps onto the design:
   part; `Identity` = the account's address and the aliases pointing at its mailbox;
   `EmailSubmission` = the SMTP relay; `Quota` = the mailbox quota; keywords (`$seen`,
   `$flagged`, …) = IMAP flags.
+- An `Email` lives in exactly one `Mailbox` (`maxMailboxesPerEmail` = 1). A copy (IMAP COPY)
+  is a new `Email` with its own id; attachments are shared through dedup either way.
 - JMAP `StateChange` push is driven by the RADOS watch/notify on the mailbox root object.
 - JMAP authenticates with bearer tokens, which is exactly the session and API-token model
   above.
@@ -784,6 +787,14 @@ The daemon takes a single YAML file as configuration:
 
 Secrets (Ceph key, SMTP relay password) can be given inline, as a path to a file, or via
 `${ENV_VAR}` substitution.
+
+## Development backend
+
+`ceph.backend: memory` runs the whole platform against the in-memory RADOS implementation
+used by the tests: one process, no Ceph, nothing persisted. `dovetail serve --seed-account
+user@example.org:password` creates a domain, mailbox, account and an admin on that backend at
+startup, so a developer can speak LMTP, JMAP and the admin API to a fresh process immediately
+(`make run-dev`).
 
 ## `dovetail admin` CLI
 

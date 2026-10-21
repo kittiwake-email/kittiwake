@@ -4,16 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Greenfield. `README.md` is the authoritative design document and has been agreed with the
-owner; read it before designing anything. There is no Go module yet. When one exists, replace
-the "Commands" section below with the real invocations.
+`README.md` is the authoritative design document, agreed with the owner; read it before
+designing anything. Milestone 1 is implemented (see Roadmap in README): identity store,
+admin service/CLI, LMTP, Postfix socketmap, sessions/TOTP, JMAP, REST. Not yet: IMAP, POP3,
+workers (purge/GC/reconcile), EmailSubmission, search backend, DAV.
 
 ## Commands
 
-None exist yet. The daemon is written in Go, so expect `go build ./...`, `go test ./...`,
-`go test ./path/to/pkg -run TestName` once a `go.mod` is created. Tests use an in-memory
-RADOS mock; real integration tests against Ceph come later. `librados-dev` headers are
-installed on the dev machine (Ceph 20.x), cgo builds work.
+```
+make build            # bin/dovetail (cgo; needs librados-dev, installed on the dev box, Ceph 20.x)
+make test             # go test ./...   (all unit tests run on the in-memory RADOS; no Ceph needed)
+make test-race
+make lint             # go vet + gofmt check
+go test ./store/index -run TestFolders          # one test
+go test ./mail -run TestRoundTrip -v
+make run-dev          # whole platform in one process on the memory backend with a seeded account
+bin/dovetail check-config --config examples/dovetail.yaml
+bin/dovetail admin --config <cfg> bootstrap --username root@example.org --password-stdin
+```
+
+Never run `go mod tidy` blindly: go-ceph pulls cgo-only packages; `go get <mod>@<ver>` for
+new deps. `go build ./...` must stay green with cgo (librados backend compiles even without a
+cluster).
+
+## Layout
+
+```
+rados/        RADOS interface (Get/Write tx/omap/xattr/lock/watch), librados.go + memory.go
+config/       YAML config with defaults + validation (config.Default())
+mail/         MIME parser → Document JSON, attachment extraction, raw skeleton + Reconstruct
+auth/         crypto primitives: password schemes, TOTP, Ed25519 JWT, refresh tokens
+store/        identity, index, message, attach, audit, session, queue (object layouts live here)
+service/      actor (ctx principal), auditor, auth, delivery, mailbox, admin (business logic +
+              authorisation + audit; protocol adapters call ONLY these)
+proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest
+app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
+cmd/dovetail  serve | check-config | admin ... | version
+examples/     dovetail.yaml (full, documented), dev.yaml (memory backend)
+contrib/postfix  main.cf snippet
+api/openapi.yaml REST spec (route↔spec consistency is tested)
+```
+
+Conventions: every store/service test builds a fixture on `rados.NewMemoryClient()`; services
+take an `actor` from the context and refuse without one; errors are package sentinels
+(`ErrNotFound`, `ErrForbidden`, ...) compared with `errors.Is`; the service layer maps store
+errors, protocol adapters map service errors to wire codes (`delivery.Status`, httpx).
 
 ## What this is
 
