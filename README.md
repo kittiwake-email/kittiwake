@@ -51,7 +51,8 @@ and SQL; real integration tests against live services come later.
 ## Observability
 
 Structured logging and metrics everywhere. Every component exposes Prometheus metrics and logs
-structured (JSON) output.
+structured (JSON) output. Each process serves `/metrics`, `/healthz` (process up) and `/readyz`
+(Ceph and SQL reachable) on a dedicated management listener.
 
 ## Containers
 
@@ -78,7 +79,14 @@ app.
 
 Sending is in scope. The REST API accepts outbound messages and submits them over SMTP to a
 configurable relay host (typically Postfix). The platform does not queue or retry outbound mail
-itself beyond the submission; that is the MTA's job.
+itself beyond the submission; that is the MTA's job. A copy of every sent message is stored in
+the Sent folder, going through the same parse-and-store path as inbound mail. The mailbox API
+also supports appending an arbitrary message to a folder (drafts, imports, IMAP APPEND).
+
+## Message size limit
+
+A configurable maximum message size is enforced at LMTP and at the API append and send
+endpoints. Postfix is expected to enforce its own limit first.
 
 ## TLS
 
@@ -123,6 +131,30 @@ deduplicated **cluster-wide** by content hash, so the same attachment is referen
 messages across many mailboxes. This requires reference counting: an attachment object is only
 removed by a background worker once no message references it.
 
+**Reference counting design:** the attachment object is named by its content hash. Its omap
+holds one key per referencing message (`ref/<mailbox>/<message>`), so adding and removing a
+reference are idempotent omap operations and concurrent deliveries of the same attachment never
+race on a counter. A worker deletes an attachment only when its reference set is empty and the
+object has not been touched for a grace period. Creation uses RADOS exclusive-create so two
+simultaneous first uploads of the same attachment resolve cleanly.
+
+## Delivery ordering and crash safety
+
+Delivery writes in this order: attachments, message JSON, raw skeleton, then the folder index
+entry (the commit point), then the attachment references. A crash before the index write leaves
+orphan objects but never a dangling index entry. Each message object carries its mailbox UUID and
+creation time in xattrs so an orphan-sweep worker task can find and remove objects that never
+reached an index. LMTP only acknowledges after the index write succeeds.
+
+## Object naming
+
+- Message JSON: `<mailbox-uuid>/<message-uuid>` in the messages pool
+- Raw skeleton or full raw: `<mailbox-uuid>/<message-uuid>.raw` in the messages pool
+- Attachment: `<sha256-hex>` in the attachments pool
+- Mailbox root: `<mailbox-uuid>` in the index pool
+- Folder index: `<mailbox-uuid>/<folder-id>` in the index pool
+- Task queues: `queue/<task-type>` in the index pool
+
 ## Mailbox index
 
 RADOS has no listing or query capability, so each mailbox needs an index: folders, message
@@ -162,7 +194,28 @@ Full-text search will be required in the future, so the design plans for it from
 
 ## Folders
 
-Mailboxes have folders (INBOX, Sent, Trash, …, plus user-created, nested).
+Mailboxes have folders. The default set, created when a mailbox is first used, is INBOX,
+Drafts, Sent, Junk, Trash and Archive, each tagged with its IMAP SPECIAL-USE attribute (RFC
+6154). Users can create nested folders. Folders are identified internally by an id, not by
+name, so renaming does not move data.
+
+## Mailbox provisioning
+
+Mailboxes are created in SQL by the admin. The RADOS side (root object, default folders) is
+created lazily the first time a mailbox receives mail or an account logs in. No explicit
+provisioning step is needed.
+
+## Change notification (IMAP IDLE, push)
+
+Daemons are stateless and share nothing, so a process serving an IMAP IDLE session must learn
+about deliveries done by another process. RADOS watch/notify is used for this: an IMAP or API
+process watches the mailbox root object, and any process that changes a folder index sends a
+notify on that root object. This gives IDLE and future webmail push without Redis.
+
+## Threading
+
+The folder index record stores `Message-ID`, `In-Reply-To` and `References` so the REST API can
+build conversation views and IMAP can offer THREAD later without fetching messages.
 
 ## Retention
 
@@ -280,8 +333,22 @@ The daemon takes a single YAML file as configuration:
   - SQL queries, with variables such as username, domain, address
 - Outbound SMTP relay host
 - Trash retention period
+- Maximum message size
+- Management listener (metrics, health)
 - Logging and metrics settings
 - Redis information (only if it ever becomes needed)
+
+Secrets (Ceph key, SQL password) can be given inline, as a path to a file, or via `${ENV_VAR}`
+substitution.
+
+## Key dependencies
+
+- `github.com/ceph/go-ceph` for librados (cgo)
+- `github.com/go-sql-driver/mysql` for MariaDB/MySQL
+- `github.com/emersion/go-smtp` (LMTP server and SMTP client), `go-imap` v2, `go-message`
+  (MIME parsing)
+- `net/http` with the standard mux for the REST API; `log/slog` for logging;
+  `prometheus/client_golang` for metrics
 
 # Roadmap
 
