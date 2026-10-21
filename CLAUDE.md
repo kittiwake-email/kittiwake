@@ -51,9 +51,15 @@ These are settled. Do not design around them.
   plain text in the parsed JSON, and publish index/remove events on every delivery, flag
   change, move and deletion from day one.
 - **Identity:** mailbox = UUID that owns folders and messages. Accounts link to a mailbox
-  (many-to-one), have roles, zero or more passwords (Dovecot-style scheme prefixes: bcrypt,
-  argon2, SHA512-CRYPT, ...) and API tokens. Every API token needs an expiration date and a
-  comment. Admin accounts are accounts with the `admin` role and no mailbox.
+  (many-to-one), have roles (`read`, `write`, `send`, `admin`), zero or more passwords
+  (Dovecot-style scheme prefixes: bcrypt, argon2, SHA512-CRYPT, ...) and API tokens. Tokens
+  are stored hashed (SHA-256), prefixed `dvt_`, need an expiration date and a comment, and
+  may only narrow the account's roles. Admin accounts have the `admin` role and no mailbox.
+  IMAP/POP3 use passwords; the API uses basic auth or bearer tokens.
+- **Sending:** `From` must be an address the account may use (SQL query). Sent copy goes to
+  Sent. Relay failure = API error, nothing stored.
+- **Workers:** tasks have run-after, retry with backoff, dead-letter set. One worker holds a
+  RADOS lock as scheduler for periodic tasks. Reconciliation reports, never deletes.
 - **SQL lookups are admin-configurable queries** with variables (`%{username}`, `%{domain}`,
   `%{address}`), Dovecot-style; a default schema must work out of the box. Expose as many
   lookups as possible as queries.

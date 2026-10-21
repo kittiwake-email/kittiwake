@@ -68,7 +68,8 @@ Supported protocols:
 - LMTP (inbound)
 - REST API (primary interface)
 - IMAP: IMAP4rev1 plus IDLE, UIDPLUS and MOVE to start; more extensions later as needed
-- POP3
+- POP3: serves INBOX only; UIDL is derived from the folder UID and UIDVALIDITY; DELE is lazy
+  (see Retention)
 - JMAP as an option (later)
 
 IMAP and POP3 must work but are not the primary target; they serve legacy clients. Each mailbox
@@ -78,10 +79,17 @@ app.
 ## Sending mail
 
 Sending is in scope. The REST API accepts outbound messages and submits them over SMTP to a
-configurable relay host (typically Postfix). The platform does not queue or retry outbound mail
-itself beyond the submission; that is the MTA's job. A copy of every sent message is stored in
-the Sent folder, going through the same parse-and-store path as inbound mail. The mailbox API
-also supports appending an arbitrary message to a folder (drafts, imports, IMAP APPEND).
+configurable relay host (typically Postfix), optionally with SASL credentials. The platform does
+not queue or retry outbound mail itself beyond the submission; that is the MTA's job. If the
+relay rejects or is unreachable the API returns an error and nothing is stored. A copy of every
+sent message is stored in the Sent folder, going through the same parse-and-store path as
+inbound mail. The mailbox API also supports appending an arbitrary message to a folder (drafts,
+imports, IMAP APPEND).
+
+The `From` address (and `Sender`, if present) must be one of the addresses the account is
+allowed to use, as returned by a configurable SQL query (normally the account's own address and
+its aliases). Submissions with another `From` are rejected. Dovetail adds its own `Received:`
+header naming the authenticated account so the MTA logs can be tied to the audit log.
 
 ## Message size limit
 
@@ -147,10 +155,17 @@ Messages, attachments and indexes live in different RADOS pools.
 
 A raw e-mail message is parsed into a JSON document which is stored as a RADOS object:
 
-- Headers as a JSON array (parsed)
+- A schema version field, so the format can evolve
+- Headers as a JSON array (parsed, decoded to UTF-8)
 - The original, unparsed headers (including `Received:` lines) kept verbatim for traceability
-- Body as HTML and plain text
+- Body as HTML and plain text (both derived if only one exists), converted to UTF-8
+- The full MIME structure (part tree with content types, dispositions, Content-IDs, sizes)
 - References to attachment objects
+
+**What is an attachment:** every MIME part that is not the primary text/plain or text/html body
+is treated as an attachment (including inline images referenced by Content-ID and any
+message/rfc822 part). Parts smaller than a configurable threshold (default 4 KiB) stay inline in
+the skeleton rather than becoming tiny RADOS objects.
 
 ## Raw message
 
@@ -196,6 +211,9 @@ reached an index. LMTP only acknowledges after the index write succeeds.
 - Mailbox root: `<mailbox-uuid>` in the index pool
 - Folder index: `<mailbox-uuid>/<folder-id>` in the index pool
 - Task queues: `queue/<task-type>` in the index pool
+- Retention set (expunged and trashed messages waiting for purge): `<mailbox-uuid>/retention`
+  in the index pool, omap keyed by purge-at timestamp
+- Audit: `<mailbox-uuid>/audit/<YYYY-MM-DD>` in the index pool
 
 ## Mailbox index
 
@@ -211,8 +229,12 @@ object carries, with atomic compare-and-set and prefix listing).
   with atomic RADOS write transactions so concurrent LMTP and API processes never hand out the
   same UID.
 - One **folder index object** per folder. Omap key is the zero-padded UID; value is a compact
-  record with the message object name, flags, size, internal date and a few list-view headers
-  (subject, from, date) so listing a folder needs no message fetches.
+  record with the message object name, flags, size, internal date (UTC) and a few list-view
+  headers (subject, from, date) so listing a folder needs no message fetches.
+- Flags are the IMAP system flags plus arbitrary keywords; the folder's keyword list lives in
+  the folder index object's xattrs. IMAP SUBSCRIBE state is per mailbox (shared by all accounts
+  on it), as are flags.
+- Rebuilding a folder index (admin maintenance) assigns a new UIDVALIDITY so clients resync.
 - The index pool is small and hot and can be placed on fast storage with its own replication
   settings.
 
@@ -286,9 +308,18 @@ The `worker` mode executes background tasks:
 - Remove all RADOS data of a mailbox that no longer exists in SQL
 - Purge audit objects older than the audit retention period
 
+Periodic tasks (orphan sweep, audit purge, retention purge scan, SQL-vs-RADOS mailbox
+reconciliation) are enqueued by a scheduler role that the workers elect among themselves with
+a RADOS lock on a `scheduler` object, so exactly one worker schedules and any worker executes.
+
+Reconciliation only **reports** mailboxes that exist in RADOS but not in SQL (visible in the
+admin API and logs); it never deletes data by itself. Removal is an explicit admin API action.
+
 **Queue design:** a RADOS queue object per task type in the index pool, with each task
 as an omap entry and a lease via a RADOS lock, so multiple workers can run without duplicating
-work. If this proves clumsy, Redis becomes the concrete need.
+work. Tasks carry a run-after time; failed tasks are retried with backoff and after a
+configurable number of attempts land in a dead-letter set visible in the admin API. If this
+proves clumsy, Redis becomes the concrete need.
 
 ## Quotas
 
@@ -298,7 +329,8 @@ Each mailbox has quotas:
 - Soft and hard limit on message count
 
 Exceeding a soft limit produces warnings (logged, exposed via API); exceeding a hard limit
-rejects delivery at LMTP time.
+rejects delivery at LMTP time with a permanent error (5.2.2) by default, configurable to a
+temporary error so the MTA keeps retrying.
 
 Limits are per mailbox and come from SQL (columns on the mailbox row, read through a
 configurable query); a config-wide default applies when the row has no limit. Usage counters
@@ -316,8 +348,39 @@ mailbox, allowing multiple credentials to access one mailbox. An account consist
 
 ## Roles
 
-Accounts have roles that restrict what they may do (for example full access, read-only,
-send-only).
+Accounts and API tokens carry a set of roles. The role set is:
+
+- `read` – list folders, read messages and attachments, search
+- `write` – change flags, move/copy/delete messages, manage folders, append messages
+- `send` – submit outbound mail
+- `admin` – admin API (never combined with a mailbox)
+
+A normal full-access account has `read`, `write` and `send`. A token's roles may only narrow
+the account's roles; a token claiming a role the account lacks is rejected.
+
+Roles are returned by a configurable SQL query as a list of strings, so the admin may store them
+as a column, a join table or anything else.
+
+## Credentials per protocol
+
+- IMAP and POP3 authenticate with username and a password (any of the account's passwords,
+  including application passwords).
+- The REST API authenticates with either HTTP basic auth (username and password) or a bearer
+  API token.
+- API tokens are stored **hashed** in SQL (SHA-256 of the token); Dovetail hashes the presented
+  token and looks it up by hash through the configured query. Tokens are random, prefixed
+  `dvt_` so they are recognisable in logs and secret scanners.
+- Accounts and mailboxes have an `enabled` flag. A disabled account cannot log in. Delivery to
+  a disabled mailbox is rejected with a permanent LMTP error by default (configurable to a
+  temporary error).
+- Because SQL is read-only there is no self-service password or token management through
+  Dovetail; that lives in whatever manages the SQL database.
+
+## Out of scope
+
+Dovetail stores and serves mail. It does not do contacts, calendars (CardDAV/CalDAV), shared
+folders between mailboxes, or IMAP ACLs. Encryption at rest and compression are handled by
+the Ceph pools (BlueStore compression and encryption), not by Dovetail.
 
 ## API tokens
 
@@ -362,7 +425,8 @@ mailbox index and acknowledges delivery.
 # REST API
 
 The REST API is described by an OpenAPI specification that is maintained in this repository.
-There are two distinct APIs:
+All paths are versioned (`/v1/...`), list endpoints are paginated with cursors, and errors use
+a single JSON problem format. There are two distinct APIs:
 
 - **Mailbox API** – authenticated as an account (password or API token), scoped to that
   account's mailbox and roles. Folders, messages, flags, search, attachments, sending.
@@ -398,7 +462,8 @@ The daemon takes a single YAML file as configuration:
 - Audit retention period and per-protocol audit detail level
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
 - Spam header name and value for Junk routing
-- Default quota limits
+- Default quota limits, over-quota and disabled-mailbox LMTP reply policy
+- Inline attachment size threshold
 - Maximum message size
 - Management listener (metrics, health)
 - Logging and metrics settings
