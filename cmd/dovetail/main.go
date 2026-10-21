@@ -151,6 +151,7 @@ func runServe(args []string) error {
 	if cfg.HasMode("api") {
 		a.APIHandler = buildAPI(a)
 	}
+	a.ExtraModes = protocolModes()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Info("dovetail starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend)
