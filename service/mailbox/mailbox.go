@@ -117,12 +117,7 @@ func (s *Service) Root(ctx context.Context, mb uuid.UUID) (index.Root, error) {
 	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
 		return index.Root{}, s.deny(ctx, mb, "list", "", err)
 	}
-	root, err := s.idx.EnsureRoot(ctx, mb)
-	if err != nil {
-		return index.Root{}, err
-	}
-	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "list"})
-	return root, nil
+	return s.idx.EnsureRoot(ctx, mb)
 }
 
 // CreateFolder creates a folder.
