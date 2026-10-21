@@ -4,67 +4,73 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-This is a greenfield project: as of the initial commit the repository contains only `README.md`,
-which is the design document. There is no Go module, build system, or test suite yet. When those
-are added, update the "Commands" section below with the real invocations (module path, how to run
-a single package's tests, any integration-test prerequisites such as a Ceph or MariaDB instance).
+Greenfield. `README.md` is the authoritative design document and has been agreed with the
+owner; read it before designing anything. There is no Go module yet. When one exists, replace
+the "Commands" section below with the real invocations.
 
 ## Commands
 
-None exist yet. The daemon is to be written in Go, so expect the standard toolchain
-(`go build ./...`, `go test ./...`, `go test ./path/to/pkg -run TestName`) once a `go.mod` is created.
-Replace this paragraph with the actual commands as soon as they are real.
+None exist yet. The daemon is written in Go, so expect `go build ./...`, `go test ./...`,
+`go test ./path/to/pkg -run TestName` once a `go.mod` is created. Tests use mocks for Ceph and
+SQL; real integration tests come later.
 
 ## What this is
 
-A new, massively scalable mail platform intended to replace Dovecot. It is **not** an MTA: Postfix
-(or another MTA) stays in front, receives and filters mail from the internet, and hands messages
-to this daemon over LMTP. The README is the authoritative spec; read it before designing anything.
+A massively scalable mail platform intended to replace Dovecot. It is **not** an MTA: Postfix
+stays in front, receives and filters mail from the internet, hands it to this daemon over LMTP,
+and takes outbound mail back over SMTP from a configurable relay host.
 
-## Architectural constraints (from the README)
+## Architectural decisions
 
-These are hard requirements that shape every module. Do not design around them.
+These are settled. Do not design around them.
 
-- **Stateless daemons.** All persistent state lives in Ceph RADOS (messages, attachments) and SQL
-  (mailboxes, accounts). Daemons scale out by adding more instances; inter-daemon coordination is
-  expected to go through something like Redis Sentinel.
-- **Go, modular, heavily tested.** Each module should carry its own extensive tests.
-- **Protocols:** LMTP inbound; IMAP and POP3 for legacy clients; a full REST API over every
-  mailbox is the primary interface (intended to back a webmail and mobile app); JMAP is optional.
-- **No TLS in the daemon.** A proxy such as HAProxy terminates TLS. Do not add TLS handling.
-- **IPv6-first.** Assume an IPv6-only environment; IPv4 is nice-to-have.
-- **Container-friendly but not container-mandatory.**
+- **One Go binary, multiple modes:** `lmtp`, `imap`, `pop3`, `api`, `worker`. Modes can be
+  combined in one process or split across many. Each is independently scalable.
+- **Stateless daemons.** Everything the platform writes goes to Ceph RADOS via librados (cgo
+  is accepted; target the latest stable Ceph). SQL (MySQL/MariaDB) is **read-only** and holds
+  accounts, mailboxes, roles, API tokens. Redis is not part of the design unless a concrete
+  need appears.
+- **Storage pools:** messages, attachments and index are separate RADOS pools. Pure RADOS, not
+  S3/RGW.
+- **Message format:** parsed JSON (headers array, verbatim original headers, HTML and
+  plain-text body, attachment references) plus a **raw skeleton**: the original bytes with each
+  attachment's encoded body replaced by a reference. Reconstruction must be byte-exact; verify
+  at delivery and fall back to storing the full raw message when it is not.
+- **Attachments** are cluster-wide deduplicated by content hash with reference counting; only
+  a worker deletes orphans.
+- **Mailbox index lives in RADOS omap:** one root object per mailbox (folders, UIDVALIDITY,
+  UIDNEXT, quota totals, advanced with atomic transactions) and one index object per folder
+  (omap key = zero-padded UID, value = compact record with object name, flags, size, date,
+  list-view headers).
+- **Workers** consume a RADOS-based task queue (one queue object per task type, omap entries,
+  lease via RADOS lock): trash purge, attachment GC, quota recalculation, mailbox removal,
+  search indexing.
+- **Full-text search** is a future, pluggable backend. Keep search behind an interface, keep
+  plain text in the parsed JSON, and publish index/remove events on every delivery, flag
+  change, move and deletion from day one.
+- **Identity:** mailbox = UUID that owns folders and messages. Accounts link to a mailbox
+  (many-to-one), have roles, zero or more passwords (Dovecot-style scheme prefixes: bcrypt,
+  argon2, SHA512-CRYPT, ...) and API tokens. Every API token needs an expiration date and a
+  comment. Admin accounts are accounts with the `admin` role and no mailbox.
+- **SQL lookups are admin-configurable queries** with variables (`%{username}`, `%{domain}`,
+  `%{address}`), Dovecot-style; a default schema must work out of the box. Expose as many
+  lookups as possible as queries.
+- **Protocols:** LMTP inbound (one recipient per transaction), REST (primary; OpenAPI spec
+  kept in the repo; separate mailbox API and admin API), IMAP4rev1 + IDLE, UIDPLUS, MOVE,
+  POP3, JMAP later.
+- **Quotas:** soft and hard limits on size and message count; hard limit rejects at LMTP.
+- **Retention:** deleted mail goes to Trash and is purged by a worker after a configurable
+  period.
+- **No TLS in the daemon** (HAProxy terminates it). **IPv6-first.** Single YAML config file.
+- **Observability:** structured JSON logging and Prometheus metrics in every component.
 
-### Storage model (Ceph RADOS, not S3/RGW)
+## Roadmap
 
-- Messages and attachments are stored as **pure RADOS objects** in **separate pools**.
-- A raw message is parsed into a JSON document containing: headers as a JSON array, the body as
-  both HTML and plain text, and references to attachment objects. The **original unparsed headers**
-  (including Received: lines) must also be kept in that same JSON for traceability.
-- Attachments are extracted into their own objects and **deduplicated by content hash**, so
-  multiple messages can reference the same attachment object.
-
-### Identity model (SQL, read-only)
-
-- A **mailbox** is identified by a UUID and is the thing that owns messages; on its own it is
-  not addressable.
-- **Accounts** link to a mailbox. Many accounts may point at one mailbox (multiple credentials
-  for the same mail). An account has a username (usually the e-mail address) and may have
-  multiple passwords (application passwords).
-- Mailboxes, accounts and metadata live in **MySQL/MariaDB**. The platform **only reads** from
-  SQL, never writes. HA of the database is the DBA's concern, not ours.
-- Like Dovecot, admins supply their own SQL queries in the config so they can use their own
-  schema; a default schema must work out of the box. Queries support variables (username, domain,
-  etc.). Rows inserted directly by an admin must be picked up by the platform.
-- LMTP delivery looks up the recipient address in SQL to find the account/mailbox, then stores
-  the message in that mailbox.
-
-### Configuration
-
-A single YAML file holding: Ceph connection info (monitors, credentials, pool names), SQL
-connection info plus the admin-supplied queries, and Redis info if used.
+Milestone 1: config loading, SQL auth/lookup layer, LMTP delivery into RADOS (parse,
+attachments, index), REST mailbox API read paths. Then IMAP/POP3, sending, workers, admin API,
+search backend, integration tests, JMAP.
 
 ## Reference implementations
 
-When unsure how to handle a mail-protocol edge case, look at Dovecot (mature mail handling),
-WildDuck (https://docs.wildduck.email/, full REST API design), and Postfix (LMTP behaviour).
+Dovecot (mature mail handling), WildDuck (https://docs.wildduck.email/, full REST API design),
+Postfix (LMTP behaviour).
