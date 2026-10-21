@@ -34,6 +34,7 @@ separately scalable component:
 - `api` – REST API (mailbox API and admin API)
 - `worker` – background task execution (trash purge, attachment garbage collection, quota
   recalculation, mailbox removal, …)
+- `dav` – CalDAV/CardDAV (future)
 
 Modes can be combined in one process for small setups and split across many processes for large
 ones.
@@ -61,7 +62,8 @@ The daemon can run inside containers, but this is not mandatory.
 ## Protocols
 
 Inbound e-mail is delivered using LMTP: an MTA like Postfix receives and filters the message from
-the internet before delivering it to this daemon. One recipient per LMTP transaction for now.
+the internet before delivering it to this daemon. One recipient per LMTP transaction for now
+(one recipient address may still fan out to several mailboxes through aliases).
 
 Supported protocols:
 
@@ -339,8 +341,24 @@ with every delivery and deletion; a worker task can recalculate them from the fo
 
 # Mailboxes, Accounts and Domains
 
-The system knows **mailboxes**. A mailbox has a UUID and owns messages and folders. A mailbox by
-itself is not addressable.
+The system knows **mailboxes**. A mailbox has a UUID and owns messages and folders (and later
+calendars and address books). A mailbox by itself is not addressable.
+
+## Domains, aliases and catch-all
+
+Domains are first-class in the default schema: a domain row (name, enabled) that accounts and
+aliases belong to. Delivery to an address in an unknown or disabled domain is rejected.
+
+**Aliases** map a source address to a destination: either a mailbox or another address (which
+is resolved again, with a bounded depth to stop loops). An alias may have several destinations,
+in which case LMTP delivers to each mailbox. Aliases are also what makes an address usable as a
+`From` when sending.
+
+A **catch-all** is a per-domain fallback: an alias whose source is the whole domain (`@example.org`),
+used when no account or alias matches the exact address.
+
+Resolution order at LMTP time: exact account address → alias → catch-all → reject. Every step is
+an admin-configurable SQL query, so a different schema can express the same thing.
 
 **Accounts** are created and linked to a mailbox. Multiple accounts can point to the same
 mailbox, allowing multiple credentials to access one mailbox. An account consists of a username
@@ -376,11 +394,25 @@ as a column, a join table or anything else.
 - Because SQL is read-only there is no self-service password or token management through
   Dovetail; that lives in whatever manages the SQL database.
 
+## Future: CalDAV and CardDAV
+
+Calendars and contacts will be needed later, served over CalDAV and CardDAV. The design leaves
+room for them now:
+
+- A mailbox is the storage container for everything a user owns, not just mail. Its root
+  object lists **collections** with a type (`mail-folder` now; `calendar` and `addressbook`
+  later), so calendars and address books hang off the same mailbox UUID with the same quota,
+  audit and retention machinery.
+- Object name prefixes `<mailbox-uuid>/cal/` and `<mailbox-uuid>/card/` are reserved.
+- The role set can grow with `calendar` and `contacts` roles.
+- A future `dav` mode serves CalDAV/CardDAV from the same binary.
+
+Nothing of this is built in the first milestones, but nothing in the mail design may block it.
+
 ## Out of scope
 
-Dovetail stores and serves mail. It does not do contacts, calendars (CardDAV/CalDAV), shared
-folders between mailboxes, or IMAP ACLs. Encryption at rest and compression are handled by
-the Ceph pools (BlueStore compression and encryption), not by Dovetail.
+Shared folders between mailboxes and IMAP ACLs. Encryption at rest and compression are handled
+by the Ceph pools (BlueStore compression and encryption), not by Dovetail.
 
 ## API tokens
 

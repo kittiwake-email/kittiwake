@@ -83,6 +83,11 @@ These are settled. Do not design around them.
 - **Attachment refcounts** are omap keys per referencing message on the hash-named attachment
   object. **Delivery order:** attachments, message JSON, raw, index entry (commit point), refs.
 - **IMAP IDLE / push** uses RADOS watch/notify on the mailbox root object.
+- **Domains, aliases, catch-all** are first-class in the default schema. LMTP resolution:
+  exact address → alias (bounded depth, may fan out to several mailboxes) → catch-all → reject.
+- **CalDAV/CardDAV come later.** A mailbox is a container of typed collections (`mail-folder`
+  now, `calendar`/`addressbook` later); object prefixes `<mailbox>/cal/` and `<mailbox>/card/`
+  are reserved; do not design anything mail-specific into the mailbox root or quota/audit code.
 - **No TLS in the daemon** (HAProxy terminates it). **IPv6-first.** Single YAML config file.
 - **Observability:** structured JSON logging and Prometheus metrics in every component.
 
