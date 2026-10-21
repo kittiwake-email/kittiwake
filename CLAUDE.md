@@ -16,7 +16,9 @@ SQL; real integration tests come later.
 
 ## What this is
 
-A massively scalable mail platform intended to replace Dovecot. It is **not** an MTA: Postfix
+Dovetail: a massively scalable mail platform intended to replace Dovecot (the name is the
+joint that fits onto Postfix, and the successor of Dovecot). Go module path: `dovetail`.
+Binary name: `dovetail`. It is **not** an MTA: Postfix
 stays in front, receives and filters mail from the internet, hands it to this daemon over LMTP,
 and takes outbound mail back over SMTP from a configurable relay host.
 
@@ -24,7 +26,7 @@ and takes outbound mail back over SMTP from a configurable relay host.
 
 These are settled. Do not design around them.
 
-- **One Go binary, multiple modes:** `lmtp`, `imap`, `pop3`, `api`, `worker`. Modes can be
+- **One Go binary (`dovetail`), multiple modes:** `lmtp`, `imap`, `pop3`, `api`, `worker`. Modes can be
   combined in one process or split across many. Each is independently scalable.
 - **Stateless daemons.** Everything the platform writes goes to Ceph RADOS via librados (cgo
   is accepted; target the latest stable Ceph). SQL (MySQL/MariaDB) is **read-only** and holds

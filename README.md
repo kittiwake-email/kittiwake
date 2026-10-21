@@ -1,6 +1,8 @@
-# My New Mail Platform
+# Dovetail
 
-This repository contains a new mail platform which has not been assigned a name yet.
+Dovetail is a new, massively scalable and modern mail platform built to replace Dovecot. The
+name is the joint that fits two pieces of wood together: Dovetail fits onto Postfix, and it is
+the successor of Dovecot.
 
 The purpose of this project is to build a new, massively scalable and modern mail platform to
 mainly replace Dovecot. It is **not** an MTA and does not replace Postfix: Postfix receives and
@@ -23,7 +25,7 @@ design.
 
 ## One binary, multiple modes
 
-The platform ships as a single Go binary that can run in one of several modes. Each mode is a
+The platform ships as a single Go binary, `dovetail`, that can run in one of several modes. Each mode is a
 separately scalable component:
 
 - `lmtp` – inbound delivery from the MTA
