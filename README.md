@@ -92,6 +92,40 @@ endpoints. Postfix is expected to enforce its own limit first.
 
 TLS is not handled by this daemon; a proxy like HAProxy does this.
 
+## Client IP passthrough
+
+Because HAProxy sits in front, the daemon would only ever see the proxy's address. To know the
+real client IP, IMAP, POP3 and LMTP listeners accept the PROXY protocol (v1 and v2), and the
+HTTP listeners trust `X-Forwarded-For` / `Forwarded` from configured proxy addresses only.
+The real client IP is used in logs, audit records and failed-login records.
+
+## Auditing
+
+Every action on a mailbox is audited so that it can be inspected afterwards: who did what,
+from where, and when. An audit record contains:
+
+- Timestamp
+- Mailbox UUID
+- Account username and, when a token was used, the token id and its comment
+- Protocol (`imap`, `pop3`, `api`, `lmtp`, `admin`)
+- Client IP address (real address, see "Client IP passthrough")
+- Action (login, login-failed, logout, list, fetch, flag-change, move, copy, delete, expunge,
+  append, send, folder-create/rename/delete, …) with its target (folder, message UID(s))
+- Result (ok, denied, error)
+
+Audit records are written to two places:
+
+1. The structured log stream, so they can be shipped to a central log system.
+2. RADOS, in a per-mailbox audit object per day (`<mailbox-uuid>/audit/<YYYY-MM-DD>` in the
+   index pool, records as omap entries keyed by timestamp), so the admin API can query the
+   history of a mailbox without a log system. Audit retention in RADOS is configurable and a
+   worker purges expired audit objects.
+
+Admin actions (support access, maintenance) are audited the same way, with the admin account
+as the actor and the target mailbox as the subject. Read-heavy actions (fetch, list) are
+audited by default but can be reduced to session-level (login/logout) per protocol in the
+config to limit volume.
+
 ## Brute-force protection
 
 Dovetail does not rate-limit or lock out failed logins; stateless daemons have no shared
@@ -248,6 +282,7 @@ The `worker` mode executes background tasks:
 - Decrement attachment reference counts and delete orphaned attachment objects
 - Recalculate quota usage for a mailbox
 - Remove all RADOS data of a mailbox that no longer exists in SQL
+- Purge audit objects older than the audit retention period
 
 **Queue design:** a RADOS queue object per task type in the index pool, with each task
 as an omap entry and a lease via a RADOS lock, so multiple workers can run without duplicating
@@ -338,6 +373,8 @@ There are two distinct APIs:
   4. Worker and queue visibility: pending and failed tasks, retry
   5. Support access: read a mailbox on behalf of a user, audited
   6. Platform status: Ceph and SQL health, version, running instances
+  7. Audit inspection: query the audit history of a mailbox or an account by time range,
+     action, client IP
 
 # Daemon
 
@@ -356,6 +393,8 @@ The daemon takes a single YAML file as configuration:
   - SQL queries, with variables such as username, domain, address
 - Outbound SMTP relay host
 - Trash retention period
+- Audit retention period and per-protocol audit detail level
+- Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
 - Spam header name and value for Junk routing
 - Default quota limits
 - Maximum message size
