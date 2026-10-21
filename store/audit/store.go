@@ -70,7 +70,7 @@ func New(indexPool rados.IOContext) *Store {
 func day(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 func mailboxOID(mb uuid.UUID, d string) string { return mb.String() + "/audit/" + d }
-func adminOID(d string) string                { return "audit/admin/" + d }
+func adminOID(d string) string                 { return "audit/admin/" + d }
 
 func (s *Store) key(t time.Time) string {
 	return fmt.Sprintf("%020d-%06d", t.UTC().UnixNano(), s.seq.Add(1)%1000000)
