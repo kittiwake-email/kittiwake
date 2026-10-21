@@ -94,10 +94,12 @@ TLS is not handled by this daemon; a proxy like HAProxy does this.
 
 ## Client IP passthrough
 
-Because HAProxy sits in front, the daemon would only ever see the proxy's address. To know the
-real client IP, IMAP, POP3 and LMTP listeners accept the PROXY protocol (v1 and v2), and the
-HTTP listeners trust `X-Forwarded-For` / `Forwarded` from configured proxy addresses only.
-The real client IP is used in logs, audit records and failed-login records.
+Because HAProxy sits in front, the daemon would only ever see the proxy's address. HAProxy
+forwards every connection with the PROXY protocol, so all listeners (IMAP, POP3, LMTP and the
+HTTP API) accept PROXY protocol v1 and v2 and take the real client address from it. PROXY
+protocol can be required per listener so a connection without the header is rejected. As an
+optional fallback the HTTP listeners can trust `X-Forwarded-For` from configured proxy
+addresses. The real client IP is used in logs, audit records and failed-login records.
 
 ## Auditing
 

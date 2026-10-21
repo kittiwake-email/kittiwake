@@ -71,8 +71,9 @@ These are settled. Do not design around them.
   action, which target, result) is written to the structured log and to a per-mailbox,
   per-day audit object in RADOS, queryable via the admin API. Admin support access is audited
   too. Audit is not optional; plumb an audit context through every protocol handler.
-- **Real client IP:** PROXY protocol v1/v2 on IMAP/POP3/LMTP listeners, `X-Forwarded-For`
-  from trusted proxies on HTTP. Never log the proxy's address as the client.
+- **Real client IP:** HAProxy sends PROXY protocol on every connection, so all listeners
+  (IMAP, POP3, LMTP, HTTP) accept PROXY protocol v1/v2, optionally required. `X-Forwarded-For`
+  from trusted proxies is only an HTTP fallback. Never log the proxy's address as the client.
 - **Attachment refcounts** are omap keys per referencing message on the hash-named attachment
   object. **Delivery order:** attachments, message JSON, raw, index entry (commit point), refs.
 - **IMAP IDLE / push** uses RADOS watch/notify on the mailbox root object.
