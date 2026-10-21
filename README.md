@@ -100,9 +100,9 @@ Postfix supports natively (`socketmap:inet:host:port:name`, read-only lookups). 
 The socketmap protocol is unauthenticated, so the listener is meant for a private network
 only. Lookups are plain object reads in RADOS and are cached briefly in the process.
 
-Example Postfix configuration and any helper code that Postfix needs to discover and talk to
-this endpoint live in this repository under `contrib/postfix/`. (Open: the exact role of the
-Lua code mentioned for Postfix; Postfix itself has no Lua table type, see "Open questions".)
+Example Postfix configuration (`main.cf` snippets for `virtual_mailbox_domains`,
+`virtual_mailbox_maps`, `virtual_alias_maps` and the LMTP transport) lives in this repository
+under `contrib/postfix/`. No glue code is needed: Postfix speaks socketmap natively.
 
 ## Sending mail
 
@@ -733,15 +733,6 @@ data, `reconcile`, and the same mailbox maintenance actions as the admin API.
 - Full-text search backend
 - Real integration tests against Ceph
 - CalDAV/CardDAV and JMAP Contacts/Calendars
-
-# Open questions
-
-- **Postfix and Lua.** Postfix has no Lua lookup table type; its native remote lookups are
-  `socketmap` and `tcp` tables, which it speaks itself without glue code. The Lua code
-  mentioned for Postfix needs a home: is it meant as a separate helper (for example for
-  service discovery of Dovetail instances, or a sidecar that proxies to the socketmap), or is
-  Postfix extended with a Lua table in your environment? Whatever it is, it lives under
-  `contrib/postfix/` in this repository.
 
 # Inspiration
 
