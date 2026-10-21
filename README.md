@@ -49,6 +49,43 @@ maintenance that talks to RADOS directly (like `radosgw-admin`).
 The daemon is written in Go. cgo is accepted (needed for librados). Target the latest stable
 Ceph release.
 
+## Internal architecture: a Go core with protocols on top
+
+Dovetail is built as a **library first, daemon second**. All functionality lives in Go
+packages with clean interfaces, and every protocol is a thin adapter that translates wire
+format into calls on those packages. Nothing that matters is implemented inside a protocol
+handler, so new protocols and tools (a CLI, a migration tool, a future JMAP extension, DAV,
+a test harness) are built by calling the same Go APIs.
+
+Layers, from the bottom up:
+
+1. **`rados` layer** – a small interface over librados (get/put/omap/xattr/lock/watch/notify,
+   atomic write transactions) with two implementations: real librados and an in-memory mock
+   used by all unit tests.
+2. **Stores** – typed persistence packages on top of the rados layer, one per concern:
+   identity (domains, mailboxes, accounts, aliases, tokens), mailbox index, message store,
+   attachment store, change log, audit, sessions, task queue. These know object layouts; nothing
+   above them does.
+3. **Services** – the business logic, exposed as Go interfaces: `Auth` (passwords, tokens,
+   sessions, TOTP), `Delivery` (parse, dedup, store, index, quota, spam routing), `Mailbox`
+   (folders, messages, flags, move/copy/expunge, search, changes, retention, hold), `Submit`
+   (outbound mail), `Admin` (identity CRUD, maintenance, export/import), `Audit`, `Notify`
+   (watch/notify fan-out). Every call takes a context carrying the actor, client IP and
+   protocol so auditing and authorisation are done once, here, not per protocol.
+4. **Protocol adapters** – LMTP, IMAP, POP3, JMAP, the REST endpoints (OAuth, self-service,
+   admin), Postfix socketmap, and the `admin` CLI. Each is a separate package that depends only
+   on the service interfaces.
+5. **`cmd/dovetail`** – wires config, stores, services and the selected modes together.
+
+Rules that follow from this:
+
+- A protocol adapter never touches a store or RADOS directly.
+- Authorisation (roles, hold state, enabled flags) and audit live in the services, so every
+  protocol gets them for free and cannot bypass them.
+- The service interfaces are the public Go API of the project and are versioned with care;
+  external programs may import them.
+- Each layer is unit-tested against the mock of the layer below it.
+
 ## Modular and tested
 
 The code is modular and each module contains extensive tests. For now tests use an in-memory
@@ -262,8 +299,8 @@ Identity data (meta pool, by RADOS namespace):
 - `domains` namespace: `<domain-name>` (JSON: enabled, settings, catch-all). Its omap lists
   the accounts and aliases in the domain. The object `_all` in this namespace lists every
   domain in its omap.
-- `mailboxes` namespace: `<mailbox-uuid>` (JSON: quota limits, enabled, created). Its omap
-  lists the accounts linked to it.
+- `mailboxes` namespace: `<mailbox-uuid>` (JSON: quota limits, enabled, hold record,
+  created). Its omap lists the accounts linked to it.
 - `accounts` namespace: `<account-uuid>` (JSON: username, mailbox id, roles, passwords with
   scheme-prefixed hashes and kind, TOTP secret, enabled). Its omap lists the account's API
   tokens.
@@ -400,6 +437,7 @@ The `worker` mode executes background tasks:
 - Decrement attachment reference counts and delete orphaned attachment objects
 - Recalculate quota usage for a mailbox
 - Remove all data of a deleted mailbox
+- Maildir export and import of a mailbox
 - Purge audit objects older than the audit retention period
 - Orphan sweep (message objects that never reached an index)
 - Identity reconciliation (repair domain/mailbox/account listings)
@@ -413,6 +451,53 @@ omap entry and a lease via a RADOS lock, so multiple workers can run without dup
 work. Tasks carry a run-after time; failed tasks are retried with backoff and after a
 configurable number of attempts land in a dead-letter set visible in the admin API. If this
 proves clumsy, Redis becomes the concrete need.
+
+## Legal hold (read-only lockdown)
+
+A mailbox can be placed on **hold** through the admin API (or the `admin` CLI), for example
+when law enforcement requires preservation. A hold is recorded on the mailbox object with the
+reason, a case reference, who set it and when, and is audited. While a mailbox is on hold:
+
+- Every mutating operation by the user is refused on every protocol: flag changes, moves,
+  copies, deletes, expunge, folder create/rename/delete, imports and drafts. JMAP returns
+  `forbidden` state errors, IMAP reports the folders as read-only (`[READ-ONLY]`), POP3 DELE
+  is refused.
+- **Nothing is purged.** Trash retention, lazy-expunge retention and audit retention are
+  suspended for the mailbox, and the mailbox cannot be deleted. Attachment GC is unaffected
+  because references stay in place.
+- Inbound delivery continues by default so evidence keeps being collected; it can be switched
+  off per hold. Sending from the mailbox is refused by default and can be allowed per hold.
+- User login and reading remain possible by default (the user may not be aware of the hold);
+  a hold can also deny all user access (`sealed`).
+- Removing a hold is an admin action and is audited. Purges resume from that point with the
+  normal retention periods counted from the original deletion times, so a long hold does not
+  cause an immediate mass purge: after release, items past their retention are purged with a
+  configurable grace period.
+
+Hold state is checked in the `Mailbox` service, so every protocol and future protocol
+enforces it automatically.
+
+## Mailbox export and import (Maildir)
+
+A complete mailbox can be exported, for legal requests, migration and backup:
+
+- **Format: Maildir++** in the Dovecot layout, so the export is directly usable by Dovecot
+  and by standard tools: `cur/new/tmp` per folder, subfolders as `.Folder.Sub` directories,
+  `subscriptions`, IMAP flags in the filename info (`:2,FRST`), keywords via
+  `dovecot-keywords`, internal date as the file mtime, UIDs preserved via `dovecot-uidlist`.
+- Each message is the byte-exact original, rebuilt from the raw skeleton and attachments.
+- Alongside the Maildir, a `manifest.json` with mailbox id, folders, per-message UID/flags/
+  object names and a SHA-256 per file, the mailbox's audit log for the requested period, and
+  the hold record if any, so a chain of custody can be documented.
+- The output is a tar archive (optionally gzip). `dovetail admin export-mailbox <uuid>` writes
+  it to a path; the admin API creates an export task that a worker executes, writing to a
+  configured export directory, with progress and the result downloadable through the admin
+  API. Exports are audited.
+- mbox can be added later as a second format; Maildir is the primary one.
+
+The reverse, **import** of a Maildir into a mailbox (`dovetail admin import-mailbox` and an
+admin API task), is planned as the migration path from Dovecot: messages go through the normal
+parse-and-store path, flags, keywords, folders and (where possible) UIDs are preserved.
 
 ## Quotas
 
@@ -661,6 +746,10 @@ belonging to an account with the `admin` role, for operating the platform:
 4. **Aliases:** create, update, delete, list by domain
 5. **Mailbox maintenance:** verify or rebuild the index, force quota recalculation, purge
    Trash now, re-index for search
+5a. **Legal hold:** place a mailbox on hold (reason, case reference, options), release it,
+   list mailboxes on hold
+5b. **Export/import:** start a Maildir export or import task, track progress, download the
+   result
 6. **Worker and queue visibility:** pending and failed tasks, retry, dead-letter set
 7. **Support access:** read a mailbox on behalf of a user, audited
 8. **Platform status:** Ceph health, version, running instances, reconciliation findings
@@ -688,6 +777,7 @@ The daemon takes a single YAML file as configuration:
 - Default quota limits, over-quota and disabled-mailbox LMTP reply policy
 - Inline attachment size threshold
 - Maximum message size
+- Export directory for worker-run exports; post-hold purge grace period
 - Management listener (metrics, health)
 - Logging and metrics settings
 - Redis information (only if it ever becomes needed)
@@ -699,7 +789,9 @@ Secrets (Ceph key, SMTP relay password) can be given inline, as a path to a file
 
 Talks to RADOS directly with the same config file, for operations that must work without a
 running API: `bootstrap` (first admin account and token), `export` / `import` of identity
-data, `reconcile`, and the same mailbox maintenance actions as the admin API.
+data, `export-mailbox` / `import-mailbox` (Maildir), `hold` / `release`, `reconcile`, and the
+same mailbox maintenance actions as the admin API. It is built on the same service interfaces
+as the API.
 
 ## Key dependencies
 
@@ -727,6 +819,7 @@ data, `reconcile`, and the same mailbox maintenance actions as the admin API.
 - JMAP write side: `Email/set`, `Mailbox/set`, `Email/import`, `EmailSubmission`, push
   (EventSource, WebSocket)
 - Self-service credential endpoints
+- Legal hold; Maildir export and import
 - IMAP, POP3
 - Workers: trash purge, attachment GC, quota recalculation, reconciliation, orphan sweep
 - Remaining admin API (maintenance, support access, audit, sessions)

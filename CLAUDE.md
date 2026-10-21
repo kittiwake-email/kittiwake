@@ -25,6 +25,15 @@ Binary name: `dovetail`. Not an MTA: Postfix stays in front (LMTP in, SMTP relay
 
 These are settled. Do not design around them.
 
+- **Library first, daemon second.** Layers: `rados` interface (librados + in-memory mock) →
+  stores (identity, index, messages, attachments, changelog, audit, sessions, queue) →
+  services as Go interfaces (`Auth`, `Delivery`, `Mailbox`, `Submit`, `Admin`, `Audit`,
+  `Notify`) → protocol adapters (LMTP, IMAP, POP3, JMAP, REST, socketmap, CLI) →
+  `cmd/dovetail`. A protocol adapter never touches a store or RADOS directly. Authorisation
+  (roles, enabled flags, hold) and audit happen in the services, once, via a context that
+  carries actor, client IP and protocol. Each layer is tested against the mock of the layer
+  below. The service interfaces are the project's public Go API.
+
 - **One Go binary (`dovetail`), multiple modes:** `lmtp`, `imap`, `pop3`, `api`, `postfix`,
   `worker` (+ `dav` later), plus an `admin` subcommand that talks to RADOS directly
   (bootstrap, export/import, reconcile). Modes combine in one process or split across many.
@@ -94,6 +103,16 @@ These are settled. Do not design around them.
   retention set for the same period. Nothing is destroyed immediately.
 - **Spam routing:** a configurable header/value from the MTA files the message into Junk at
   LMTP time. No Sieve-style user rules.
+- **Legal hold:** a mailbox on hold (record on the mailbox object: reason, case ref, who,
+  when, options) refuses every user mutation on every protocol, suspends all purges and
+  deletion, keeps accepting delivery by default, refuses sending by default, optionally
+  `sealed` (no user access). Enforced in the `Mailbox` service. Release is audited and
+  purges resume with a grace period.
+- **Maildir export/import:** byte-exact messages in Dovecot Maildir++ layout (flags in
+  filename, `dovecot-keywords`, `dovecot-uidlist`, mtime = internal date) plus
+  `manifest.json` with SHA-256 per file and the audit log, as a tar. CLI writes to a path;
+  admin API runs it as a worker task into the export directory. Import is the Dovecot
+  migration path.
 - **Auditing:** every mailbox action and every identity change (who, real client IP,
   protocol, action, target, result) goes to the structured log and to per-mailbox per-day
   audit objects (`<mailbox>/audit/<date>`, plus `audit/admin/<date>`), queryable via the
