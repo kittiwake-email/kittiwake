@@ -1,0 +1,1249 @@
+// Package rest is the custom REST surface described by api/openapi.yaml:
+// the OAuth token/revoke endpoints, self-service credential management
+// (/v1/me/...) and the admin API (/v1/admin/...). It is a thin adapter over
+// service/auth and service/admin; it holds no logic of its own beyond
+// request decoding, error mapping and route wiring.
+package rest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"dovetail/proto/httpx"
+	"dovetail/service/actor"
+	"dovetail/service/admin"
+	"dovetail/service/auth"
+	"dovetail/store/audit"
+	"dovetail/store/identity"
+	"dovetail/store/index"
+	"dovetail/store/queue"
+	"dovetail/store/session"
+)
+
+// Version reported by /v1/admin/status.
+var Version = "dev"
+
+// Config for the server.
+type Config struct {
+	Realm          string
+	TrustedProxies []net.IPNet
+	DefaultQuota   identity.QuotaLimits
+	MaxBody        int64
+	// Identity is optional; when set, /v1/me includes the password list and
+	// TOTP state (the auth service does not expose account records).
+	Identity *identity.Store
+}
+
+// Server serves the REST endpoints.
+type Server struct {
+	cfg    Config
+	auth   *auth.Service
+	admin  *admin.Service
+	audit  *audit.Store
+	queue  *queue.Store
+	log    *slog.Logger
+	mu     sync.Mutex
+	routes []string
+}
+
+// New returns a server.
+func New(cfg Config, authSvc *auth.Service, adminSvc *admin.Service, auditStore *audit.Store, queueStore *queue.Store, log *slog.Logger) *Server {
+	if cfg.Realm == "" {
+		cfg.Realm = "dovetail"
+	}
+	if cfg.MaxBody <= 0 {
+		cfg.MaxBody = 4 << 20
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Server{cfg: cfg, auth: authSvc, admin: adminSvc, audit: auditStore, queue: queueStore, log: log}
+}
+
+// Routes returns the registered "METHOD /path" patterns (for the spec test).
+func (s *Server) Routes() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]string(nil), s.routes...)
+	sort.Strings(out)
+	return out
+}
+
+type route struct {
+	pattern string
+	h       http.HandlerFunc
+}
+
+// Handler returns the HTTP handler for everything under /v1/.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	selfAuth := httpx.Auth(s.auth, audit.ProtoREST, s.cfg.TrustedProxies, s.cfg.Realm)
+	adminAuth := httpx.Auth(s.auth, audit.ProtoAdmin, s.cfg.TrustedProxies, s.cfg.Realm)
+	adminRole := httpx.RequireRole(identity.RoleAdmin)
+	body := httpx.MaxBody(s.cfg.MaxBody)
+
+	reg := func(wrap func(http.Handler) http.Handler, rs ...route) {
+		for _, r := range rs {
+			var h http.Handler = r.h
+			if wrap != nil {
+				h = wrap(h)
+			}
+			mux.Handle(r.pattern, body(h))
+			s.mu.Lock()
+			s.routes = append(s.routes, r.pattern)
+			s.mu.Unlock()
+		}
+	}
+	public := func(h http.Handler) http.Handler { return h }
+	self := func(h http.Handler) http.Handler { return selfAuth(h) }
+	adm := func(h http.Handler) http.Handler { return adminAuth(adminRole(h)) }
+
+	reg(public,
+		route{"POST /v1/oauth/token", s.oauthToken},
+		route{"POST /v1/oauth/revoke", s.oauthRevoke},
+	)
+	reg(self,
+		route{"GET /v1/me", s.me},
+		route{"GET /v1/me/sessions", s.meSessions},
+		route{"DELETE /v1/me/sessions/{id}", s.meRevokeSession},
+		route{"PUT /v1/me/password", s.mePassword},
+		route{"POST /v1/me/app-passwords", s.meAppPassword},
+		route{"DELETE /v1/me/passwords/{id}", s.meDeletePassword},
+		route{"POST /v1/me/totp", s.meTOTPBegin},
+		route{"POST /v1/me/totp/confirm", s.meTOTPConfirm},
+		route{"DELETE /v1/me/totp", s.meTOTPDisable},
+	)
+	// TODO: self-service API token management (/v1/me/tokens) needs a
+	// token CRUD on the auth service; until then tokens are admin-managed.
+	reg(adm,
+		route{"GET /v1/admin/status", s.adminStatus},
+		route{"POST /v1/admin/domains", s.domainCreate},
+		route{"GET /v1/admin/domains", s.domainList},
+		route{"GET /v1/admin/domains/{name}", s.domainGet},
+		route{"PATCH /v1/admin/domains/{name}", s.domainPatch},
+		route{"DELETE /v1/admin/domains/{name}", s.domainDelete},
+		route{"POST /v1/admin/mailboxes", s.mailboxCreate},
+		route{"GET /v1/admin/mailboxes/{id}", s.mailboxGet},
+		route{"PATCH /v1/admin/mailboxes/{id}", s.mailboxPatch},
+		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
+		route{"POST /v1/admin/mailboxes/{id}/recalculate", s.mailboxRecalculate},
+		route{"POST /v1/admin/mailboxes/{id}/hold", s.mailboxHold},
+		route{"DELETE /v1/admin/mailboxes/{id}/hold", s.mailboxRelease},
+		route{"GET /v1/admin/holds", s.holdList},
+		route{"POST /v1/admin/accounts", s.accountCreate},
+		route{"GET /v1/admin/accounts", s.accountList},
+		route{"GET /v1/admin/accounts/{id}", s.accountGet},
+		route{"PATCH /v1/admin/accounts/{id}", s.accountPatch},
+		route{"DELETE /v1/admin/accounts/{id}", s.accountDelete},
+		route{"PUT /v1/admin/accounts/{id}/password", s.accountPassword},
+		route{"DELETE /v1/admin/accounts/{id}/totp", s.accountTOTPDisable},
+		route{"GET /v1/admin/accounts/{id}/sessions", s.accountSessions},
+		route{"DELETE /v1/admin/accounts/{id}/sessions/{sid}", s.accountRevokeSession},
+		route{"POST /v1/admin/accounts/{id}/tokens", s.tokenCreate},
+		route{"GET /v1/admin/accounts/{id}/tokens", s.tokenList},
+		route{"DELETE /v1/admin/accounts/{id}/tokens/{tid}", s.tokenDelete},
+		route{"POST /v1/admin/aliases", s.aliasCreate},
+		route{"GET /v1/admin/aliases", s.aliasList},
+		route{"GET /v1/admin/aliases/{address}", s.aliasGet},
+		route{"PATCH /v1/admin/aliases/{address}", s.aliasPatch},
+		route{"DELETE /v1/admin/aliases/{address}", s.aliasDelete},
+		route{"GET /v1/admin/audit", s.auditRead},
+		route{"GET /v1/admin/queues/{type}", s.queueStats},
+		route{"GET /v1/admin/queues/{type}/dead", s.queueDead},
+		route{"POST /v1/admin/queues/{type}/dead/{id}/retry", s.queueRetry},
+		route{"POST /v1/admin/keys/rotate", s.keysRotate},
+		route{"GET /v1/admin/export", s.exportIdentity},
+		route{"POST /v1/admin/import", s.importIdentity},
+	)
+	return mux
+}
+
+// ---- helpers ----
+
+func (s *Server) clientIP(r *http.Request) string { return httpx.ClientIP(r, s.cfg.TrustedProxies) }
+
+func decodeJSON(r *http.Request, v any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	return nil
+}
+
+// fail maps service errors to HTTP problems.
+func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	var status int
+	detail := err.Error()
+	switch {
+	case errors.Is(err, identity.ErrNotFound), errors.Is(err, session.ErrNotFound), errors.Is(err, queue.ErrNotFound), errors.Is(err, index.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, identity.ErrExists):
+		status = http.StatusConflict
+	case errors.Is(err, identity.ErrInUse), errors.Is(err, identity.ErrConflict), errors.Is(err, session.ErrConflict):
+		status = http.StatusConflict
+	case errors.Is(err, identity.ErrInvalid), errors.Is(err, identity.ErrDomainUnknown), errors.Is(err, errBadRequest):
+		status = http.StatusBadRequest
+	case errors.Is(err, admin.ErrForbidden):
+		status = http.StatusForbidden
+	case errors.Is(err, auth.ErrTOTPInvalid), errors.Is(err, auth.ErrScope):
+		status = http.StatusBadRequest
+	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired), errors.Is(err, auth.ErrTOTPRequired), errors.Is(err, auth.ErrSessionRevoked):
+		status = http.StatusUnauthorized
+	case errors.Is(err, auth.ErrAccountDisabled):
+		status = http.StatusForbidden
+	default:
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			status, detail = http.StatusRequestEntityTooLarge, "request body too large"
+			break
+		}
+		var jsonErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &jsonErr) || errors.As(err, &typeErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.HasPrefix(detail, "json: ") {
+			status, detail = http.StatusBadRequest, "malformed JSON body: "+detail
+			break
+		}
+		s.log.ErrorContext(r.Context(), "rest: internal error", slog.String("path", r.URL.Path), slog.String("error", err.Error()))
+		status, detail = http.StatusInternalServerError, "internal error"
+	}
+	httpx.WriteProblem(w, status, "about:blank", detail)
+}
+
+var errBadRequest = errors.New("bad request")
+
+func badRequest(msg string) error { return errors.Join(errBadRequest, errors.New(msg)) }
+
+func pathUUID(r *http.Request, name string) (uuid.UUID, error) {
+	id, err := uuid.Parse(r.PathValue(name))
+	if err != nil {
+		return uuid.Nil, badRequest("invalid " + name + ": not a uuid")
+	}
+	return id, nil
+}
+
+func limitParam(r *http.Request) int {
+	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if n <= 0 {
+		return 100
+	}
+	if n > 1000 {
+		return 1000
+	}
+	return n
+}
+
+type listResponse struct {
+	Items []string `json:"items"`
+	More  bool     `json:"more"`
+	Next  string   `json:"next,omitempty"`
+}
+
+func listOut(items []string, more bool) listResponse {
+	if items == nil {
+		items = []string{}
+	}
+	out := listResponse{Items: items, More: more}
+	if more && len(items) > 0 {
+		out.Next = items[len(items)-1]
+	}
+	return out
+}
+
+// ---- OAuth ----
+
+type oauthError struct {
+	Error       string `json:"error"`
+	Description string `json:"error_description,omitempty"`
+}
+
+func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(oauthError{Error: code, Description: desc})
+}
+
+type tokenRequest struct {
+	GrantType    string `json:"grant_type"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	Scope        string `json:"scope"`
+	ClientName   string `json:"client_name"`
+	ClientID     string `json:"client_id"`
+	TOTPCode     string `json:"totp_code"`
+	RefreshToken string `json:"refresh_token"`
+	Token        string `json:"token"`
+}
+
+// readTokenRequest accepts form-encoded or JSON bodies.
+func readTokenRequest(r *http.Request) (tokenRequest, error) {
+	var req tokenRequest
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "application/json") {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil {
+			return req, err
+		}
+		return req, nil
+	}
+	if err := r.ParseForm(); err != nil {
+		return req, err
+	}
+	f := r.PostForm
+	req = tokenRequest{
+		GrantType: f.Get("grant_type"), Username: f.Get("username"), Password: f.Get("password"), Scope: f.Get("scope"),
+		ClientName: f.Get("client_name"), ClientID: f.Get("client_id"), TOTPCode: f.Get("totp_code"),
+		RefreshToken: f.Get("refresh_token"), Token: f.Get("token"),
+	}
+	return req, nil
+}
+
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
+	SessionID    string `json:"session_id"`
+}
+
+func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
+	req, err := readTokenRequest(r)
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "malformed request body")
+		return
+	}
+	var toks auth.Tokens
+	switch req.GrantType {
+	case "password":
+		if req.Username == "" || req.Password == "" {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "username and password are required")
+			return
+		}
+		client := req.ClientName
+		if client == "" {
+			client = req.ClientID
+		}
+		toks, err = s.auth.Login(r.Context(), auth.LoginRequest{
+			Username: req.Username, Password: req.Password, TOTPCode: req.TOTPCode,
+			Scope: strings.Fields(req.Scope), Client: client, ClientIP: s.clientIP(r), Protocol: audit.ProtoREST,
+		})
+	case "refresh_token":
+		if req.RefreshToken == "" {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
+			return
+		}
+		toks, err = s.auth.Refresh(r.Context(), req.RefreshToken, s.clientIP(r), audit.ProtoREST)
+	case "":
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "grant_type is required")
+		return
+	default:
+		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "grant_type must be password or refresh_token")
+		return
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrTOTPRequired):
+			writeOAuthError(w, http.StatusBadRequest, "totp_required", "a one-time code is required for this account; resend with totp_code")
+		case errors.Is(err, auth.ErrScope):
+			writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "requested scope exceeds the account's roles")
+		case errors.Is(err, auth.ErrAccountDisabled):
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "account disabled")
+		case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrTOTPInvalid),
+			errors.Is(err, auth.ErrSessionRevoked), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired):
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid credentials or token")
+		default:
+			s.log.ErrorContext(r.Context(), "rest: token endpoint", slog.String("error", err.Error()))
+			writeOAuthError(w, http.StatusInternalServerError, "server_error", "internal error")
+		}
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusOK, tokenResponse{
+		AccessToken: toks.AccessToken, TokenType: toks.TokenType, ExpiresIn: toks.ExpiresIn,
+		RefreshToken: toks.RefreshToken, Scope: strings.Join(toks.Scope, " "), SessionID: toks.SessionID,
+	})
+}
+
+func (s *Server) oauthRevoke(w http.ResponseWriter, r *http.Request) {
+	req, err := readTokenRequest(r)
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "malformed request body")
+		return
+	}
+	tok := req.Token
+	if tok == "" {
+		tok = req.RefreshToken
+	}
+	if err := s.auth.Revoke(r.Context(), tok, s.clientIP(r), audit.ProtoREST); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+}
+
+// ---- self-service ----
+
+type passwordView struct {
+	ID      string    `json:"id"`
+	Kind    string    `json:"kind"`
+	Comment string    `json:"comment,omitempty"`
+	Created time.Time `json:"created"`
+}
+
+func passwordViews(pw []identity.Password) []passwordView {
+	out := make([]passwordView, 0, len(pw))
+	for _, p := range pw {
+		out = append(out, passwordView{ID: p.ID, Kind: p.Kind, Comment: p.Comment, Created: p.Created})
+	}
+	return out
+}
+
+type meView struct {
+	ID          uuid.UUID      `json:"id"`
+	Username    string         `json:"username"`
+	MailboxID   uuid.UUID      `json:"mailbox_id"`
+	Roles       []string       `json:"roles"`
+	Credential  string         `json:"credential"`
+	TOTPEnabled bool           `json:"totp_enabled"`
+	Passwords   []passwordView `json:"passwords"`
+	TokenID     string         `json:"token_id,omitempty"`
+	SessionID   string         `json:"session_id,omitempty"`
+}
+
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	a := actor.From(r.Context())
+	out := meView{ID: a.AccountID, Username: a.Username, MailboxID: a.MailboxID, Roles: a.Roles, Credential: a.Credential, TokenID: a.TokenID, SessionID: a.SessionID, Passwords: []passwordView{}}
+	if out.Roles == nil {
+		out.Roles = []string{}
+	}
+	if s.cfg.Identity != nil {
+		v, err := s.cfg.Identity.GetAccount(r.Context(), a.AccountID)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		out.TOTPEnabled = v.Value.TOTP != nil && v.Value.TOTP.Confirmed
+		out.Passwords = passwordViews(v.Value.Passwords)
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+type sessionView struct {
+	ID        string    `json:"id"`
+	Client    string    `json:"client"`
+	Roles     []string  `json:"roles"`
+	Created   time.Time `json:"created"`
+	LastUsed  time.Time `json:"last_used"`
+	LastIP    string    `json:"last_ip,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func sessionViews(in []session.Session) []sessionView {
+	out := make([]sessionView, 0, len(in))
+	for _, x := range in {
+		out = append(out, sessionView{ID: x.ID, Client: x.Client, Roles: x.Roles, Created: x.Created, LastUsed: x.LastUsed, LastIP: x.LastIP, ExpiresAt: x.ExpiresAt})
+	}
+	return out
+}
+
+func (s *Server) meSessions(w http.ResponseWriter, r *http.Request) {
+	list, err := s.auth.ListSessions(r.Context(), actor.From(r.Context()).AccountID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": sessionViews(list)})
+}
+
+func (s *Server) meRevokeSession(w http.ResponseWriter, r *http.Request) {
+	if err := s.auth.RevokeSession(r.Context(), actor.From(r.Context()).AccountID, r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type passwordRequest struct {
+	Password string `json:"password"`
+	Kind     string `json:"kind,omitempty"`
+	Comment  string `json:"comment,omitempty"`
+}
+
+func (s *Server) mePassword(w http.ResponseWriter, r *http.Request) {
+	var req passwordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	id, err := s.auth.SetPassword(r.Context(), actor.From(r.Context()).AccountID, req.Password, identity.PasswordPrimary, "")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "kind": identity.PasswordPrimary})
+}
+
+func (s *Server) meAppPassword(w http.ResponseWriter, r *http.Request) {
+	var req passwordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	id, err := s.auth.SetPassword(r.Context(), actor.From(r.Context()).AccountID, req.Password, identity.PasswordApplication, req.Comment)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id, "kind": identity.PasswordApplication, "comment": req.Comment})
+}
+
+func (s *Server) meDeletePassword(w http.ResponseWriter, r *http.Request) {
+	if err := s.auth.RemovePassword(r.Context(), actor.From(r.Context()).AccountID, r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) meTOTPBegin(w http.ResponseWriter, r *http.Request) {
+	enr, err := s.auth.BeginTOTP(r.Context(), actor.From(r.Context()).AccountID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"secret": enr.Secret, "uri": enr.URI, "recovery_codes": enr.RecoveryCodes})
+}
+
+func (s *Server) meTOTPConfirm(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.auth.ConfirmTOTP(r.Context(), actor.From(r.Context()).AccountID, req.Code); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) meTOTPDisable(w http.ResponseWriter, r *http.Request) {
+	if err := s.auth.DisableTOTP(r.Context(), actor.From(r.Context()).AccountID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: status ----
+
+func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"version": Version, "time": time.Now().UTC()})
+}
+
+// ---- admin: domains ----
+
+type domainRequest struct {
+	Name     string            `json:"name,omitempty"`
+	Enabled  *bool             `json:"enabled,omitempty"`
+	Settings map[string]string `json:"settings,omitempty"`
+}
+
+func (s *Server) domainCreate(w http.ResponseWriter, r *http.Request) {
+	var req domainRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	d := identity.Domain{Name: req.Name, Enabled: true, Settings: req.Settings}
+	if req.Enabled != nil {
+		d.Enabled = *req.Enabled
+	}
+	out, err := s.admin.CreateDomain(r.Context(), d)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) domainList(w http.ResponseWriter, r *http.Request) {
+	names, more, err := s.admin.ListDomains(r.Context(), r.URL.Query().Get("after"), limitParam(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, listOut(names, more))
+}
+
+func (s *Server) domainGet(w http.ResponseWriter, r *http.Request) {
+	out, err := s.admin.GetDomain(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) domainPatch(w http.ResponseWriter, r *http.Request) {
+	var req domainRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := s.admin.UpdateDomain(r.Context(), r.PathValue("name"), func(d *identity.Domain) error {
+		if req.Enabled != nil {
+			d.Enabled = *req.Enabled
+		}
+		if req.Settings != nil {
+			d.Settings = req.Settings
+		}
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) domainDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.admin.DeleteDomain(r.Context(), r.PathValue("name")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: mailboxes ----
+
+type mailboxRequest struct {
+	Enabled *bool                 `json:"enabled,omitempty"`
+	Quota   *identity.QuotaLimits `json:"quota,omitempty"`
+}
+
+func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
+	var req mailboxRequest
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	m := identity.Mailbox{Enabled: true}
+	if req.Enabled != nil {
+		m.Enabled = *req.Enabled
+	}
+	if req.Quota != nil {
+		m.Quota = *req.Quota
+	}
+	out, err := s.admin.CreateMailbox(r.Context(), m)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) mailboxGet(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	info, err := s.admin.InspectMailbox(r.Context(), id, s.cfg.DefaultQuota)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) mailboxPatch(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req mailboxRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := s.admin.UpdateMailbox(r.Context(), id, func(m *identity.Mailbox) error {
+		if req.Enabled != nil {
+			m.Enabled = *req.Enabled
+		}
+		if req.Quota != nil {
+			m.Quota = *req.Quota
+		}
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) mailboxDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.admin.DeleteMailbox(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) mailboxRecalculate(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	usage, err := s.admin.RecalculateQuota(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"usage": usage})
+}
+
+type holdRequest struct {
+	Reason         string `json:"reason"`
+	CaseRef        string `json:"case_ref,omitempty"`
+	AcceptDelivery *bool  `json:"accept_delivery,omitempty"`
+	AllowSend      bool   `json:"allow_send,omitempty"`
+	Sealed         bool   `json:"sealed,omitempty"`
+}
+
+func (s *Server) mailboxHold(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req holdRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := s.admin.Hold(r.Context(), id, admin.HoldRequest{Reason: req.Reason, CaseRef: req.CaseRef, AcceptDelivery: req.AcceptDelivery, AllowSend: req.AllowSend, Sealed: req.Sealed})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) mailboxRelease(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	out, err := s.admin.Release(r.Context(), id, req.Note)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) holdList(w http.ResponseWriter, r *http.Request) {
+	list, err := s.admin.ListHolds(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if list == nil {
+		list = []identity.Mailbox{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": list})
+}
+
+// ---- admin: accounts ----
+
+type accountView struct {
+	ID          uuid.UUID      `json:"id"`
+	Username    string         `json:"username"`
+	Domain      string         `json:"domain"`
+	MailboxID   uuid.UUID      `json:"mailbox_id"`
+	Roles       []string       `json:"roles"`
+	Enabled     bool           `json:"enabled"`
+	TOTPEnabled bool           `json:"totp_enabled"`
+	Passwords   []passwordView `json:"passwords"`
+	Created     time.Time      `json:"created"`
+	Updated     time.Time      `json:"updated"`
+}
+
+func viewAccount(a identity.Account) accountView {
+	roles := a.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	return accountView{
+		ID: a.ID, Username: a.Username, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Enabled: a.Enabled,
+		TOTPEnabled: a.TOTP != nil && a.TOTP.Confirmed, Passwords: passwordViews(a.Passwords), Created: a.Created, Updated: a.Updated,
+	}
+}
+
+type accountRequest struct {
+	Username  string     `json:"username,omitempty"`
+	MailboxID *uuid.UUID `json:"mailbox_id,omitempty"`
+	Roles     []string   `json:"roles,omitempty"`
+	Password  string     `json:"password,omitempty"`
+	Enabled   *bool      `json:"enabled,omitempty"`
+}
+
+func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
+	var req accountRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	cr := admin.CreateAccountRequest{Username: req.Username, Roles: req.Roles, Password: req.Password, Enabled: req.Enabled}
+	if req.MailboxID != nil {
+		cr.MailboxID = *req.MailboxID
+	}
+	out, err := s.admin.CreateAccount(r.Context(), cr)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, viewAccount(out))
+}
+
+func (s *Server) accountList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("domain") == "" {
+		s.fail(w, r, badRequest("domain query parameter is required"))
+		return
+	}
+	names, more, err := s.admin.ListAccounts(r.Context(), q.Get("domain"), q.Get("prefix"), q.Get("after"), limitParam(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, listOut(names, more))
+}
+
+// loadAccount resolves {id} as a uuid or a username.
+func (s *Server) loadAccount(r *http.Request) (identity.Account, error) {
+	v := r.PathValue("id")
+	if id, err := uuid.Parse(v); err == nil {
+		return s.admin.GetAccount(r.Context(), id)
+	}
+	return s.admin.GetAccountByUsername(r.Context(), v)
+}
+
+func (s *Server) accountGet(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, viewAccount(a))
+}
+
+func (s *Server) accountPatch(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req accountRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if req.Username != "" || req.Password != "" {
+		s.fail(w, r, badRequest("username and password cannot be changed here"))
+		return
+	}
+	out := a
+	if req.Roles != nil || req.Enabled != nil {
+		out, err = s.admin.UpdateAccount(r.Context(), a.ID, func(x *identity.Account) error {
+			if req.Roles != nil {
+				x.Roles = req.Roles
+			}
+			if req.Enabled != nil {
+				x.Enabled = *req.Enabled
+			}
+			return nil
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	if req.MailboxID != nil && *req.MailboxID != out.MailboxID {
+		out, err = s.admin.RelinkAccount(r.Context(), a.ID, *req.MailboxID)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, viewAccount(out))
+}
+
+func (s *Server) accountDelete(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.admin.DeleteAccount(r.Context(), a.ID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) accountPassword(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req passwordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	id, err := s.auth.SetPassword(r.Context(), a.ID, req.Password, req.Kind, req.Comment)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	kind := req.Kind
+	if kind == "" {
+		kind = identity.PasswordPrimary
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "kind": kind})
+}
+
+func (s *Server) accountTOTPDisable(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.auth.DisableTOTP(r.Context(), a.ID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) accountSessions(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	list, err := s.auth.ListSessions(r.Context(), a.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": sessionViews(list)})
+}
+
+func (s *Server) accountRevokeSession(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.auth.RevokeSession(r.Context(), a.ID, r.PathValue("sid")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: tokens ----
+
+type tokenCreateRequest struct {
+	Roles     []string  `json:"roles,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Comment   string    `json:"comment"`
+}
+
+func (s *Server) tokenCreate(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req tokenCreateRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	t, secret, err := s.admin.CreateToken(r.Context(), a.ID, req.Roles, req.ExpiresAt, req.Comment)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"token": viewToken(t), "secret": secret})
+}
+
+type tokenView struct {
+	ID        string    `json:"id"`
+	AccountID uuid.UUID `json:"account_id"`
+	Roles     []string  `json:"roles"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Comment   string    `json:"comment"`
+	Created   time.Time `json:"created"`
+	LastUsed  time.Time `json:"last_used,omitempty"`
+}
+
+func viewToken(t identity.Token) tokenView {
+	return tokenView{ID: t.ID, AccountID: t.AccountID, Roles: t.Roles, ExpiresAt: t.ExpiresAt, Comment: t.Comment, Created: t.Created, LastUsed: t.LastUsed}
+}
+
+func (s *Server) tokenList(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	list, err := s.admin.ListTokens(r.Context(), a.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := make([]tokenView, 0, len(list))
+	for _, t := range list {
+		out = append(out, viewToken(t))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (s *Server) tokenDelete(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.admin.DeleteToken(r.Context(), a.ID, r.PathValue("tid")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: aliases ----
+
+type aliasRequest struct {
+	Address      string                 `json:"address,omitempty"`
+	Enabled      *bool                  `json:"enabled,omitempty"`
+	Destinations []identity.Destination `json:"destinations,omitempty"`
+}
+
+func (s *Server) aliasCreate(w http.ResponseWriter, r *http.Request) {
+	var req aliasRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	al := identity.Alias{Address: req.Address, Enabled: true, Destinations: req.Destinations}
+	if req.Enabled != nil {
+		al.Enabled = *req.Enabled
+	}
+	out, err := s.admin.CreateAlias(r.Context(), al)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) aliasList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("domain") == "" {
+		s.fail(w, r, badRequest("domain query parameter is required"))
+		return
+	}
+	addrs, more, err := s.admin.ListAliases(r.Context(), q.Get("domain"), q.Get("after"), limitParam(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, listOut(addrs, more))
+}
+
+func (s *Server) aliasGet(w http.ResponseWriter, r *http.Request) {
+	out, err := s.admin.GetAlias(r.Context(), r.PathValue("address"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) aliasPatch(w http.ResponseWriter, r *http.Request) {
+	var req aliasRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := s.admin.UpdateAlias(r.Context(), r.PathValue("address"), func(al *identity.Alias) error {
+		if req.Enabled != nil {
+			al.Enabled = *req.Enabled
+		}
+		if req.Destinations != nil {
+			al.Destinations = req.Destinations
+		}
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) aliasDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.admin.DeleteAlias(r.Context(), r.PathValue("address")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: audit ----
+
+func (s *Server) auditRead(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	aq := audit.Query{Account: q.Get("account"), Action: q.Get("action"), ClientIP: q.Get("client_ip"), After: q.Get("after"), Max: limitParam(r)}
+	if m := q.Get("mailbox"); m != "" {
+		id, err := uuid.Parse(m)
+		if err != nil {
+			s.fail(w, r, badRequest("invalid mailbox: not a uuid"))
+			return
+		}
+		aq.Mailbox = id
+	}
+	for _, p := range []struct {
+		name string
+		dst  *time.Time
+	}{{"from", &aq.From}, {"to", &aq.To}} {
+		if v := q.Get(p.name); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				s.fail(w, r, badRequest("invalid "+p.name+": want YYYY-MM-DD"))
+				return
+			}
+			*p.dst = t
+		}
+	}
+	recs, next, err := s.audit.Read(r.Context(), aq)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if recs == nil {
+		recs = []audit.Record{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": recs, "next": next})
+}
+
+// ---- admin: queues ----
+
+func (s *Server) queueStats(w http.ResponseWriter, r *http.Request) {
+	st, err := s.queue.Stats(r.Context(), r.PathValue("type"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"type": r.PathValue("type"), "pending": st.Pending, "leased": st.Leased, "dead": st.Dead})
+}
+
+func (s *Server) queueDead(w http.ResponseWriter, r *http.Request) {
+	list, err := s.queue.Dead(r.Context(), r.PathValue("type"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if list == nil {
+		list = []queue.Task{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": list})
+}
+
+func (s *Server) queueRetry(w http.ResponseWriter, r *http.Request) {
+	if err := s.queue.Retry(r.Context(), r.PathValue("type"), r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: keys, export/import ----
+
+func (s *Server) keysRotate(w http.ResponseWriter, r *http.Request) {
+	if err := s.auth.RotateKeys(r.Context()); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) exportIdentity(w http.ResponseWriter, r *http.Request) {
+	out, err := s.admin.ExportIdentity(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) importIdentity(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	summary, err := s.admin.ImportIdentity(r.Context(), data)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"summary": summary})
+}
+
+// ensure context import is used for interface satisfaction in tests.
+var _ = context.Background

@@ -1,0 +1,925 @@
+openapi: 3.1.0
+info:
+  title: Dovetail REST API
+  version: "1"
+  description: |
+    The custom REST surface of Dovetail: OAuth 2.0 token endpoints, self-service
+    credential management and the admin API. The mailbox API itself is JMAP
+    (see RFC 8620/8621) and is not described here.
+
+    Errors use `application/problem+json` (Problem schema) except on the OAuth
+    endpoints, which use the RFC 6749 §5.2 error object.
+servers:
+  - url: /
+security:
+  - bearer: []
+  - basic: []
+tags:
+  - name: oauth
+  - name: self
+  - name: admin
+paths:
+  /v1/oauth/token:
+    post:
+      tags: [oauth]
+      security: []
+      summary: Obtain tokens (password or refresh_token grant)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "400":
+          description: |
+            OAuth error. `error` is one of `invalid_request`, `invalid_grant`,
+            `invalid_scope`, `unsupported_grant_type` or the Dovetail extension
+            `totp_required` (resend with `totp_code`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+        "500":
+          description: server_error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+  /v1/oauth/revoke:
+    post:
+      tags: [oauth]
+      security: []
+      summary: Revoke a refresh token's session (RFC 7009)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/RevokeRequest" }
+          application/json:
+            schema: { $ref: "#/components/schemas/RevokeRequest" }
+      responses:
+        "200": { description: Revoked (or token unknown) }
+        "400":
+          description: Malformed body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+  /v1/me:
+    get:
+      tags: [self]
+      summary: The authenticated account
+      responses:
+        "200":
+          description: Account view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/sessions:
+    get:
+      tags: [self]
+      summary: List own sessions
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/sessions/{id}:
+    parameters: [{ $ref: "#/components/parameters/sessionId" }]
+    delete:
+      tags: [self]
+      summary: Revoke one of own sessions
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/password:
+    put:
+      tags: [self]
+      summary: Replace the primary password
+      requestBody: { $ref: "#/components/requestBodies/Password" }
+      responses:
+        "200": { $ref: "#/components/responses/PasswordCreated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/app-passwords:
+    post:
+      tags: [self]
+      summary: Add an application password
+      requestBody: { $ref: "#/components/requestBodies/Password" }
+      responses:
+        "201": { $ref: "#/components/responses/PasswordCreated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/passwords/{id}:
+    parameters: [{ $ref: "#/components/parameters/passwordId" }]
+    delete:
+      tags: [self]
+      summary: Remove a password by id
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/me/totp:
+    post:
+      tags: [self]
+      summary: Begin TOTP enrolment (secret, provisioning URI, recovery codes)
+      responses:
+        "200":
+          description: Enrolment data, shown once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TOTPEnrolment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [self]
+      summary: Disable TOTP
+      responses:
+        "204": { description: Disabled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/totp/confirm:
+    post:
+      tags: [self]
+      summary: Confirm TOTP enrolment with a first code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: { code: { type: string } }
+      responses:
+        "204": { description: TOTP enabled }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/admin/status:
+    get:
+      tags: [admin]
+      summary: Platform status
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  time: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/domains:
+    post:
+      tags: [admin]
+      summary: Create a domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Domain" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [admin]
+      summary: List domain names
+      parameters: [{ $ref: "#/components/parameters/after" }, { $ref: "#/components/parameters/limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/StringList" }
+  /v1/admin/domains/{name}:
+    parameters: [{ $ref: "#/components/parameters/domainName" }]
+    get:
+      tags: [admin]
+      summary: Get a domain
+      responses:
+        "200": { $ref: "#/components/responses/Domain" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update a domain (enabled, settings)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Domain" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Delete an empty domain
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/mailboxes:
+    post:
+      tags: [admin]
+      summary: Create a mailbox
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailboxRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Mailbox" }
+  /v1/admin/mailboxes/{id}:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    get:
+      tags: [admin]
+      summary: Inspect a mailbox (usage, folders, accounts, hold, limits)
+      responses:
+        "200":
+          description: Mailbox info
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailboxInfo" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update enabled/quota
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailboxRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Mailbox" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Delete a mailbox and schedule removal of its data
+      responses:
+        "202": { description: Removal scheduled }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/mailboxes/{id}/recalculate:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    post:
+      tags: [admin]
+      summary: Recalculate quota usage from the folder indexes
+      responses:
+        "200":
+          description: Usage
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usage: { $ref: "#/components/schemas/Usage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/hold:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    post:
+      tags: [admin]
+      summary: Place the mailbox on legal hold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HoldRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Mailbox" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [admin]
+      summary: Release the hold
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { note: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Mailbox" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/holds:
+    get:
+      tags: [admin]
+      summary: List mailboxes on hold
+      responses:
+        "200":
+          description: Mailboxes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Mailbox" }
+  /v1/admin/accounts:
+    post:
+      tags: [admin]
+      summary: Create an account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Account" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [admin]
+      summary: List usernames in a domain (optional prefix)
+      parameters:
+        - { name: domain, in: query, required: true, schema: { type: string } }
+        - { name: prefix, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/after" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/StringList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/admin/accounts/{id}:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }]
+    get:
+      tags: [admin]
+      summary: Get an account (no hashes)
+      responses:
+        "200": { $ref: "#/components/responses/Account" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update roles, enabled, or relink to another mailbox
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Account" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Delete an account and its tokens
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/password:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }]
+    put:
+      tags: [admin]
+      summary: Set a password (primary replaces, application adds)
+      requestBody: { $ref: "#/components/requestBodies/Password" }
+      responses:
+        "200": { $ref: "#/components/responses/PasswordCreated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/totp:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }]
+    delete:
+      tags: [admin]
+      summary: Disable TOTP for the account
+      responses:
+        "204": { description: Disabled }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/sessions:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }]
+    get:
+      tags: [admin]
+      summary: List the account's sessions
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionList" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/sessions/{sid}:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }, { name: sid, in: path, required: true, schema: { type: string } }]
+    delete:
+      tags: [admin]
+      summary: Revoke a session
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/tokens:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }]
+    post:
+      tags: [admin]
+      summary: Create an API token (secret shown once)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenCreateRequest" }
+      responses:
+        "201":
+          description: Token and secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { $ref: "#/components/schemas/Token" }
+                  secret: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [admin]
+      summary: List the account's tokens
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Token" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/tokens/{tid}:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }, { name: tid, in: path, required: true, schema: { type: string } }]
+    delete:
+      tags: [admin]
+      summary: Revoke a token
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/aliases:
+    post:
+      tags: [admin]
+      summary: Create an alias (address "@domain" is the catch-all)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AliasRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Alias" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [admin]
+      summary: List alias addresses in a domain
+      parameters:
+        - { name: domain, in: query, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/after" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/StringList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/admin/aliases/{address}:
+    parameters: [{ name: address, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [admin]
+      summary: Get an alias
+      responses:
+        "200": { $ref: "#/components/responses/Alias" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update enabled/destinations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AliasRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Alias" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Delete an alias
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/audit:
+    get:
+      tags: [admin]
+      summary: Query audit records (mailbox log, or the admin log when mailbox is omitted)
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string, format: uuid } }
+        - { name: account, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: client_ip, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date }, description: "YYYY-MM-DD, default today" }
+        - { name: to, in: query, schema: { type: string, format: date }, description: "YYYY-MM-DD, default from" }
+        - { $ref: "#/components/parameters/after" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: Records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditRecord" }
+                  next: { type: string, description: Cursor for the next page, empty when done }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/admin/queues/{type}:
+    parameters: [{ $ref: "#/components/parameters/queueType" }]
+    get:
+      tags: [admin]
+      summary: Queue statistics
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type: { type: string }
+                  pending: { type: integer }
+                  leased: { type: integer }
+                  dead: { type: integer }
+  /v1/admin/queues/{type}/dead:
+    parameters: [{ $ref: "#/components/parameters/queueType" }]
+    get:
+      tags: [admin]
+      summary: Dead-lettered tasks
+      responses:
+        "200":
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Task" }
+  /v1/admin/queues/{type}/dead/{id}/retry:
+    parameters: [{ $ref: "#/components/parameters/queueType" }, { name: id, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [admin]
+      summary: Move a dead task back to pending
+      responses:
+        "204": { description: Requeued }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/keys/rotate:
+    post:
+      tags: [admin]
+      summary: Rotate the JWT signing key
+      responses:
+        "204": { description: Rotated }
+  /v1/admin/export:
+    get:
+      tags: [admin]
+      summary: Export all identity data (hashes included, no secrets)
+      responses:
+        "200":
+          description: Export
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IdentityExport" }
+  /v1/admin/import:
+    post:
+      tags: [admin]
+      summary: Import identity data; existing objects are skipped, tokens ignored
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IdentityExport" }
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { summary: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Session access token (JWT) or long-lived API token (dvt_...)
+    basic:
+      type: http
+      scheme: basic
+      description: Username and password (refused for passwords that require TOTP)
+  parameters:
+    after: { name: after, in: query, schema: { type: string }, description: Cursor from a previous page }
+    limit: { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+    sessionId: { name: id, in: path, required: true, schema: { type: string } }
+    passwordId: { name: id, in: path, required: true, schema: { type: string } }
+    domainName: { name: name, in: path, required: true, schema: { type: string } }
+    mailboxId: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    accountRef: { name: id, in: path, required: true, schema: { type: string }, description: Account uuid or username }
+    queueType: { name: type, in: path, required: true, schema: { type: string } }
+  requestBodies:
+    Password:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [password]
+            properties:
+              password: { type: string, minLength: 8 }
+              kind: { type: string, enum: [primary, application] }
+              comment: { type: string }
+  responses:
+    BadRequest: { description: Invalid input, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Unauthorized: { description: Authentication required or invalid, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Forbidden: { description: Role missing or account disabled, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    NotFound: { description: Not found, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Conflict: { description: Already exists, in use or concurrently modified, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    PasswordCreated:
+      description: Password stored
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { id: { type: string }, kind: { type: string }, comment: { type: string } }
+    StringList:
+      description: Page of names
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              items: { type: array, items: { type: string } }
+              more: { type: boolean }
+              next: { type: string }
+    Domain: { description: Domain, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
+    Mailbox: { description: Mailbox, content: { application/json: { schema: { $ref: "#/components/schemas/Mailbox" } } } }
+    Account: { description: Account, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+    Alias: { description: Alias, content: { application/json: { schema: { $ref: "#/components/schemas/Alias" } } } }
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+    OAuthError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, enum: [invalid_request, invalid_grant, invalid_scope, unsupported_grant_type, totp_required, server_error] }
+        error_description: { type: string }
+    TokenRequest:
+      type: object
+      required: [grant_type]
+      properties:
+        grant_type: { type: string, enum: [password, refresh_token] }
+        username: { type: string }
+        password: { type: string }
+        totp_code: { type: string }
+        scope: { type: string, description: Space-separated roles to narrow to }
+        client_name: { type: string, description: Device/client name shown in the session list }
+        client_id: { type: string, description: Alias for client_name }
+        refresh_token: { type: string }
+    TokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer }
+        refresh_token: { type: string }
+        scope: { type: string }
+        session_id: { type: string }
+    RevokeRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, description: The refresh token }
+    Me:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        mailbox_id: { type: string, format: uuid }
+        roles: { type: array, items: { type: string } }
+        credential: { type: string, enum: [password, app-password, token, session] }
+        totp_enabled: { type: boolean }
+        passwords: { type: array, items: { $ref: "#/components/schemas/PasswordInfo" } }
+        token_id: { type: string }
+        session_id: { type: string }
+    PasswordInfo:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [primary, application] }
+        comment: { type: string }
+        created: { type: string, format: date-time }
+    Session:
+      type: object
+      properties:
+        id: { type: string }
+        client: { type: string }
+        roles: { type: array, items: { type: string } }
+        created: { type: string, format: date-time }
+        last_used: { type: string, format: date-time }
+        last_ip: { type: string }
+        expires_at: { type: string, format: date-time }
+    SessionList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Session" } }
+    TOTPEnrolment:
+      type: object
+      properties:
+        secret: { type: string }
+        uri: { type: string }
+        recovery_codes: { type: array, items: { type: string } }
+    DomainRequest:
+      type: object
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        settings: { type: object, additionalProperties: { type: string } }
+    Domain:
+      type: object
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        settings: { type: object, additionalProperties: { type: string } }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+    QuotaLimits:
+      type: object
+      description: Zero means "use the configured default"
+      properties:
+        soft_bytes: { type: integer }
+        hard_bytes: { type: integer }
+        soft_messages: { type: integer }
+        hard_messages: { type: integer }
+    Usage:
+      type: object
+      properties:
+        bytes: { type: integer }
+        messages: { type: integer }
+    MailboxRequest:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        quota: { $ref: "#/components/schemas/QuotaLimits" }
+    Hold:
+      type: object
+      properties:
+        reason: { type: string }
+        case_ref: { type: string }
+        set_by: { type: string }
+        set_at: { type: string, format: date-time }
+        accept_delivery: { type: boolean }
+        allow_send: { type: boolean }
+        sealed: { type: boolean }
+    HoldRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string }
+        case_ref: { type: string }
+        accept_delivery: { type: boolean, default: true }
+        allow_send: { type: boolean, default: false }
+        sealed: { type: boolean, default: false }
+    Mailbox:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        enabled: { type: boolean }
+        quota: { $ref: "#/components/schemas/QuotaLimits" }
+        hold: { $ref: "#/components/schemas/Hold" }
+        released: { type: string, format: date-time }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+    Folder:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string }
+        name: { type: string }
+        role: { type: string }
+        uidvalidity: { type: integer }
+        uidnext: { type: integer }
+        modseq: { type: integer }
+        subscribed: { type: boolean }
+        keywords: { type: array, items: { type: string } }
+        total: { type: integer }
+        unseen: { type: integer }
+        size: { type: integer }
+        created: { type: string, format: date-time }
+    MailboxInfo:
+      type: object
+      properties:
+        mailbox: { $ref: "#/components/schemas/Mailbox" }
+        accounts: { type: array, items: { type: string } }
+        indexed: { type: boolean }
+        usage: { $ref: "#/components/schemas/Usage" }
+        modseq: { type: integer }
+        folders: { type: array, items: { $ref: "#/components/schemas/Folder" } }
+        hold: { $ref: "#/components/schemas/Hold" }
+        limits: { $ref: "#/components/schemas/QuotaLimits" }
+    AccountRequest:
+      type: object
+      properties:
+        username: { type: string, description: Create only }
+        mailbox_id: { type: string, format: uuid, description: On PATCH, relinks the account }
+        roles: { type: array, items: { type: string, enum: [read, write, send, admin] } }
+        password: { type: string, description: Create only, initial primary password }
+        enabled: { type: boolean }
+    Account:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        domain: { type: string }
+        mailbox_id: { type: string, format: uuid }
+        roles: { type: array, items: { type: string } }
+        enabled: { type: boolean }
+        totp_enabled: { type: boolean }
+        passwords: { type: array, items: { $ref: "#/components/schemas/PasswordInfo" } }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+    TokenCreateRequest:
+      type: object
+      required: [expires_at, comment]
+      properties:
+        roles: { type: array, items: { type: string }, description: Subset of the account's roles; empty = all }
+        expires_at: { type: string, format: date-time }
+        comment: { type: string }
+    Token:
+      type: object
+      properties:
+        id: { type: string }
+        account_id: { type: string, format: uuid }
+        roles: { type: array, items: { type: string } }
+        expires_at: { type: string, format: date-time }
+        comment: { type: string }
+        created: { type: string, format: date-time }
+        last_used: { type: string, format: date-time }
+    Destination:
+      type: object
+      description: Exactly one of mailbox_id or address
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        address: { type: string }
+    AliasRequest:
+      type: object
+      properties:
+        address: { type: string, description: Create only; "@domain" for the catch-all }
+        enabled: { type: boolean }
+        destinations: { type: array, items: { $ref: "#/components/schemas/Destination" } }
+    Alias:
+      type: object
+      properties:
+        address: { type: string }
+        domain: { type: string }
+        destinations: { type: array, items: { $ref: "#/components/schemas/Destination" } }
+        enabled: { type: boolean }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+    AuditRecord:
+      type: object
+      properties:
+        time: { type: string, format: date-time }
+        mailbox: { type: string, format: uuid }
+        account: { type: string }
+        account_id: { type: string, format: uuid }
+        token_id: { type: string }
+        token_comment: { type: string }
+        session_id: { type: string }
+        protocol: { type: string }
+        client_ip: { type: string }
+        action: { type: string }
+        target: { type: string }
+        detail: { type: string }
+        result: { type: string, enum: [ok, denied, error] }
+        admin: { type: string }
+    Task:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string }
+        payload: {}
+        run_after: { type: string, format: date-time }
+        attempts: { type: integer }
+        last_error: { type: string }
+        created: { type: string, format: date-time }
+    IdentityExport:
+      type: object
+      properties:
+        version: { type: integer }
+        exported: { type: string, format: date-time }
+        domains: { type: array, items: { $ref: "#/components/schemas/Domain" } }
+        mailboxes: { type: array, items: { $ref: "#/components/schemas/Mailbox" } }
+        accounts: { type: array, items: { type: object, description: Full account record including password hashes } }
+        aliases: { type: array, items: { $ref: "#/components/schemas/Alias" } }
+        tokens: { type: array, items: { $ref: "#/components/schemas/Token" } }
