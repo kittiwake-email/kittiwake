@@ -10,6 +10,11 @@ the mail design: LMTP, JMAP incl. submission, IMAP, POP3, REST/admin, sessions/T
 legal hold, Maildir export/import) and what is not (CONDSTORE, WebSocket, search backend,
 reconciliation worker, DAV, Ceph integration tests).
 
+## Commits
+
+Plain commit messages: subject line plus an explanatory body when useful. Never add
+`Claude-Session` or other session/attribution trailers.
+
 ## Commands
 
 ```
