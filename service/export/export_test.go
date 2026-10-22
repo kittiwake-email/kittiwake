@@ -63,7 +63,7 @@ func newFixture(t *testing.T) *fixture {
 	f.svc.Hostname = "host.test"
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	acct, _ := f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Roles: []string{"read", "write"}, Enabled: true})
 	f.cli = actor.With(ctx, actor.System("cli"))
 	f.user = actor.With(ctx, actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: f.mb.ID, Roles: acct.Roles, Protocol: "jmap"})
@@ -168,7 +168,7 @@ func TestExportAndReimport(t *testing.T) {
 	}
 
 	// Re-import the archive into a fresh mailbox.
-	mb2, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb2, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	isum, err := f.svc.ImportArchive(f.cli, mb2.ID, bytes.NewReader(buf.Bytes()))
 	if err != nil || isum.Messages != 2 || len(isum.Errors) != 0 {
 		t.Fatalf("import: %+v %v", isum, err)

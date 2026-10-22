@@ -112,9 +112,12 @@ func quotaFrom(sb, hb, sm, hm int64) *admin.QuotaLimits {
 }
 
 func (a *cli) mailbox(args []string) error {
-	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N] [--disabled]
+	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N]
        mailbox list | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
-       mailbox set <uuid> [quota flags] [--enable|--disable]     (quota flags replace the whole quota)
+       mailbox set <uuid> [quota flags]                            (quota flags replace the whole quota)
+       mailbox suspend <uuid> --reason text    soft: LMTP 450, the MTA queues; users locked out
+       mailbox disable <uuid> --reason text    hard: LMTP 550, rejected at SMTP time; users locked out
+       mailbox activate <uuid>
        mailbox hold <uuid> --reason text [--case ref] [--no-delivery] [--allow-send] [--sealed]
        mailbox release <uuid> [--note text]
        mailbox export <uuid> [--no-gzip] | exports [--mailbox uuid] | download <name> [--out file]
@@ -127,14 +130,10 @@ func (a *cli) mailbox(args []string) error {
 	case "create":
 		fs := newFlagSet("mailbox create")
 		sb, hb, sm, hm := quotaFlags(fs)
-		disabled := fs.Bool("disabled", false, "create disabled")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm)}
-		if *disabled {
-			req.Enabled = boolPtr(false)
-		}
 		m, err := a.c.CreateMailbox(a.ctx, req)
 		if err != nil {
 			return err
@@ -151,9 +150,13 @@ func (a *cli) mailbox(args []string) error {
 		return emit(items, func() {
 			var rows [][]string
 			for _, m := range items {
-				rows = append(rows, []string{m.ID, fmt.Sprint(m.Enabled), fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
+				st := m.State
+				if m.StateReason != "" {
+					st += " (" + m.StateReason + ")"
+				}
+				rows = append(rows, []string{m.ID, st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
 			}
-			table([]string{"MAILBOX", "ENABLED", "HOLD", "ACCOUNTS"}, rows)
+			table([]string{"MAILBOX", "STATE", "HOLD", "ACCOUNTS"}, rows)
 		})
 	case "holds":
 		items, err := a.c.ListHolds(a.ctx)
@@ -243,19 +246,35 @@ func (a *cli) mailbox(args []string) error {
 	case "set":
 		fs := newFlagSet("mailbox set")
 		sb, hb, sm, hm := quotaFlags(fs)
-		en, dis := enableFlags(fs)
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		enabled, err := enabledFrom(*en, *dis)
-		if err != nil {
-			return err
-		}
-		req := admin.MailboxRequest{Enabled: enabled, Quota: quotaFrom(*sb, *hb, *sm, *hm)}
-		if req.Enabled == nil && req.Quota == nil {
+		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm)}
+		if req.Quota == nil {
 			return errors.New("nothing to change")
 		}
 		m, err := a.c.UpdateMailbox(a.ctx, id, req)
+		if err != nil {
+			return err
+		}
+		return emit(m, nil)
+	case "suspend", "disable":
+		fs := newFlagSet("mailbox " + args[0])
+		reason := fs.String("reason", "", "why (required; shown to operators, logged in the audit trail)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *reason == "" {
+			return errors.New("--reason is required")
+		}
+		state := map[string]string{"suspend": "suspended", "disable": "disabled"}[args[0]]
+		m, err := a.c.SetMailboxState(a.ctx, id, state, *reason)
+		if err != nil {
+			return err
+		}
+		return emit(m, nil)
+	case "activate":
+		m, err := a.c.SetMailboxState(a.ctx, id, "active", "")
 		if err != nil {
 			return err
 		}

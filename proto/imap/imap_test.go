@@ -64,7 +64,7 @@ func newFixture(t *testing.T) *fixture {
 	mbsvc := mailbox.New(f.ids, f.idx, msgs, atts, q, aud, log, mailbox.Config{})
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	h, _ := cryptoauth.HashPassword(pass)
 	ah, _ := cryptoauth.HashPassword(appPass)
 	f.acct, _ = f.ids.CreateAccount(ctx, identity.Account{

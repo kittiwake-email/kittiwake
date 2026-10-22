@@ -172,7 +172,7 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 		Delivery: delivery.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, delivery.Config{
 			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, KeepRaw: cfg.Mail.KeepRaw,
 			SpamHeader: cfg.Mail.SpamHeader, SpamValue: cfg.Mail.SpamValue, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
-			DefaultQuota: dq, OverQuotaTempFail: cfg.Mail.OverQuotaTempFail, DisabledTempFail: cfg.Mail.DisabledTempFail,
+			DefaultQuota: dq, OverQuotaTempFail: cfg.Mail.OverQuotaTempFail,
 			LookupTTL: 2 * time.Second, // identity reads are cached per process; admin changes show within this
 		}),
 		Mailbox: mailbox.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, mailbox.Config{TrashRetention: cfg.Mail.TrashRetention, DefaultQuota: dq}),

@@ -37,7 +37,7 @@ func newServer(t *testing.T) (*Server, *index.Store, identity.Mailbox, string) {
 	del := delivery.New(ids, idx, message.New(msgp), attach.New(attp), queue.New(idxp), aud, log, delivery.Config{MaxMessageSize: 4096, DefaultQuota: identity.QuotaLimits{HardMessages: 3}})
 	ctx := context.Background()
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{"read"}, Enabled: true})
 	srv := New(Config{Hostname: "test", MaxMessageSize: 4096}, del, log)
 	l, err := net.Listen("tcp", "127.0.0.1:0")

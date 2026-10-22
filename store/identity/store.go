@@ -260,6 +260,13 @@ func (s *Store) CreateMailbox(ctx context.Context, m Mailbox) (Mailbox, error) {
 	now := s.Now().UTC()
 	m.Created, m.Updated = now, now
 	m.Hold = nil
+	if m.State == "" {
+		m.State = StateActive
+	}
+	if !ValidStates[m.State] {
+		return Mailbox{}, fmt.Errorf("%w: mailbox state %q", ErrInvalid, m.State)
+	}
+	m.StateSince = now
 	if _, err := createJSON(ctx, s.mailboxes, m.ID.String(), m); err != nil {
 		return Mailbox{}, err
 	}
@@ -284,6 +291,15 @@ func (s *Store) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*Mailbo
 		}
 		m.ID = id
 		m.Updated = s.Now().UTC()
+		if m.State == "" {
+			m.State = StateActive
+		}
+		if !ValidStates[m.State] {
+			return Mailbox{}, fmt.Errorf("%w: mailbox state %q", ErrInvalid, m.State)
+		}
+		if m.State != cur.Value.State {
+			m.StateSince = m.Updated
+		}
 		if _, err := updateJSON(ctx, s.mailboxes, id.String(), cur.Version, m); err != nil {
 			if errors.Is(err, ErrConflict) {
 				continue

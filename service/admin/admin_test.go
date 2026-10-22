@@ -43,7 +43,7 @@ func TestAuthorizationAndCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mb, err := s.CreateMailbox(adm, identity.Mailbox{Enabled: true})
+	mb, err := s.CreateMailbox(adm, identity.Mailbox{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -44,8 +44,7 @@ mail:
   post_hold_grace: 168h        # 7 days after a hold is released before purges resume
   spam_header: X-Spam-Flag
   spam_value: "YES"
-  over_quota_tempfail: false   # true: 4xx so the MTA retries
-  disabled_tempfail: false
+  over_quota_tempfail: false   # true: 4xx so the MTA retries (suspended mailboxes always 4xx, disabled always 5xx)
   max_alias_depth: 5
 
 quota:                         # defaults for mailboxes without their own limits; 0 = unlimited

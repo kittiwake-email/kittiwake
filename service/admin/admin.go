@@ -164,23 +164,49 @@ func (s *Service) GetMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbo
 	return v.Value, err
 }
 
-// UpdateMailbox changes quota/enabled. Hold is managed by Hold/Release.
+// UpdateMailbox changes the quota. Hold is managed by Hold/Release, the
+// state by SetMailboxState.
 func (s *Service) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*identity.Mailbox) error) (identity.Mailbox, error) {
 	if err := s.authorize(ctx, "mailbox-update", id.String()); err != nil {
 		return identity.Mailbox{}, err
 	}
 	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
-		hold, rel := m.Hold, m.Released
+		hold, rel, st, reason, since := m.Hold, m.Released, m.State, m.StateReason, m.StateSince
 		if err := fn(m); err != nil {
 			return err
 		}
-		m.Hold, m.Released = hold, rel
+		m.Hold, m.Released, m.State, m.StateReason, m.StateSince = hold, rel, st, reason, since
 		return nil
 	})
 	if err != nil {
 		return identity.Mailbox{}, s.fail(ctx, id, "mailbox-update", id.String(), err)
 	}
-	s.ok(ctx, id, "mailbox-update", id.String(), fmt.Sprintf("enabled=%v quota=%+v", out.Enabled, out.Quota))
+	s.ok(ctx, id, "mailbox-update", id.String(), fmt.Sprintf("quota=%+v", out.Quota))
+	return out, nil
+}
+
+// SetMailboxState activates, suspends (soft: LMTP 4xx, MTA queues) or
+// disables (hard: LMTP 5xx) a mailbox. Suspended and disabled mailboxes
+// refuse user access.
+func (s *Service) SetMailboxState(ctx context.Context, id uuid.UUID, state, reason string) (identity.Mailbox, error) {
+	if err := s.authorize(ctx, "mailbox-state", id.String()); err != nil {
+		return identity.Mailbox{}, err
+	}
+	if !identity.ValidStates[state] {
+		return identity.Mailbox{}, fmt.Errorf("%w: state %q (active, suspended or disabled)", ErrInvalid, state)
+	}
+	if state != identity.StateActive && strings.TrimSpace(reason) == "" {
+		return identity.Mailbox{}, fmt.Errorf("%w: a reason is required to suspend or disable", ErrInvalid)
+	}
+	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
+		m.State = state
+		m.StateReason = strings.TrimSpace(reason)
+		return nil
+	})
+	if err != nil {
+		return identity.Mailbox{}, s.fail(ctx, id, "mailbox-state", id.String(), err)
+	}
+	s.ok(ctx, id, "mailbox-state", id.String(), fmt.Sprintf("state=%s reason=%q", state, reason))
 	return out, nil
 }
 

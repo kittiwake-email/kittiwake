@@ -317,7 +317,8 @@ paths:
                       type: object
                       properties:
                         id: { type: string, format: uuid }
-                        enabled: { type: boolean }
+                        state: { type: string, enum: [active, suspended, disabled] }
+                        state_reason: { type: string }
                         on_hold: { type: boolean }
                         quota: { $ref: "#/components/schemas/Quota" }
                         accounts: { type: array, items: { type: string } }
@@ -959,7 +960,14 @@ components:
     MailboxRequest:
       type: object
       properties:
-        enabled: { type: boolean }
+        state:
+          type: string
+          enum: [active, suspended, disabled]
+          description: >
+            active: normal. suspended (soft): LMTP answers 450 so the MTA queues and retries,
+            users are locked out. disabled (hard): LMTP answers 550 and the Postfix socketmap
+            reports the recipient unknown (rejected at SMTP time), users are locked out.
+        state_reason: { type: string, description: Required when suspending or disabling }
         quota: { $ref: "#/components/schemas/QuotaLimits" }
     Hold:
       type: object
@@ -984,7 +992,9 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        enabled: { type: boolean }
+        state: { type: string, enum: [active, suspended, disabled] }
+        state_reason: { type: string }
+        state_since: { type: string, format: date-time }
         quota: { $ref: "#/components/schemas/QuotaLimits" }
         hold: { $ref: "#/components/schemas/Hold" }
         released: { type: string, format: date-time }

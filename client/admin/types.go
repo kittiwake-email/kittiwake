@@ -58,19 +58,24 @@ type Hold struct {
 
 // Mailbox is the identity record of a mailbox.
 type Mailbox struct {
-	ID       string      `json:"id"`
-	Enabled  bool        `json:"enabled"`
-	Quota    QuotaLimits `json:"quota"`
-	Hold     *Hold       `json:"hold,omitempty"`
-	Released *time.Time  `json:"released,omitempty"`
-	Created  time.Time   `json:"created"`
-	Updated  time.Time   `json:"updated"`
+	ID          string      `json:"id"`
+	State       string      `json:"state"` // active | suspended | disabled
+	StateReason string      `json:"state_reason,omitempty"`
+	StateSince  time.Time   `json:"state_since"`
+	Quota       QuotaLimits `json:"quota"`
+	Hold        *Hold       `json:"hold,omitempty"`
+	Released    *time.Time  `json:"released,omitempty"`
+	Created     time.Time   `json:"created"`
+	Updated     time.Time   `json:"updated"`
 }
 
 // MailboxRequest creates or patches a mailbox.
 type MailboxRequest struct {
-	Enabled *bool        `json:"enabled,omitempty"`
-	Quota   *QuotaLimits `json:"quota,omitempty"`
+	// State: active, suspended (soft: LMTP 4xx, MTA queues) or disabled
+	// (hard: LMTP 5xx); a reason is required for the latter two.
+	State       *string      `json:"state,omitempty"`
+	StateReason string       `json:"state_reason,omitempty"`
+	Quota       *QuotaLimits `json:"quota,omitempty"`
 }
 
 // Usage is quota usage.
@@ -110,12 +115,13 @@ type MailboxInfo struct {
 
 // MailboxListItem is one entry of GET /v1/admin/mailboxes.
 type MailboxListItem struct {
-	ID       string      `json:"id"`
-	Enabled  bool        `json:"enabled"`
-	OnHold   bool        `json:"on_hold"`
-	Quota    QuotaLimits `json:"quota"`
-	Accounts []string    `json:"accounts"`
-	Created  time.Time   `json:"created"`
+	ID          string      `json:"id"`
+	State       string      `json:"state"`
+	StateReason string      `json:"state_reason,omitempty"`
+	OnHold      bool        `json:"on_hold"`
+	Quota       QuotaLimits `json:"quota"`
+	Accounts    []string    `json:"accounts"`
+	Created     time.Time   `json:"created"`
 }
 
 // HoldRequest places a mailbox on hold. AcceptDelivery defaults to true.

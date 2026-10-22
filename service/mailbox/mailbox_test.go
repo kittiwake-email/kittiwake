@@ -58,12 +58,12 @@ func newFixture(t *testing.T) *fixture {
 	f.del = delivery.New(f.ids, f.idx, msgs, atts, q, aud, log, delivery.Config{})
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	acct, _ := f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Roles: []string{"read", "write", "send"}, Enabled: true})
 	f.user = actor.With(ctx, actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: f.mb.ID, Roles: acct.Roles, Protocol: "jmap", ClientIP: "::1"})
 	f.ro = actor.With(ctx, actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: f.mb.ID, Roles: []string{"read"}, Protocol: "jmap"})
 	f.adm = actor.With(ctx, actor.Actor{AccountID: uuid.New(), Username: "admin@example.org", Roles: []string{"admin"}, Protocol: "admin"})
-	other, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	other, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	f.anon = actor.With(ctx, actor.Actor{AccountID: uuid.New(), Username: "x@example.org", MailboxID: other.ID, Roles: []string{"read", "write"}, Protocol: "jmap"})
 	return f
 }

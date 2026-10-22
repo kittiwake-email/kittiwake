@@ -67,7 +67,7 @@ func newFixture(t *testing.T) *fixture {
 	f.w.Now = now
 	ctx := context.Background()
 	_, _ = f.st.Identity.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.st.Identity.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.st.Identity.CreateMailbox(ctx, identity.Mailbox{})
 	acct, _ := f.st.Identity.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Roles: []string{"read", "write"}, Enabled: true})
 	f.user = actor.With(ctx, actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: f.mb.ID, Roles: acct.Roles, Protocol: "jmap"})
 	f.adm_ = actor.With(ctx, actor.Actor{AccountID: uuid.New(), Username: "root@example.org", Roles: []string{"admin"}, Protocol: "admin"})

@@ -32,7 +32,7 @@ func newServer(t *testing.T) (*Server, identity.Mailbox) {
 	ctx := context.Background()
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "off.example", Enabled: false})
-	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{"read"}, Enabled: true})
 	_, _ = ids.CreateAlias(ctx, identity.Alias{Address: "info@example.org", Enabled: true, Destinations: []identity.Destination{{MailboxID: mb.ID}, {Address: "ext@other.example"}}})
 	_, _ = ids.CreateAlias(ctx, identity.Alias{Address: "fwd@example.org", Enabled: true, Destinations: []identity.Destination{{Address: "wido@example.org"}}})
@@ -59,6 +59,20 @@ func TestLookups(t *testing.T) {
 		if got := s.Lookup(ctx, in[0], in[1]); got != want {
 			t.Errorf("%v: got %q want %q", in, got, want)
 		}
+	}
+}
+
+func TestMailboxStates(t *testing.T) {
+	s, mb := newServer(t)
+	ctx := context.Background()
+	ids := s.ids
+	_, _ = ids.UpdateMailbox(ctx, mb.ID, func(m *identity.Mailbox) error { m.State = identity.StateSuspended; return nil })
+	if got := s.Lookup(ctx, "mailboxes", "wido@example.org"); got != "OK "+mb.ID.String() {
+		t.Fatalf("suspended must still exist for Postfix (queued at LMTP): %q", got)
+	}
+	_, _ = ids.UpdateMailbox(ctx, mb.ID, func(m *identity.Mailbox) error { m.State = identity.StateDisabled; return nil })
+	if got := s.Lookup(ctx, "mailboxes", "wido@example.org"); got != "NOTFOUND " {
+		t.Fatalf("disabled must be unknown to Postfix (rejected at SMTP time): %q", got)
 	}
 }
 

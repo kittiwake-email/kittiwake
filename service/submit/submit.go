@@ -168,8 +168,8 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if !mv.Value.Enabled {
-		return fail("mailbox disabled", ErrForbidden)
+	if !mv.Value.Active() {
+		return fail("mailbox "+mv.Value.State, ErrForbidden)
 	}
 	if mv.Value.Hold != nil && !mv.Value.Hold.AllowSend {
 		return fail("on hold", ErrHold)

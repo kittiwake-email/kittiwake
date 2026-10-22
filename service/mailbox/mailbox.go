@@ -91,8 +91,8 @@ func (s *Service) authorize(ctx context.Context, mb uuid.UUID, role string, writ
 		if m.Hold != nil && m.Hold.Sealed {
 			return m, ErrSealed
 		}
-		if !m.Enabled {
-			return m, ErrForbidden
+		if !m.Active() {
+			return m, ErrForbidden // suspended or disabled: users are locked out
 		}
 	default:
 		return m, ErrForbidden

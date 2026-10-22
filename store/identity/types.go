@@ -74,16 +74,37 @@ type Hold struct {
 	Sealed         bool      `json:"sealed"`
 }
 
+// Mailbox states.
+const (
+	// StateActive: delivery and user access work.
+	StateActive = "active"
+	// StateSuspended: soft. LMTP answers 4xx so the MTA queues and retries;
+	// users are locked out. For payment holds, migrations, maintenance.
+	StateSuspended = "suspended"
+	// StateDisabled: hard. LMTP answers 5xx (and the Postfix map says the
+	// recipient is unknown, so mail is rejected at SMTP time); users are
+	// locked out.
+	StateDisabled = "disabled"
+)
+
+// ValidStates is the set of mailbox states.
+var ValidStates = map[string]bool{StateActive: true, StateSuspended: true, StateDisabled: true}
+
 // Mailbox is the container for a user's data.
 type Mailbox struct {
-	ID       uuid.UUID   `json:"id"`
-	Enabled  bool        `json:"enabled"`
-	Quota    QuotaLimits `json:"quota"`
-	Hold     *Hold       `json:"hold,omitempty"`
-	Released *time.Time  `json:"released,omitempty"` // when the last hold was released
-	Created  time.Time   `json:"created"`
-	Updated  time.Time   `json:"updated"`
+	ID          uuid.UUID   `json:"id"`
+	State       string      `json:"state"` // active | suspended | disabled
+	StateReason string      `json:"state_reason,omitempty"`
+	StateSince  time.Time   `json:"state_since"`
+	Quota       QuotaLimits `json:"quota"`
+	Hold        *Hold       `json:"hold,omitempty"`
+	Released    *time.Time  `json:"released,omitempty"` // when the last hold was released
+	Created     time.Time   `json:"created"`
+	Updated     time.Time   `json:"updated"`
 }
+
+// Active reports whether the mailbox is in the active state.
+func (m *Mailbox) Active() bool { return m.State == StateActive }
 
 // Password is one credential of an account.
 type Password struct {

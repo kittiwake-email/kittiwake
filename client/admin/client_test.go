@@ -80,7 +80,7 @@ func newFixture(t *testing.T) *fixture {
 
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	h, _ := cryptoauth.HashPassword("correct horse")
 	f.user, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Enabled: true, Roles: []string{"read", "write", "send"}, Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}}})
 	_, f.userTk, _ = f.ids.CreateToken(ctx, f.user.ID, nil, f.now.Add(24*time.Hour), "user token")
@@ -183,7 +183,7 @@ func TestMailboxesAccountsAliasesTokens(t *testing.T) {
 	ctx := context.Background()
 	mb, err := f.c.CreateMailbox(ctx, MailboxRequest{Quota: &QuotaLimits{HardBytes: 5}})
 	must(t, err)
-	if mb.ID == "" || !mb.Enabled || mb.Quota.HardBytes != 5 {
+	if mb.ID == "" || mb.State != "active" || mb.Quota.HardBytes != 5 {
 		t.Fatalf("mailbox: %+v", mb)
 	}
 	list, err := f.c.ListMailboxes(ctx)
@@ -191,11 +191,23 @@ func TestMailboxesAccountsAliasesTokens(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("list: %+v", list)
 	}
-	off := false
-	mb, err = f.c.UpdateMailbox(ctx, mb.ID, MailboxRequest{Enabled: &off, Quota: &QuotaLimits{HardMessages: 7}})
+	mb, err = f.c.UpdateMailbox(ctx, mb.ID, MailboxRequest{Quota: &QuotaLimits{HardMessages: 7}})
 	must(t, err)
-	if mb.Enabled || mb.Quota.HardMessages != 7 {
+	if mb.State != "active" || mb.Quota.HardMessages != 7 {
 		t.Fatalf("patch: %+v", mb)
+	}
+	mb, err = f.c.SetMailboxState(ctx, mb.ID, "suspended", "migration")
+	must(t, err)
+	if mb.State != "suspended" || mb.StateReason != "migration" {
+		t.Fatalf("suspend: %+v", mb)
+	}
+	if _, err := f.c.SetMailboxState(ctx, mb.ID, "disabled", ""); !IsBadRequest(err) {
+		t.Fatalf("disable without reason: %v", err)
+	}
+	mb, err = f.c.SetMailboxState(ctx, mb.ID, "active", "")
+	must(t, err)
+	if mb.State != "active" {
+		t.Fatal("activate")
 	}
 	acct, err := f.c.CreateAccount(ctx, AccountRequest{Username: "bob@example.org", MailboxID: mb.ID, Roles: []string{"read", "write"}, Password: "longenough1"})
 	must(t, err)
@@ -257,6 +269,7 @@ func TestMailboxesAccountsAliasesTokens(t *testing.T) {
 	}
 	_, err = f.c.CreateAlias(ctx, AliasRequest{Address: "@example.org", Destinations: []Destination{{MailboxID: f.mb.ID.String()}}})
 	must(t, err)
+	off := false
 	al, err = f.c.UpdateAlias(ctx, "info@example.org", AliasRequest{Enabled: &off})
 	must(t, err)
 	if al.Enabled {

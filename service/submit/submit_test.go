@@ -60,7 +60,7 @@ func newFixture(t *testing.T) *fixture {
 	f.svc = New(Config{Hostname: "mx.test", MaxMessageSize: 4096}, f.ids, f.idx, del, aud, f.relay, log)
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	acct, _ := f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Roles: []string{"read", "write", "send"}, Enabled: true})
 	_, _ = f.ids.CreateAlias(ctx, identity.Alias{Address: "info@example.org", Enabled: true, Destinations: []identity.Destination{{MailboxID: f.mb.ID}}})
 	_, _ = f.ids.CreateAlias(ctx, identity.Alias{Address: "@example.org", Enabled: true, Destinations: []identity.Destination{{MailboxID: f.mb.ID}}})

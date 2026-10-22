@@ -46,7 +46,7 @@ curl -sf "http://${JMAP%:*}:9090/readyz" >/dev/null 2>&1 || true
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "$@"; }
 echo "== create domain, mailbox and account via admin API"
 api -X POST "http://$ADMIN/v1/admin/domains" -d "{\"name\":\"$DOMAIN\",\"enabled\":true}" >/dev/null
-MB=$(api -X POST "http://$ADMIN/v1/admin/mailboxes" -d '{"enabled":true}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+MB=$(api -X POST "http://$ADMIN/v1/admin/mailboxes" -d '{}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 api -X POST "http://$ADMIN/v1/admin/accounts" -d "{\"username\":\"$USER\",\"mailbox_id\":\"$MB\",\"roles\":[\"read\",\"write\",\"send\"],\"password\":\"$PASS\"}" >/dev/null
 api -X POST "http://$ADMIN/v1/admin/aliases" -d "{\"address\":\"info@$DOMAIN\",\"enabled\":true,\"destinations\":[{\"mailbox_id\":\"$MB\"}]}" >/dev/null
 echo "mailbox $MB, account $USER"

@@ -168,6 +168,10 @@ These are settled. Do not design around them.
   mailbox). Sent copy goes to Sent. Relay failure = API error, nothing stored.
 - **Domains, aliases, catch-all** are first-class. LMTP resolution: exact address → alias
   (bounded depth, may fan out) → catch-all → reject. Same answer served to Postfix.
+- **Mailbox state:** `active` | `suspended` (LMTP 450 → MTA queues; users locked out) |
+  `disabled` (LMTP 550; socketmap says NOTFOUND so SMTP rejects; users locked out), with a
+  required reason. There is no mailbox `enabled` flag; `admin.SetMailboxState` is the only
+  way to change it. Account `enabled` only blocks that credential.
 - **Quotas:** soft/hard limits on size and count stored on the mailbox object; usage in the
   index root; hard limit rejects at LMTP (5.2.2 default, configurable temp).
 - **Retention:** deleted mail goes to Trash and is purged by a worker after a configurable

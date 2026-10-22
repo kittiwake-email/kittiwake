@@ -57,7 +57,7 @@ func newFixture(t *testing.T) *fixture {
 	f.auth = authsvc.New(f.ids, sessionstore.New(idxp), aud, authsvc.Config{})
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	h, _ := cryptoauth.HashPassword("correct horse")
 	apph, _ := cryptoauth.HashPassword("app-pass-1234")
 	f.acct, _ = f.ids.CreateAccount(ctx, identity.Account{

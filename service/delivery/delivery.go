@@ -34,6 +34,7 @@ var (
 	ErrUnknownDomain    = errors.New("delivery: unknown or disabled domain")
 	ErrUnknownRecipient = errors.New("delivery: no such recipient")
 	ErrMailboxDisabled  = errors.New("delivery: mailbox disabled")
+	ErrMailboxSuspended = errors.New("delivery: mailbox suspended")
 	ErrHold             = errors.New("delivery: mailbox on hold, delivery suspended")
 	ErrOverQuota        = errors.New("delivery: mailbox over quota")
 	ErrTooLarge         = errors.New("delivery: message too large")
@@ -51,7 +52,6 @@ type Config struct {
 	MaxAliasDepth     int
 	DefaultQuota      identity.QuotaLimits
 	OverQuotaTempFail bool
-	DisabledTempFail  bool
 	// SearchEvents publishes index/remove events to the task queue; off
 	// unless a search backend consumes them (one write per message).
 	SearchEvents bool
@@ -317,7 +317,10 @@ func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (iden
 		}
 		return identity.Mailbox{}, err
 	}
-	if !m.Enabled {
+	switch m.State {
+	case identity.StateSuspended:
+		return m, ErrMailboxSuspended
+	case identity.StateDisabled:
 		return m, ErrMailboxDisabled
 	}
 	if m.Hold != nil && !m.Hold.AcceptDelivery {
@@ -414,6 +417,8 @@ func resultLabel(err error) string {
 		return "over-quota"
 	case errors.Is(err, ErrMailboxDisabled):
 		return "disabled"
+	case errors.Is(err, ErrMailboxSuspended):
+		return "suspended"
 	case errors.Is(err, ErrHold):
 		return "hold"
 	case errors.Is(err, ErrTooLarge):
@@ -640,10 +645,9 @@ func (s *Service) Status(err error) (code int, enhanced, text string) {
 	case errors.Is(err, ErrUnknownRecipient), errors.Is(err, ErrAliasLoop):
 		return 550, "5.1.1", "No such user"
 	case errors.Is(err, ErrMailboxDisabled):
-		if s.cfg.DisabledTempFail {
-			return 450, "4.2.1", "Mailbox disabled, try again later"
-		}
 		return 550, "5.2.1", "Mailbox disabled"
+	case errors.Is(err, ErrMailboxSuspended):
+		return 450, "4.2.1", "Mailbox temporarily suspended, try again later"
 	case errors.Is(err, ErrHold):
 		return 450, "4.2.1", "Mailbox temporarily not accepting mail"
 	case errors.Is(err, ErrOverQuota):

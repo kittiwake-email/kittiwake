@@ -50,7 +50,7 @@ func newFixture(t *testing.T, cfg Config) *fixture {
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "off.example", Enabled: false})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Roles: []string{"read"}, Enabled: true})
 	return f
 }
@@ -60,7 +60,7 @@ const simpleMsg = "From: Alice <alice@example.com>\r\nTo: wido@example.org\r\nSu
 func TestResolve(t *testing.T) {
 	f := newFixture(t, Config{})
 	ctx := context.Background()
-	mb2, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb2, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = f.ids.CreateAlias(ctx, identity.Alias{Address: "info@example.org", Enabled: true, Destinations: []identity.Destination{{MailboxID: mb2.ID}, {Address: "wido@example.org"}}})
 	_, _ = f.ids.CreateAlias(ctx, identity.Alias{Address: "loop@example.org", Enabled: true, Destinations: []identity.Destination{{Address: "loop2@example.org"}}})
 	_, _ = f.ids.CreateAlias(ctx, identity.Alias{Address: "loop2@example.org", Enabled: true, Destinations: []identity.Destination{{Address: "loop@example.org"}}})
@@ -246,14 +246,29 @@ func TestSpamRoutingAndAdmission(t *testing.T) {
 	if _, err := f.svc.Deliver(ctx, Request{Recipient: "wido@example.org", Raw: []byte(simpleMsg)}); err != nil {
 		t.Fatalf("after raising quota: %v", err)
 	}
-	// Disabled mailbox.
-	_, _ = f.ids.UpdateMailbox(ctx, f.mb.ID, func(m *identity.Mailbox) error { m.Enabled = false; return nil })
-	if _, err := f.svc.Deliver(ctx, Request{Recipient: "wido@example.org", Raw: []byte(simpleMsg)}); !errors.Is(err, ErrMailboxDisabled) {
+	// Suspended (soft): temporary failure so the MTA queues.
+	_, _ = f.ids.UpdateMailbox(ctx, f.mb.ID, func(m *identity.Mailbox) error { m.State = identity.StateSuspended; return nil })
+	err = nil
+	if _, err = f.svc.Deliver(ctx, Request{Recipient: "wido@example.org", Raw: []byte(simpleMsg)}); !errors.Is(err, ErrMailboxSuspended) {
+		t.Fatalf("suspended: %v", err)
+	}
+	if code, enh, _ := f.svc.Status(err); code != 450 || enh != "4.2.1" {
+		t.Fatalf("suspended status: %d %s", code, enh)
+	}
+	if _, err := f.svc.CheckRecipient(ctx, "wido@example.org", 10); !errors.Is(err, ErrMailboxSuspended) {
+		t.Fatal("check suspended")
+	}
+	// Disabled (hard): permanent failure.
+	_, _ = f.ids.UpdateMailbox(ctx, f.mb.ID, func(m *identity.Mailbox) error { m.State = identity.StateDisabled; return nil })
+	if _, err = f.svc.Deliver(ctx, Request{Recipient: "wido@example.org", Raw: []byte(simpleMsg)}); !errors.Is(err, ErrMailboxDisabled) {
 		t.Fatalf("disabled: %v", err)
+	}
+	if code, enh, _ := f.svc.Status(err); code != 550 || enh != "5.2.1" {
+		t.Fatalf("disabled status: %d %s", code, enh)
 	}
 	// Hold without delivery.
 	_, _ = f.ids.UpdateMailbox(ctx, f.mb.ID, func(m *identity.Mailbox) error {
-		m.Enabled = true
+		m.State = identity.StateActive
 		m.Hold = &identity.Hold{Reason: "case", AcceptDelivery: false}
 		return nil
 	})
@@ -315,7 +330,7 @@ func TestImportAndFanout(t *testing.T) {
 		t.Fatalf("bad folder: %v", err)
 	}
 	// Alias fanout stores one copy per mailbox, sharing the attachment object.
-	mb2, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb2, _ := f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = f.ids.CreateAlias(ctx, identity.Alias{Address: "all@example.org", Enabled: true, Destinations: []identity.Destination{{MailboxID: f.mb.ID}, {MailboxID: mb2.ID}}})
 	out, err := f.svc.Deliver(ctx, Request{Recipient: "all@example.org", Raw: []byte(simpleMsg)})
 	if err != nil || len(out) != 2 || out[0].MailboxID == out[1].MailboxID || out[0].MessageID == out[1].MessageID {

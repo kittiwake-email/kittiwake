@@ -124,13 +124,24 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 		}
 		return "OK " + v.Value.Name
 	case "mailboxes":
-		targets, err := s.del.Resolve(ctx, key)
+		// Exists for Postfix = will be accepted or queued at LMTP time. A
+		// disabled (hard) mailbox is reported unknown so the MTA rejects at
+		// SMTP time instead of bouncing later; suspended, over quota and
+		// on-hold mailboxes exist (LMTP defers them).
+		targets, err := s.del.CheckRecipient(ctx, key, 0)
 		if err != nil {
 			switch {
-			case errors.Is(err, delivery.ErrUnknownDomain), errors.Is(err, delivery.ErrUnknownRecipient), errors.Is(err, delivery.ErrAliasLoop):
+			case errors.Is(err, delivery.ErrUnknownDomain), errors.Is(err, delivery.ErrUnknownRecipient),
+				errors.Is(err, delivery.ErrAliasLoop), errors.Is(err, delivery.ErrMailboxDisabled):
 				return "NOTFOUND "
+			case errors.Is(err, delivery.ErrMailboxSuspended), errors.Is(err, delivery.ErrOverQuota), errors.Is(err, delivery.ErrHold):
+				targets, err = s.del.Resolve(ctx, key)
+				if err != nil {
+					return "TEMP " + err.Error()
+				}
+			default:
+				return "TEMP " + err.Error()
 			}
-			return "TEMP " + err.Error()
 		}
 		ids := make([]string, 0, len(targets))
 		for _, t := range targets {

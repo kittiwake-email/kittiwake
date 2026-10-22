@@ -755,8 +755,11 @@ func (s *Server) domainDelete(w http.ResponseWriter, r *http.Request) {
 // ---- admin: mailboxes ----
 
 type mailboxRequest struct {
-	Enabled *bool                 `json:"enabled,omitempty"`
-	Quota   *identity.QuotaLimits `json:"quota,omitempty"`
+	// State: active | suspended (LMTP 4xx, MTA queues) | disabled (LMTP 5xx).
+	// A reason is required for suspended and disabled.
+	State       *string               `json:"state,omitempty"`
+	StateReason string                `json:"state_reason,omitempty"`
+	Quota       *identity.QuotaLimits `json:"quota,omitempty"`
 }
 
 func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
@@ -767,9 +770,9 @@ func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m := identity.Mailbox{Enabled: true}
-	if req.Enabled != nil {
-		m.Enabled = *req.Enabled
+	m := identity.Mailbox{State: identity.StateActive}
+	if req.State != nil {
+		m.State, m.StateReason = *req.State, req.StateReason
 	}
 	if req.Quota != nil {
 		m.Quota = *req.Quota
@@ -807,18 +810,29 @@ func (s *Server) mailboxPatch(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	out, err := s.admin.UpdateMailbox(r.Context(), id, func(m *identity.Mailbox) error {
-		if req.Enabled != nil {
-			m.Enabled = *req.Enabled
-		}
-		if req.Quota != nil {
+	var out identity.Mailbox
+	if req.Quota != nil {
+		out, err = s.admin.UpdateMailbox(r.Context(), id, func(m *identity.Mailbox) error {
 			m.Quota = *req.Quota
+			return nil
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
 		}
-		return nil
-	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
+	}
+	if req.State != nil {
+		out, err = s.admin.SetMailboxState(r.Context(), id, *req.State, req.StateReason)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	if req.Quota == nil && req.State == nil {
+		if out, err = s.admin.GetMailbox(r.Context(), id); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -970,7 +984,8 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		ID       uuid.UUID            `json:"id"`
-		Enabled  bool                 `json:"enabled"`
+		State    string               `json:"state"`
+		Reason   string               `json:"state_reason,omitempty"`
 		OnHold   bool                 `json:"on_hold"`
 		Quota    identity.QuotaLimits `json:"quota"`
 		Accounts []string             `json:"accounts"`
@@ -986,7 +1001,7 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 		if accts == nil {
 			accts = []string{}
 		}
-		items = append(items, item{ID: id, Enabled: m.Enabled, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
+		items = append(items, item{ID: id, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
 		return nil
 	})
 	if err != nil {

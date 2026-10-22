@@ -25,7 +25,7 @@ import (
 	"dovetail/worker"
 )
 
-func identityMailbox() identity.Mailbox { return identity.Mailbox{Enabled: true} }
+func identityMailbox() identity.Mailbox { return identity.Mailbox{} }
 
 func TestExportEndpoints(t *testing.T) {
 	f := newFixture(t)

@@ -75,7 +75,7 @@ func newFixture(t *testing.T) *fixture {
 
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	f.mb, _ = f.ids.CreateMailbox(ctx, identity.Mailbox{})
 	h, _ := cryptoauth.HashPassword("correct horse")
 	f.user, _ = f.ids.CreateAccount(ctx, identity.Account{
 		Username: "wido@example.org", MailboxID: f.mb.ID, Enabled: true,
@@ -377,10 +377,17 @@ func TestAdminCRUD(t *testing.T) {
 	}
 	f.expect(f.do("GET", "/v1/admin/mailboxes/not-a-uuid", a, nil, ""), 400, "bad uuid")
 	f.expect(f.do("GET", "/v1/admin/mailboxes/"+uuid.NewString(), a, nil, ""), 404, "mailbox missing")
-	r = f.do("PATCH", "/v1/admin/mailboxes/"+mbID, a, map[string]any{"enabled": false}, "")
-	f.expect(r, 200, "mailbox patch")
-	if r.body["enabled"] != false {
-		t.Fatal("patch enabled")
+	f.expect(f.do("PATCH", "/v1/admin/mailboxes/"+mbID, a, map[string]any{"state": "suspended"}, ""), 400, "suspend without reason")
+	f.expect(f.do("PATCH", "/v1/admin/mailboxes/"+mbID, a, map[string]any{"state": "bogus", "state_reason": "x"}, ""), 400, "bad state")
+	r = f.do("PATCH", "/v1/admin/mailboxes/"+mbID, a, map[string]any{"state": "suspended", "state_reason": "unpaid invoice"}, "")
+	f.expect(r, 200, "mailbox suspend")
+	if r.body["state"] != "suspended" || r.body["state_reason"] != "unpaid invoice" {
+		t.Fatalf("patch state: %v", r.body)
+	}
+	r = f.do("PATCH", "/v1/admin/mailboxes/"+mbID, a, map[string]any{"state": "active"}, "")
+	f.expect(r, 200, "mailbox activate")
+	if r.body["state"] != "active" {
+		t.Fatal("activate")
 	}
 	r = f.do("POST", "/v1/admin/mailboxes/"+mbID+"/recalculate", a, nil, "")
 	f.expect(r, 404, "recalculate unindexed")

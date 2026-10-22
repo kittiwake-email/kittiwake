@@ -91,7 +91,7 @@ func seedAccount(a *app.App, spec string) error {
 	if _, err := adm.CreateDomain(ctx, identity.Domain{Name: domain, Enabled: true}); err != nil {
 		return err
 	}
-	mb, err := adm.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb, err := adm.CreateMailbox(ctx, identity.Mailbox{})
 	if err != nil {
 		return err
 	}

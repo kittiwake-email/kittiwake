@@ -61,7 +61,7 @@ func newFixture(t *testing.T) *fixture {
 	del := delivery.New(ids, idx, msgs, atts, q, aud, log, delivery.Config{InlineMax: 16, DefaultQuota: identity.QuotaLimits{HardBytes: 1 << 30}})
 	ctx := context.Background()
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
-	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
+	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{})
 	acct, _ := ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{"read", "write", "send"}, Enabled: true})
 	f := &fixture{t: t, ids: ids, idx: idx, aud: aud, del: del, mbsvc: mbsvc, mb: mb, acct: acct}
 	f.act = actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: mb.ID, Roles: acct.Roles, Protocol: "jmap", ClientIP: "::1"}

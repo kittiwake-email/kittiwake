@@ -97,9 +97,8 @@ type Mail struct {
 	PostHoldGrace  time.Duration `yaml:"post_hold_grace"`
 	SpamHeader     string        `yaml:"spam_header"`
 	SpamValue      string        `yaml:"spam_value"`
-	// OverQuotaTempFail / DisabledTempFail make LMTP answer 4xx instead of 5xx.
+	// OverQuotaTempFail makes LMTP answer 4xx instead of 5xx when a mailbox is full.
 	OverQuotaTempFail bool `yaml:"over_quota_tempfail"`
-	DisabledTempFail  bool `yaml:"disabled_tempfail"`
 	// MaxAliasDepth bounds alias chains.
 	MaxAliasDepth int `yaml:"max_alias_depth"`
 }

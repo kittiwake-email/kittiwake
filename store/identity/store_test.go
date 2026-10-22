@@ -59,7 +59,7 @@ func TestAccountsAndMailboxes(t *testing.T) {
 	s, c := newStore(t)
 	ctx := context.Background()
 	_, _ = s.CreateDomain(ctx, Domain{Name: "example.org", Enabled: true})
-	mb, err := s.CreateMailbox(ctx, Mailbox{Enabled: true, Quota: QuotaLimits{HardBytes: 1 << 30}})
+	mb, err := s.CreateMailbox(ctx, Mailbox{Quota: QuotaLimits{HardBytes: 1 << 30}})
 	if err != nil || mb.ID == uuid.Nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestAccountsAndMailboxes(t *testing.T) {
 		t.Fatalf("expected invalid without mailbox, got %v", err)
 	}
 	// Relink.
-	mb2, _ := s.CreateMailbox(ctx, Mailbox{Enabled: true})
+	mb2, _ := s.CreateMailbox(ctx, Mailbox{})
 	if _, err := s.RelinkAccount(ctx, a.ID, mb2.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestAliases(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
 	_, _ = s.CreateDomain(ctx, Domain{Name: "example.org", Enabled: true})
-	mb, _ := s.CreateMailbox(ctx, Mailbox{Enabled: true})
+	mb, _ := s.CreateMailbox(ctx, Mailbox{})
 	_, _ = s.CreateAccount(ctx, Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{RoleRead}, Enabled: true})
 
 	if _, err := s.CreateAlias(ctx, Alias{Address: "wido@example.org", Destinations: []Destination{{MailboxID: mb.ID}}}); !errors.Is(err, ErrExists) {
@@ -205,7 +205,7 @@ func TestAliases(t *testing.T) {
 	if len(mal) != 2 || mal[0] != "@example.org" || mal[1] != "info@example.org" {
 		t.Fatalf("mailbox aliases: %v", mal)
 	}
-	mb2, _ := s.CreateMailbox(ctx, Mailbox{Enabled: true})
+	mb2, _ := s.CreateMailbox(ctx, Mailbox{})
 	_, _ = s.UpdateAlias(ctx, "info@example.org", func(a *Alias) error { a.Destinations = []Destination{{MailboxID: mb2.ID}}; return nil })
 	if mal, _ = s.ListMailboxAliases(ctx, mb.ID); len(mal) != 1 {
 		t.Fatalf("mailbox aliases after retarget: %v", mal)
@@ -243,7 +243,7 @@ func TestTokens(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
 	_, _ = s.CreateDomain(ctx, Domain{Name: "example.org", Enabled: true})
-	mb, _ := s.CreateMailbox(ctx, Mailbox{Enabled: true})
+	mb, _ := s.CreateMailbox(ctx, Mailbox{})
 	a, _ := s.CreateAccount(ctx, Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{RoleRead, RoleWrite}, Enabled: true})
 	exp := s.Now().Add(24 * time.Hour)
 

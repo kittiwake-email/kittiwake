@@ -286,7 +286,7 @@ func (c *Client) InspectMailbox(ctx context.Context, id string) (MailboxInfo, er
 	return out, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes/"+pathEscape(id), nil, nil, "", &out)
 }
 
-// UpdateMailbox patches enabled/quota.
+// UpdateMailbox patches the quota and/or state.
 func (c *Client) UpdateMailbox(ctx context.Context, id string, req MailboxRequest) (Mailbox, error) {
 	var out Mailbox
 	return out, c.do(ctx, http.MethodPatch, "/v1/admin/mailboxes/"+pathEscape(id), nil, req, "", &out)
@@ -313,6 +313,11 @@ func (c *Client) HoldMailbox(ctx context.Context, id string, req HoldRequest) (M
 func (c *Client) ReleaseMailbox(ctx context.Context, id, note string) (Mailbox, error) {
 	var out Mailbox
 	return out, c.do(ctx, http.MethodDelete, "/v1/admin/mailboxes/"+pathEscape(id)+"/hold", nil, map[string]string{"note": note}, "", &out)
+}
+
+// SetMailboxState activates, suspends or disables a mailbox.
+func (c *Client) SetMailboxState(ctx context.Context, id, state, reason string) (Mailbox, error) {
+	return c.UpdateMailbox(ctx, id, MailboxRequest{State: &state, StateReason: reason})
 }
 
 // ListHolds lists mailboxes on hold.

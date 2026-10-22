@@ -555,17 +555,27 @@ catch-all → reject.
 ## Mailboxes
 
 A **mailbox** has a UUID and owns folders and messages (and later calendars and address
-books). A mailbox by itself is not addressable. It carries its quota limits and an enabled
-flag.
+books). A mailbox by itself is not addressable. It carries its quota limits and a **state**:
+
+- `active` – delivery and user access work.
+- `suspended` – soft. LMTP answers `450 4.2.1`, so Postfix keeps the mail queued and
+  retries for its configured queue lifetime; users are locked out; sending is refused. For
+  payment holds, migrations and maintenance: nothing is lost.
+- `disabled` – hard. LMTP answers `550 5.2.1`, and the Postfix socketmap reports the
+  recipient as unknown so mail is rejected during the SMTP dialogue (no backscatter
+  bounces); users are locked out.
+
+Suspending or disabling requires a reason, which is stored with the state and audited.
+Accounts have their own `enabled` flag that only blocks that credential; it does not affect
+delivery to the mailbox.
 
 ## Accounts
 
 **Accounts** are linked to a mailbox. Multiple accounts can point to the same mailbox,
 allowing multiple credentials to access one mailbox. An account consists of a username
 (usually the e-mail address), zero or more passwords (each marked primary or application) and
-optionally a TOTP secret. Accounts have an enabled flag; a disabled account cannot log in.
-Delivery to a disabled mailbox is rejected with a permanent LMTP error by default
-(configurable to a temporary error).
+optionally a TOTP secret. Accounts have an enabled flag; a disabled account cannot log in,
+while the mailbox state (see above) decides what happens to inbound mail.
 
 ## Roles
 
@@ -797,7 +807,8 @@ The daemon takes a single YAML file as configuration:
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
 - Session settings: access token lifetime, refresh token lifetime, key rotation interval
 - Spam header name and value for Junk routing
-- Default quota limits, over-quota and disabled-mailbox LMTP reply policy
+- Default quota limits, over-quota LMTP reply policy (suspended mailboxes always answer 4xx,
+  disabled ones 5xx)
 - Inline attachment size threshold
 - Maximum message size
 - Export directory for worker-run exports; post-hold purge grace period
