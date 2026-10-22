@@ -1137,3 +1137,23 @@ func (s *Rados) DeleteCluster(ctx context.Context, id int64) error {
 	}
 	return mapErr(s.clusters.Delete(ctx, clusterOID(id)))
 }
+
+// Exported validation helpers shared with other backends.
+
+// TokenPrefix marks API token secrets.
+const TokenPrefix = tokenPrefix
+
+// NormalizeAliasAddress normalizes an alias address ("@domain" for a
+// catch-all) and returns it with its domain.
+func NormalizeAliasAddress(addr string) (address, domain string, err error) {
+	return normalizeAliasAddress(addr)
+}
+
+// ValidateRoles checks an account role list.
+func ValidateRoles(roles []string) error { return validateRoles(roles) }
+
+// ValidateServices checks an account service list.
+func ValidateServices(services []string) error { return validateServices(services) }
+
+// ValidateCluster checks and trims a cluster record.
+func ValidateCluster(c *Cluster) error { return validateCluster(c) }

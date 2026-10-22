@@ -42,6 +42,8 @@ type Task struct {
 // enqueues periodic tasks whose interval has elapsed.
 type Store interface {
 	SetNow(func() time.Time)
+	// SetRetryPolicy sets attempts before dead-lettering and the backoff.
+	SetRetryPolicy(maxAttempts int, backoff func(attempt int) time.Duration)
 	Enqueue(ctx context.Context, typ string, payload any, runAfter time.Time) (string, error)
 	Claim(ctx context.Context, typ, worker string, max int, lease time.Duration) ([]Task, error)
 	Complete(ctx context.Context, t Task) error
@@ -85,6 +87,11 @@ func New(indexPool rados.IOContext) *Rados {
 
 // SetNow installs the clock.
 func (s *Rados) SetNow(now func() time.Time) { s.Now = now }
+
+// SetRetryPolicy sets attempts before dead-lettering and the backoff.
+func (s *Rados) SetRetryPolicy(maxAttempts int, backoff func(int) time.Duration) {
+	s.MaxAttempts, s.Backoff = maxAttempts, backoff
+}
 
 const schedulerOID = "scheduler"
 
