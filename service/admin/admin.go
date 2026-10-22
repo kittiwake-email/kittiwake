@@ -395,7 +395,8 @@ type CreateAccountRequest struct {
 	Name      string // display name
 	MailboxID uuid.UUID
 	Roles     []string
-	Password  string // optional initial primary password (plaintext)
+	Services  []string // nil = every known service
+	Password  string   // optional initial primary password (plaintext)
 	// PasswordComment and PasswordExpiresAt describe the initial password
 	// (comment defaults to "initial password"; expiry nil = never).
 	PasswordComment   string
@@ -408,7 +409,7 @@ func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (
 	if err := s.authorize(ctx, "account-create", req.Username); err != nil {
 		return identity.Account{}, err
 	}
-	a := identity.Account{Username: req.Username, Name: strings.TrimSpace(req.Name), MailboxID: req.MailboxID, Roles: req.Roles, Enabled: true}
+	a := identity.Account{Username: req.Username, Name: strings.TrimSpace(req.Name), MailboxID: req.MailboxID, Roles: req.Roles, Services: req.Services, Enabled: true}
 	if req.Enabled != nil {
 		a.Enabled = *req.Enabled
 	}

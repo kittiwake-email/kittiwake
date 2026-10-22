@@ -38,6 +38,7 @@ var (
 	ErrInvalidToken       = errors.New("auth: invalid token")
 	ErrScope              = errors.New("auth: requested scope exceeds account roles")
 	ErrSessionRevoked     = errors.New("auth: session revoked")
+	ErrServiceDisabled    = errors.New("auth: service not enabled for this account")
 )
 
 // Config for the service.
@@ -251,6 +252,9 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 	if !acct.Enabled {
 		return fail("account disabled", ErrAccountDisabled)
 	}
+	if !serviceAllowed(&acct, proto) {
+		return fail("service "+identity.ServiceFor(proto)+" not enabled", ErrServiceDisabled)
+	}
 	if totpRequired(&acct, pw) {
 		if req.TOTPCode == "" {
 			return fail("totp required", ErrTOTPRequired)
@@ -283,6 +287,14 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 		s.rehash(ctx, acct.ID, pw.ID, req.Password)
 	}
 	return toks, nil
+}
+
+// serviceAllowed reports whether the account may use the protocol's
+// service (see identity.ServiceFor). Protocols without a service map
+// (LMTP, admin) are always allowed.
+func serviceAllowed(acct *identity.Account, proto string) bool {
+	svc := identity.ServiceFor(proto)
+	return svc == "" || acct.HasService(svc)
 }
 
 // dummyHash is an argon2id hash of a random string, used to equalise timing.
@@ -424,6 +436,10 @@ func (s *Service) Refresh(ctx context.Context, refreshToken, clientIP, proto str
 		_ = s.sessions.RevokeAll(ctx, acctID)
 		s.audit.Log(auditCtx, auditor.Event{Mailbox: acct.MailboxID, Action: "refresh", Detail: "account disabled", Result: audit.ResultDenied})
 		return Tokens{}, ErrAccountDisabled
+	}
+	if !serviceAllowed(&acct, proto) {
+		s.audit.Log(auditCtx, auditor.Event{Mailbox: acct.MailboxID, Action: "refresh", Detail: "service " + identity.ServiceFor(proto) + " not enabled", Result: audit.ResultDenied})
+		return Tokens{}, ErrServiceDisabled
 	}
 	sess, newSecret, err := s.sessions.Refresh(ctx, acctID, sid, secret, clientIP, s.cfg.RefreshTokenLifetime)
 	if err != nil {
@@ -610,6 +626,9 @@ func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor
 	if !acct.Enabled {
 		return actor.Actor{}, ErrAccountDisabled
 	}
+	if !acct.HasService(identity.ServiceJMAP) { // account tokens are only accepted on the JMAP listener
+		return actor.Actor{}, ErrServiceDisabled
+	}
 	roles, err := narrowRoles(acct.Roles, t.Roles)
 	if err != nil {
 		return actor.Actor{}, ErrInvalidToken
@@ -670,6 +689,9 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 	if !acct.Enabled {
 		return fail("account disabled", ErrAccountDisabled)
 	}
+	if !serviceAllowed(&acct, proto) {
+		return fail("service "+identity.ServiceFor(proto)+" not enabled", ErrServiceDisabled)
+	}
 	if totpRequired(&acct, pw) {
 		return fail("totp required; use an application password", ErrTOTPRequired)
 	}
@@ -699,6 +721,10 @@ func (s *Service) VerifyOAuthBearer(ctx context.Context, username, token, proto,
 	if username != "" && !strings.EqualFold(username, a.Username) {
 		s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: a.MailboxID, Action: "login-failed", Detail: "bearer username mismatch", Result: audit.ResultDenied})
 		return actor.Actor{}, ErrInvalidCredentials
+	}
+	if acct, err := s.ids.GetAccountByUsernameCached(ctx, a.Username); err == nil && !serviceAllowed(&acct, proto) {
+		s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: a.MailboxID, Action: "login-failed", Detail: "service " + identity.ServiceFor(proto) + " not enabled", Result: audit.ResultDenied})
+		return actor.Actor{}, ErrServiceDisabled
 	}
 	a.Protocol, a.ClientIP = proto, clientIP
 	s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: a.MailboxID, Action: "login"})
@@ -781,6 +807,22 @@ func (s *Service) DisableTOTP(ctx context.Context, acctID uuid.UUID) error {
 	_ = s.sessions.ResetTOTP(ctx, acctID)
 	s.cache.invalidateAccount(acctID)
 	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "totp-disable", Subject: subjectIfOther(ctx, a.Username)})
+	return nil
+}
+
+// SetServices sets which services the account may log in to (self-service
+// or admin). Sessions already issued keep working until they expire or
+// refresh; other processes see the change within the cache TTL.
+func (s *Service) SetServices(ctx context.Context, acctID uuid.UUID, services []string) error {
+	if services == nil {
+		services = []string{}
+	}
+	a, err := s.ids.UpdateAccount(ctx, acctID, func(a *identity.Account) error { a.Services = services; return nil })
+	if err != nil {
+		return err
+	}
+	s.cache.invalidateAccount(acctID)
+	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "services-change", Detail: strings.Join(services, ","), Subject: subjectIfOther(ctx, a.Username)})
 	return nil
 }
 

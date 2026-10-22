@@ -62,7 +62,11 @@ func runAdmin(args []string) error {
 	if err != nil {
 		return err
 	}
-	a, err := app.New(cfg, client, log)
+	db, err := app.OpenDatabase(context.Background(), cfg.Database)
+	if err != nil {
+		return err
+	}
+	a, err := app.New(cfg, client, db, log)
 	if err != nil {
 		return err
 	}

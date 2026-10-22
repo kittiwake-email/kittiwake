@@ -100,6 +100,8 @@ func (s *session) authErr(err error) error {
 		return noErr(imap.ResponseCodeAuthenticationFailed, "This password requires a one-time code. Use an application password or OAUTHBEARER")
 	case errors.Is(err, authsvc.ErrAccountDisabled):
 		return noErr(imap.ResponseCodeAuthenticationFailed, "Account disabled")
+	case errors.Is(err, authsvc.ErrServiceDisabled):
+		return noErr(imap.ResponseCodeAuthenticationFailed, "IMAP is not enabled for this account")
 	case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken), errors.Is(err, authsvc.ErrTokenExpired):
 		return imapserver.ErrAuthFailed
 	}

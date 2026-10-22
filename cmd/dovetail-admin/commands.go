@@ -406,6 +406,7 @@ func (a *cli) account(args []string) error {
 		name := fs.String("name", "", "display name (From name of the account's identities)")
 		mailbox := fs.String("mailbox", "", "mailbox uuid")
 		roles := fs.String("roles", "read,write,send", "comma-separated roles")
+		services := fs.String("services", "", "comma-separated services the account may use: imap,pop3,jmap (default: all)")
 		pwStdin := fs.Bool("password-stdin", false, "read the primary password from stdin")
 		disabled := fs.Bool("disabled", false, "create disabled")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -417,6 +418,9 @@ func (a *cli) account(args []string) error {
 		req := admin.AccountRequest{Username: *username, MailboxID: *mailbox, Roles: splitList(*roles)}
 		if *name != "" {
 			req.Name = name
+		}
+		if *services != "" {
+			req.Services = splitList(*services)
 		}
 		if *pwStdin {
 			pw, err := readPasswordStdin()
@@ -493,6 +497,7 @@ func (a *cli) account(args []string) error {
 	case "set":
 		fs := newFlagSet("account set")
 		roles := fs.String("roles", "", "comma-separated roles")
+		services := fs.String("services", "", "comma-separated services the account may use (imap,pop3,jmap); \"none\" disables every login")
 		mailbox := fs.String("mailbox", "", "move to this mailbox uuid")
 		name := fs.String("name", "", "display name (\"\" is not settable here; use --clear-name)")
 		clearName := fs.Bool("clear-name", false, "remove the display name")
@@ -511,7 +516,14 @@ func (a *cli) account(args []string) error {
 		} else if *name != "" {
 			req.Name = name
 		}
-		if req.Roles == nil && req.MailboxID == "" && req.Enabled == nil && req.Name == nil {
+		switch *services {
+		case "":
+		case "none":
+			req.Services = []string{}
+		default:
+			req.Services = splitList(*services)
+		}
+		if req.Roles == nil && req.MailboxID == "" && req.Enabled == nil && req.Name == nil && req.Services == nil {
 			return errors.New("nothing to change")
 		}
 		acct, err := a.c.UpdateAccount(a.ctx, id, req)

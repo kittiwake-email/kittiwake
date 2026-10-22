@@ -112,17 +112,20 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
     patch:
       tags: [self]
-      summary: Change the display name
-      description: The display name is the From name of every identity (own address and aliases).
+      summary: Change the display name or the enabled services
+      description: >-
+        The display name is the From name of every identity (own address and aliases).
+        Services lists the protocols the account may log in to; an account that removes
+        jmap locks itself out of this API until an administrator restores it.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [name]
               properties:
                 name: { type: string, maxLength: 256 }
+                services: { type: array, items: { type: string, enum: [imap, pop3, jmap] } }
       responses:
         "200":
           description: Updated account view
@@ -922,6 +925,7 @@ components:
         id: { type: string, format: uuid }
         username: { type: string }
         name: { type: string, description: Display name }
+        services: { type: array, items: { type: string, enum: [imap, pop3, jmap] }, description: Services the account may log in to }
         mailbox_id: { type: string, format: uuid }
         roles: { type: array, items: { type: string } }
         credential: { type: string, enum: [password, app-password, token, session] }
@@ -1059,6 +1063,7 @@ components:
       properties:
         username: { type: string, description: Create only }
         name: { type: string, description: Display name (the From name of the account's identities) }
+        services: { type: array, items: { type: string, enum: [imap, pop3, jmap] }, description: "Services the account may log in to; omitted on create = all" }
         mailbox_id: { type: string, format: uuid, description: On PATCH, relinks the account }
         roles: { type: array, items: { type: string, enum: [read, write, send] } }
         password: { type: string, description: Create only, initial primary password }
@@ -1071,6 +1076,7 @@ components:
         id: { type: string, format: uuid }
         username: { type: string }
         name: { type: string, description: Display name }
+        services: { type: array, items: { type: string, enum: [imap, pop3, jmap] } }
         domain: { type: string }
         mailbox_id: { type: string, format: uuid }
         roles: { type: array, items: { type: string } }

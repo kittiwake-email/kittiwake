@@ -2,7 +2,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -X dovetail/app.Version=$(VERSION) -X main.Version=$(VERSION)
 
-.PHONY: build test test-race vet fmt lint clean run-dev
+.PHONY: build test test-race test-sql vet fmt lint clean run-dev
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o bin/dovetail ./cmd/dovetail
@@ -13,6 +13,15 @@ test:
 
 test-race:
 	go test -race ./...
+
+# Store conformance suites against a real MariaDB (the same suites run on
+# the memory backend in `make test`). Local dev container:
+#   sudo docker run -d --name dovetail-mariadb -e MARIADB_ROOT_PASSWORD=root \
+#     -e MARIADB_DATABASE=dovetail -e MARIADB_USER=dovetail -e MARIADB_PASSWORD=dovetail \
+#     -p 127.0.0.1:3307:3306 mariadb:11.4
+DOVETAIL_TEST_DSN ?= dovetail:dovetail@tcp(127.0.0.1:3307)/dovetail
+test-sql:
+	DOVETAIL_TEST_DSN='$(DOVETAIL_TEST_DSN)' go test -count=1 ./store/mariadb/
 
 vet:
 	go vet ./...

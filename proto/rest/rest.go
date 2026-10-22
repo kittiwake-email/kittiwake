@@ -326,7 +326,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired), errors.Is(err, auth.ErrTOTPRequired), errors.Is(err, auth.ErrSessionRevoked):
 		status = http.StatusUnauthorized
-	case errors.Is(err, auth.ErrAccountDisabled):
+	case errors.Is(err, auth.ErrAccountDisabled), errors.Is(err, auth.ErrServiceDisabled):
 		status = http.StatusForbidden
 	default:
 		var maxErr *http.MaxBytesError
@@ -486,6 +486,8 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "requested scope exceeds the account's roles")
 		case errors.Is(err, auth.ErrAccountDisabled):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "account disabled")
+		case errors.Is(err, auth.ErrServiceDisabled):
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "JMAP is not enabled for this account")
 		case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrTOTPInvalid),
 			errors.Is(err, auth.ErrSessionRevoked), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid credentials or token")
@@ -542,6 +544,7 @@ type meView struct {
 	ID          uuid.UUID      `json:"id"`
 	Username    string         `json:"username"`
 	Name        string         `json:"name"`
+	Services    []string       `json:"services"`
 	MailboxID   uuid.UUID      `json:"mailbox_id"`
 	Roles       []string       `json:"roles"`
 	Credential  string         `json:"credential"`
@@ -564,32 +567,47 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out.Name = v.Value.Name
+		out.Services = v.Value.Services
+		if out.Services == nil {
+			out.Services = []string{}
+		}
 		out.TOTPEnabled = v.Value.TOTP != nil && v.Value.TOTP.Confirmed
 		out.Passwords = passwordViews(v.Value.Passwords)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// mePatch changes what an account may change about itself: the display name.
+// mePatch changes what an account may change about itself: the display
+// name and the services it may log in to (a user who turns JMAP off here
+// locks themselves out of this API; an admin can turn it back on).
 func (s *Server) mePatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name *string `json:"name"`
+		Name     *string  `json:"name"`
+		Services []string `json:"services"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if req.Name == nil {
-		s.fail(w, r, badRequest("name is required"))
+	if req.Name == nil && req.Services == nil {
+		s.fail(w, r, badRequest("name or services is required"))
 		return
 	}
-	if s.cfg.Submit == nil {
-		s.fail(w, r, badRequest("not available on this listener"))
-		return
+	if req.Name != nil {
+		if s.cfg.Submit == nil {
+			s.fail(w, r, badRequest("not available on this listener"))
+			return
+		}
+		if _, err := s.cfg.Submit.SetName(r.Context(), *req.Name); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
-	if _, err := s.cfg.Submit.SetName(r.Context(), *req.Name); err != nil {
-		s.fail(w, r, err)
-		return
+	if req.Services != nil {
+		if err := s.auth.SetServices(r.Context(), actor.From(r.Context()).AccountID, req.Services); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
 	s.me(w, r)
 }
@@ -971,6 +989,7 @@ type accountView struct {
 	Domain      string         `json:"domain"`
 	MailboxID   uuid.UUID      `json:"mailbox_id"`
 	Roles       []string       `json:"roles"`
+	Services    []string       `json:"services"`
 	Enabled     bool           `json:"enabled"`
 	TOTPEnabled bool           `json:"totp_enabled"`
 	Passwords   []passwordView `json:"passwords"`
@@ -983,8 +1002,12 @@ func viewAccount(a identity.Account) accountView {
 	if roles == nil {
 		roles = []string{}
 	}
+	services := a.Services
+	if services == nil {
+		services = []string{}
+	}
 	return accountView{
-		ID: a.ID, Username: a.Username, Name: a.Name, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Enabled: a.Enabled,
+		ID: a.ID, Username: a.Username, Name: a.Name, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Services: services, Enabled: a.Enabled,
 		TOTPEnabled: a.TOTP != nil && a.TOTP.Confirmed, Passwords: passwordViews(a.Passwords), Created: a.Created, Updated: a.Updated,
 	}
 }
@@ -994,6 +1017,7 @@ type accountRequest struct {
 	Name              *string    `json:"name,omitempty"`
 	MailboxID         *uuid.UUID `json:"mailbox_id,omitempty"`
 	Roles             []string   `json:"roles,omitempty"`
+	Services          []string   `json:"services,omitempty"` // nil = unchanged (PATCH) or all (create)
 	Password          string     `json:"password,omitempty"`
 	PasswordComment   string     `json:"password_comment,omitempty"`
 	PasswordExpiresAt *time.Time `json:"password_expires_at,omitempty"`
@@ -1006,7 +1030,7 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	cr := admin.CreateAccountRequest{Username: req.Username, Roles: req.Roles, Password: req.Password, PasswordComment: req.PasswordComment, PasswordExpiresAt: req.PasswordExpiresAt, Enabled: req.Enabled}
+	cr := admin.CreateAccountRequest{Username: req.Username, Roles: req.Roles, Services: req.Services, Password: req.Password, PasswordComment: req.PasswordComment, PasswordExpiresAt: req.PasswordExpiresAt, Enabled: req.Enabled}
 	if req.Name != nil {
 		cr.Name = *req.Name
 	}
@@ -1107,10 +1131,13 @@ func (s *Server) accountPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := a
-	if req.Roles != nil || req.Enabled != nil || req.Name != nil {
+	if req.Roles != nil || req.Enabled != nil || req.Name != nil || req.Services != nil {
 		out, err = s.admin.UpdateAccount(r.Context(), a.ID, func(x *identity.Account) error {
 			if req.Roles != nil {
 				x.Roles = req.Roles
+			}
+			if req.Services != nil {
+				x.Services = req.Services
 			}
 			if req.Enabled != nil {
 				x.Enabled = *req.Enabled

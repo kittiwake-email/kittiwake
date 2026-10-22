@@ -150,6 +150,7 @@ type Account struct {
 	Domain      string     `json:"domain"`
 	MailboxID   string     `json:"mailbox_id"`
 	Roles       []string   `json:"roles"`
+	Services    []string   `json:"services"`
 	Enabled     bool       `json:"enabled"`
 	TOTPEnabled bool       `json:"totp_enabled"`
 	Passwords   []Password `json:"passwords"`
@@ -164,6 +165,7 @@ type AccountRequest struct {
 	Name              *string    `json:"name,omitempty"`
 	MailboxID         string     `json:"mailbox_id,omitempty"`
 	Roles             []string   `json:"roles,omitempty"`
+	Services          []string   `json:"services,omitempty"`
 	Password          string     `json:"password,omitempty"`
 	PasswordComment   string     `json:"password_comment,omitempty"`
 	PasswordExpiresAt *time.Time `json:"password_expires_at,omitempty"`

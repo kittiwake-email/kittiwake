@@ -2,6 +2,8 @@
 # Ceph client packages come from download.ceph.com; the cluster is reached
 # through /etc/ceph/ceph.conf with the client.dovetail keyring.
 modes: [lmtp, jmap, admin, postfix, imap, pop3, worker]
+database:
+  dsn: "dovetail:dovetail@unix(/run/mysqld/mysqld.sock)/dovetail"   # MariaDB on the box, see TESTENV.md
 ceph:
   backend: librados
   config_file: /etc/ceph/ceph.conf
@@ -11,7 +13,6 @@ ceph:
     messages: dovetail.messages
     attachments: dovetail.attachments
     index: dovetail.index
-    meta: dovetail.meta
 listen:
   # "optional" makes IMAP/POP3/LMTP wait briefly for a PROXY header before the banner;
   # use "off" for direct clients, "required" behind HAProxy.

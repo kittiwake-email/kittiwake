@@ -152,6 +152,8 @@ func Auth(a Authenticator, protocol string, trusted []net.IPNet, realm string) f
 					detail = "this password requires a one-time code; use an application password or a session token"
 				case errors.Is(err, authsvc.ErrAccountDisabled):
 					status, detail = http.StatusForbidden, "account disabled"
+				case errors.Is(err, authsvc.ErrServiceDisabled):
+					status, detail = http.StatusForbidden, "this service is not enabled for the account"
 				case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken):
 				default:
 					status, detail = http.StatusInternalServerError, "authentication backend error"

@@ -33,6 +33,7 @@ import (
 	"dovetail/store/audit"
 	"dovetail/store/identity"
 	"dovetail/store/index"
+	"dovetail/store/mariadb"
 	"dovetail/store/message"
 	"dovetail/store/queue"
 	"dovetail/store/session"
@@ -89,6 +90,7 @@ type App struct {
 	Cfg      config.Config
 	Log      *slog.Logger
 	Client   rados.Client
+	DB       *mariadb.DB // nil with the memory backend and no DSN
 	Stores   Stores
 	Services Services
 	// JMAPHandler and AdminHandler are mounted by the jmap and admin modes;
@@ -139,12 +141,44 @@ func Connect(cfg config.Ceph) (rados.Client, error) {
 	})
 }
 
-// New builds stores and services on an open client.
-func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error) {
-	pools := cfg.Ceph.Pools
-	meta, err := client.Pool(pools.Meta)
+// OpenDatabase opens the metadata database when one is configured and
+// checks that its schema is current. It returns nil, nil when the config
+// has no DSN (memory backend: metadata stays in the RADOS memory client).
+func OpenDatabase(ctx context.Context, cfg config.Database) (*mariadb.DB, error) {
+	dsn, err := cfg.DSN.Resolve()
 	if err != nil {
-		return nil, fmt.Errorf("pool %s: %w", pools.Meta, err)
+		return nil, fmt.Errorf("database dsn: %w", err)
+	}
+	if dsn == "" {
+		return nil, nil
+	}
+	db, err := mariadb.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("database: %w", err)
+	}
+	have, err := db.SchemaVersion(ctx)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("database: %w", err)
+	}
+	if want := mariadb.LatestVersion(); have != want {
+		db.Close()
+		return nil, fmt.Errorf("database: schema version %d, this binary needs %d: run `dovetail migrate`", have, want)
+	}
+	return db, nil
+}
+
+// New builds stores and services on an open client. db may be nil only
+// with the memory backend (then metadata, sessions and the queue live in
+// the memory client too).
+func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logger) (*App, error) {
+	pools := cfg.Ceph.Pools
+	if db == nil && cfg.Ceph.Backend != "memory" {
+		return nil, errors.New("app: a metadata database is required with the librados backend")
 	}
 	idxp, err := client.Pool(pools.Index)
 	if err != nil {
@@ -158,9 +192,15 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 	if err != nil {
 		return nil, fmt.Errorf("pool %s: %w", pools.Attachments, err)
 	}
-	st := Stores{
-		Identity: identity.New(meta), Index: index.New(idxp), Messages: message.New(msgp), Attachments: attach.New(attp),
-		Audit: audit.New(idxp), Sessions: session.New(idxp), Queue: queue.New(idxp),
+	st := Stores{Index: index.New(idxp), Messages: message.New(msgp), Attachments: attach.New(attp), Audit: audit.New(idxp)}
+	if db != nil {
+		st.Identity, st.Sessions, st.Queue = identity.NewWith(db), db, db
+	} else {
+		meta, err := client.Pool(pools.Meta)
+		if err != nil {
+			return nil, fmt.Errorf("pool %s: %w", pools.Meta, err)
+		}
+		st.Identity, st.Sessions, st.Queue = identity.New(meta), session.New(idxp), queue.New(idxp)
 	}
 	st.Identity.CacheTTL = cfg.Cache.Identity
 	aud := auditor.New(st.Audit, log, cfg.Audit.Detail)
@@ -189,7 +229,11 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 		Hostname: hostname(), MaxMessageSize: cfg.Mail.MaxMessageSize,
 	}, st.Identity, st.Index, sv.Delivery, aud, nil, log)
 	sv.Export = export.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Audit, sv.Delivery, aud, log)
-	return &App{Cfg: cfg, Log: log, Client: client, Stores: st, Services: sv}, nil
+	a := &App{Cfg: cfg, Log: log, Client: client, DB: db, Stores: st, Services: sv}
+	if db != nil {
+		a.addCloser(func(context.Context) error { return db.Close() })
+	}
+	return a, nil
 }
 
 // DefaultQuota returns the configured default limits.

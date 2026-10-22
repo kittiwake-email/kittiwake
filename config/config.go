@@ -18,17 +18,18 @@ type Config struct {
 	// Modes to run in this process: lmtp, imap, pop3, jmap, admin, postfix, worker.
 	Modes []string `yaml:"modes"`
 
-	Ceph    Ceph    `yaml:"ceph"`
-	Listen  Listen  `yaml:"listen"`
-	Proxy   Proxy   `yaml:"proxy"`
-	SMTP    SMTP    `yaml:"smtp"`
-	Mail    Mail    `yaml:"mail"`
-	Quota   Quota   `yaml:"quota"`
-	Session Session `yaml:"session"`
-	Cache   Cache   `yaml:"cache"`
-	Audit   Audit   `yaml:"audit"`
-	Export  Export  `yaml:"export"`
-	Log     Log     `yaml:"log"`
+	Ceph     Ceph     `yaml:"ceph"`
+	Listen   Listen   `yaml:"listen"`
+	Proxy    Proxy    `yaml:"proxy"`
+	SMTP     SMTP     `yaml:"smtp"`
+	Mail     Mail     `yaml:"mail"`
+	Quota    Quota    `yaml:"quota"`
+	Database Database `yaml:"database"`
+	Session  Session  `yaml:"session"`
+	Cache    Cache    `yaml:"cache"`
+	Audit    Audit    `yaml:"audit"`
+	Export   Export   `yaml:"export"`
+	Log      Log      `yaml:"log"`
 }
 
 // Ceph is the cluster connection and pool layout.
@@ -139,6 +140,17 @@ type Cache struct {
 	// where a slightly old copy is fine: quota checks, folder-name
 	// resolution, JMAP state strings.
 	Root time.Duration `yaml:"root"`
+}
+
+// Database is the metadata database (MariaDB): domains, mailboxes,
+// accounts, aliases, tokens, sessions, the worker queue and the Ceph
+// cluster registry. Required with the librados backend; with the memory
+// backend an empty DSN keeps metadata in memory as well.
+type Database struct {
+	// DSN in go-sql-driver/mysql form, e.g.
+	// "dovetail:secret@tcp(db.example:3306)/dovetail"; the usual secret
+	// forms (file:, ${ENV}) apply.
+	DSN Secret `yaml:"dsn"`
 }
 
 // Audit configures audit retention and detail.
@@ -270,8 +282,14 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: ceph.backend %q must be librados or memory", c.Ceph.Backend)
 	}
-	if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" || c.Ceph.Pools.Meta == "" {
-		return errors.New("config: all four ceph pools must be named")
+	if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" {
+		return errors.New("config: ceph pools messages, attachments and index must be named")
+	}
+	if c.Ceph.Backend == "librados" && c.Database.DSN == "" {
+		return errors.New("config: database.dsn is required with the librados backend (metadata lives in MariaDB)")
+	}
+	if c.Database.DSN == "" && c.Ceph.Pools.Meta == "" {
+		return errors.New("config: ceph.pools.meta must be named when no database is configured")
 	}
 	if c.Mail.MaxMessageSize <= 0 {
 		return errors.New("config: mail.max_message_size must be positive")

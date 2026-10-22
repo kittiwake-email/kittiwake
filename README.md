@@ -43,19 +43,26 @@ Measure on the lab cluster (see `TESTENV.md`) before and after storage changes. 
 numbers on the lab cluster (3 small OSDs): one LMTP delivery or IMAP APPEND costs about 15 ms
 sequentially, an mbsync push of 3000 messages (60 MB) takes under a minute.
 
-## Stateless and scalable, everything in Ceph RADOS
+## Stateless daemons, mail data in Ceph, metadata in MariaDB
 
-The daemons that run this platform are stateless, allowing them to scale out. **All persistent
-state lives in Ceph RADOS**: messages, attachments, mailbox indexes, task queues, and also the
-identity data (domains, mailboxes, accounts, aliases, tokens). There is no SQL database. Ceph
-is the only stateful dependency, so backups, replication and HA follow Ceph.
+The daemons that run this platform are stateless, allowing them to scale out. Persistent
+state is split by its nature:
 
-This is the same approach the Ceph RADOS Gateway (RGW) takes for its users, buckets and
-metadata: direct object reads for lookups by key, exclusive create for uniqueness, omap for
-listings, and a reconciliation process that repairs listings after a crash.
+- **Mail data lives in Ceph RADOS**: messages, attachments, mailbox indexes, change logs and
+  audit logs, per mailbox, on the Ceph cluster the mailbox was placed on. This is the large,
+  write-heavy part, and the part that is sharded over many clusters (see "Multiple Ceph
+  clusters").
+- **Metadata lives in MariaDB**: domains, mailboxes (state, quota limits, hold, placement),
+  accounts, aliases, API and admin tokens, JWT signing keys, sessions, the worker queue and
+  the registry of Ceph clusters. This is small, global and read-heavy; it needs uniqueness,
+  transactions and listings, which a relational database gives for free. The schema is
+  versioned: numbered migrations are embedded in the binary and applied by `dovetail
+  migrate`; a daemon refuses to start on a schema it does not know.
 
-Redis (or similar) is only introduced if a concrete need appears; it is not part of the base
-design.
+The identity store is an interface with two backends. MariaDB is the production backend.
+The RADOS backend (the RGW-style design: one object per record, exclusive create for
+uniqueness, omap for listings) remains for development and tests on the memory backend, and
+both run the same conformance suites. Nothing else is stateful: no Redis, no memcached.
 
 ## One binary, multiple modes
 
@@ -337,9 +344,10 @@ Mail data:
 - Retention set (expunged and trashed messages waiting for purge): `<mailbox-uuid>/retention`
   in the index pool, omap keyed by purge-at timestamp
 - Audit: `<mailbox-uuid>/audit/<YYYY-MM-DD>` and `audit/admin/<YYYY-MM-DD>` in the index pool
-- Sessions: `sessions/<account-id>` in the index pool; signing keys: `keys/jwt`; TOTP replay
-  state: `totp/<account-id>`
-- Task queues: `queue/<task-type>` in the index pool
+
+Sessions, signing keys, TOTP replay state and task queues are tables in MariaDB (the memory
+backend keeps them in the index pool: `sessions/<account-id>`, `keys/jwt`,
+`totp/<account-id>`, `queue/<task-type>`).
 
 Per message this is **one object plus its deduplicated attachments**, one omap entry in its
 folder shard and one in its thread shard. Nothing else grows with the message count.
@@ -463,13 +471,14 @@ The `worker` mode executes background tasks:
 - Search indexing events (no-op until a backend is configured)
 
 Periodic tasks are enqueued by a scheduler role that the workers elect among themselves with
-a RADOS lock on a `scheduler` object, so exactly one worker schedules and any worker executes.
+a lease row in the database, so exactly one worker schedules and any worker executes.
 
-**Queue design:** a RADOS queue object per task type in the index pool, with each task as an
-omap entry and a lease via a RADOS lock, so multiple workers can run without duplicating
-work. Tasks carry a run-after time; failed tasks are retried with backoff and after a
-configurable number of attempts land in a dead-letter set visible in the admin API. If this
-proves clumsy, Redis becomes the concrete need.
+**Queue design:** a `tasks` table in MariaDB; workers claim due tasks with `SELECT ... FOR
+UPDATE SKIP LOCKED`, so multiple workers never take the same task, and hold them under a
+lease that a crashed worker's tasks fall out of. Tasks carry a run-after time; failed tasks
+are retried with backoff and after a configurable number of attempts land in a dead-letter
+state visible in the admin API. The memory backend keeps the same queue as omap entries with
+a RADOS lock.
 
 ## Legal hold (read-only lockdown)
 
@@ -577,8 +586,18 @@ delivery to the mailbox.
 
 **Accounts** are linked to a mailbox. Multiple accounts can point to the same mailbox,
 allowing multiple credentials to access one mailbox. An account consists of a username
-(usually the e-mail address), a display name, zero or more passwords and optionally a TOTP
-secret. The display name is the `From:` name of every identity of the account; the account
+(usually the e-mail address), a display name, the **services** it may log in to, zero or more
+passwords and optionally a TOTP secret.
+
+**Services.** Every account lists which of `imap`, `pop3` and `jmap` it may use (the set grows
+with CalDAV and CardDAV); a new account gets all of them unless told otherwise. A phone-only
+user, or a security-minded one, keeps just `jmap`. The check happens at login on every
+protocol: IMAP and POP3 answer `AUTHENTICATIONFAILED` with a clear reason, the OAuth token
+endpoint answers `invalid_grant`, and API tokens of the account stop working on the JMAP
+listener. `jmap` covers the JMAP listener including its REST self-service endpoints, so an
+account that removes `jmap` itself (`PATCH /v1/me`) locks itself out of this API until an
+administrator (`dovetail-admin account set --services`) restores it. Access tokens already
+issued keep working until they expire (minutes); refreshing one re-checks. The display name is the `From:` name of every identity of the account; the account
 sets it itself (`PATCH /v1/me`, or JMAP `Identity/set` on any of its identities) and an
 admin can set it too. Every
 password is marked primary or application, carries a **comment** (what it is for) and an
@@ -851,10 +870,11 @@ The daemon takes a single YAML file as configuration:
 
 - Mode(s) to run and listen addresses (one listener per mode; JMAP and the admin API are
   separate listeners and separate code paths)
+- Metadata database DSN (MariaDB)
 - Ceph cluster connection information
   - Monitors
   - Credentials
-  - RADOS pools (messages, attachments, index, meta)
+  - RADOS pools (messages, attachments, index)
 - Outbound SMTP relay host (and optional SASL credentials)
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
@@ -871,8 +891,8 @@ The daemon takes a single YAML file as configuration:
 - Logging and metrics settings
 - Redis information (only if it ever becomes needed)
 
-Secrets (Ceph key, SMTP relay password) can be given inline, as a path to a file, or via
-`${ENV_VAR}` substitution.
+Secrets (database DSN, Ceph key, SMTP relay password) can be given inline, as a path to a
+file, or via `${ENV_VAR}` substitution.
 
 ## Development backend
 
@@ -913,7 +933,9 @@ other clients can be generated from the exact contract the running version imple
 
 - Configuration loading, single YAML file, `memory` backend for development
 - RADOS abstraction with librados (cgo) and in-memory implementations
-- Identity store in RADOS (domains, mailboxes, accounts, aliases, catch-all, tokens);
+- Metadata in MariaDB (domains, mailboxes, accounts with services, aliases, catch-all,
+  tokens, sessions, signing keys, queue, cluster registry) with embedded migrations and
+  `dovetail migrate`; RADOS backend for development; shared conformance suites;
   `dovetail admin bootstrap`, identity export/import
 - Admin service, REST admin API (domains, mailboxes, accounts, aliases, tokens, sessions,
   hold/release, audit queries, queue inspection, key rotation, export/import) with an

@@ -4,6 +4,12 @@
 # Modes this process runs. Split modes over processes to scale each one.
 modes: [lmtp, jmap, admin, postfix]
 
+# Metadata database (MariaDB 10.6+): domains, mailboxes, accounts, aliases,
+# tokens, sessions, the worker queue and the Ceph cluster registry. Create or
+# upgrade the schema with `dovetail migrate -c <config>` before starting.
+database:
+  dsn: "dovetail:${DOVETAIL_DB_PASSWORD}@tcp(db.example.org:3306)/dovetail"
+
 ceph:
   backend: librados            # librados | memory (volatile, development only)
   # config_file: /etc/ceph/ceph.conf
@@ -14,7 +20,7 @@ ceph:
     messages: dovetail.messages
     attachments: dovetail.attachments
     index: dovetail.index
-    meta: dovetail.meta
+    # meta: dovetail.meta     # only used without database.dsn (memory backend, development)
 
 listen:
   # proxy_protocol: off | optional | required. HAProxy sends PROXY on every

@@ -19,8 +19,10 @@ Ceph client packages on the Dovetail box come from the official Ceph DEB reposit
   (key in `/etc/apt/keyrings/ceph.gpg`, source in `/etc/apt/sources.list.d/ceph.list`)
 - Go 1.27.3 in `/usr/local/go`, symlinked into `/usr/local/bin`
 - `/etc/ceph/ceph.conf` (mons on the three Ceph nodes) and `/etc/ceph/ceph.client.dovetail.keyring`
-- Pools `dovetail.messages`, `dovetail.attachments`, `dovetail.index`, `dovetail.meta`
-  (application `dovetail`); CephX user `client.dovetail` with rwx on exactly those pools
+- Pools `dovetail.messages`, `dovetail.attachments`, `dovetail.index` (and the now unused
+  `dovetail.meta`), application `dovetail`; CephX user `client.dovetail` with rwx on them
+- MariaDB 10.11 (`mariadb-server` from Ubuntu), databases `dovetail` (the daemons) and
+  `dovetail_test` (conformance suites), user `dovetail`/`dovetail` on the local socket
 - The repository synced to `/root/dovetail` (the box has no IPv4, so GitHub is unreachable;
   sync with rsync from a workstation)
 
@@ -31,6 +33,7 @@ From a workstation:
 ```
 rsync -az --delete --exclude .git --exclude bin ./ root@[2a14:9b80::3143]:/root/dovetail/
 ssh root@2a14:9b80::3143 'cd /root/dovetail && make test'          # unit tests (memory backend)
+ssh root@2a14:9b80::3143 'cd /root/dovetail && make test-sql DOVETAIL_TEST_DSN="dovetail:dovetail@unix(/run/mysqld/mysqld.sock)/dovetail_test"'
 ssh root@2a14:9b80::3143 'cd /root/dovetail && make integration'   # RADOS conformance on the cluster
 ssh root@2a14:9b80::3143 'cd /root/dovetail && make e2e'           # daemon on librados, LMTP/JMAP/IMAP/POP3/export
 ```
@@ -38,7 +41,9 @@ ssh root@2a14:9b80::3143 'cd /root/dovetail && make e2e'           # daemon on l
 `make integration` uses `/etc/ceph/ceph.conf`, user `dovetail` and pool `dovetail.index`
 (override with `DOVETAIL_TEST_CEPH_CONF`, `DOVETAIL_TEST_CEPH_USER`, `DOVETAIL_TEST_CEPH_POOL`);
 it works in its own RADOS namespaces and cleans up. `make e2e` runs `examples/lab.yaml` and
-leaves a throwaway `e2e-<timestamp>.example` domain in the meta pool.
+leaves a throwaway `e2e-<timestamp>.example` domain in MariaDB. After a schema change run
+`dovetail migrate -c /etc/dovetail/dovetail.yaml` on the box before restarting the instances
+(a daemon refuses to start on an old schema).
 
 ## systemd instances on the box
 

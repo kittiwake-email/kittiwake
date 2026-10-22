@@ -20,6 +20,7 @@ import (
 	"dovetail/service/actor"
 	"dovetail/service/admin"
 	"dovetail/store/identity"
+	"dovetail/store/mariadb"
 )
 
 func main() {
@@ -33,6 +34,8 @@ func main() {
 		err = runServe(os.Args[2:])
 	case "check-config":
 		err = runCheckConfig(os.Args[2:])
+	case "migrate":
+		err = runMigrate(os.Args[2:])
 	case "admin":
 		err = runAdmin(os.Args[2:])
 	case "version", "--version", "-v":
@@ -56,6 +59,7 @@ func usage() {
 commands:
   serve         run the daemon in the modes listed in the config file
   check-config  parse and validate the config file
+  migrate       create or upgrade the metadata database schema (database.dsn)
   admin         administrative operations against RADOS (see: dovetail admin help)
   version       print the version (also: -v, --version)
 
@@ -174,7 +178,11 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	a, err := app.New(cfg, client, log)
+	db, err := app.OpenDatabase(context.Background(), cfg.Database)
+	if err != nil {
+		return err
+	}
+	a, err := app.New(cfg, client, db, log)
 	if err != nil {
 		return err
 	}
@@ -198,4 +206,44 @@ func runServe(args []string) error {
 	defer stop()
 	log.Info("dovetail starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend)
 	return a.Run(ctx)
+}
+
+// runMigrate creates or upgrades the metadata schema.
+func runMigrate(args []string) error {
+	fs := newFlagSet("migrate")
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	dsn, err := cfg.Database.DSN.Resolve()
+	if err != nil {
+		return err
+	}
+	if dsn == "" {
+		return fmt.Errorf("database.dsn is not configured")
+	}
+	db, err := mariadb.Open(dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx := context.Background()
+	before, err := db.SchemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	after, err := db.Migrate(ctx)
+	if err != nil {
+		return err
+	}
+	if after == before {
+		fmt.Printf("schema version %d, up to date\n", after)
+	} else {
+		fmt.Printf("schema version %d -> %d\n", before, after)
+	}
+	return nil
 }

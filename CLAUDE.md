@@ -21,6 +21,7 @@ Plain commit messages: subject line plus an explanatory body when useful. Never 
 make build            # bin/dovetail (cgo; needs librados-dev, installed on the dev box, Ceph 20.x)
 make test             # go test ./...   (all unit tests run on the in-memory RADOS; no Ceph needed)
 make test-race
+make test-sql         # store conformance suites on a real MariaDB (DOVETAIL_TEST_DSN; see Makefile for the dev container)
 make lint             # go vet + gofmt check
 go test ./store/index -run TestFolders          # one test
 go test ./mail -run TestRoundTrip -v
@@ -30,6 +31,7 @@ make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (l
 make deploy           # build here, push binary to the lab box, restart its systemd instances
                       # (dovetail@<mode>, one process per mode; see contrib/systemd, TESTENV.md)
 bin/dovetail check-config -c examples/dovetail.yaml
+bin/dovetail migrate -c <cfg>                          # create/upgrade the MariaDB schema (store/mariadb/migrations)
 bin/dovetail admin -c <cfg> bootstrap                 # first admin token; `admin token --read-only` for more
 bin/dovetail-admin -u http://[::1]:8081 -t dvt_... mailbox list       # everything else: the API client
 bin/dovetail-admin ... -o json ...                                   # -o plain|json everywhere

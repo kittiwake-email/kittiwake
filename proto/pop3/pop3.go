@@ -422,6 +422,8 @@ func (ss *session) finishAuth(act actor.Actor, err error) bool {
 			return ss.failed("[AUTH] this password requires a one-time code; use an application password or OAUTHBEARER")
 		case errors.Is(err, authsvc.ErrAccountDisabled):
 			return ss.failed("[AUTH] account disabled")
+		case errors.Is(err, authsvc.ErrServiceDisabled):
+			return ss.failed("[AUTH] POP3 is not enabled for this account")
 		case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken), errors.Is(err, authsvc.ErrTokenExpired):
 			return ss.failed("[AUTH] authentication failed")
 		default:

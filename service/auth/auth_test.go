@@ -431,3 +431,49 @@ func countOf(ss []string, want string) int {
 	}
 	return n
 }
+
+func TestServicesEnforced(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// Only JMAP from now on.
+	if err := f.svc.SetServices(ctx, f.acct.ID, []string{identity.ServiceJMAP}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "imap", ""); !errors.Is(err, ErrServiceDisabled) {
+		t.Fatalf("imap should be refused: %v", err)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "pop3", ""); !errors.Is(err, ErrServiceDisabled) {
+		t.Fatalf("pop3 should be refused: %v", err)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "rest", ""); err != nil {
+		t.Fatalf("rest (jmap listener) should work: %v", err)
+	}
+	toks, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "correct horse", Client: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A session token cannot be used for IMAP OAUTHBEARER either.
+	if _, err := f.svc.VerifyOAuthBearer(ctx, "wido@example.org", toks.AccessToken, "imap", ""); !errors.Is(err, ErrServiceDisabled) {
+		t.Fatalf("oauthbearer on imap should be refused: %v", err)
+	}
+	// Turn JMAP off as well: token refresh and API tokens stop.
+	if err := f.svc.SetServices(ctx, f.acct.ID, []string{identity.ServiceIMAP}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Refresh(ctx, toks.RefreshToken, "", "rest"); !errors.Is(err, ErrServiceDisabled) {
+		t.Fatalf("refresh should be refused: %v", err)
+	}
+	_, secret, err := f.ids.CreateToken(ctx, f.acct.ID, nil, f.now.Add(time.Hour), "ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.VerifyBearer(ctx, secret); !errors.Is(err, ErrServiceDisabled) {
+		t.Fatalf("api token should be refused: %v", err)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "imap", ""); err != nil {
+		t.Fatalf("imap should work again: %v", err)
+	}
+	if acts := f.auditActions(t, f.mb.ID); countOf(acts, "services-change:ok") != 2 {
+		t.Fatalf("services changes not audited: %v", acts)
+	}
+}
