@@ -106,14 +106,20 @@ type Mailbox struct {
 // Active reports whether the mailbox is in the active state.
 func (m *Mailbox) Active() bool { return m.State == StateActive }
 
-// Password is one credential of an account.
+// Password is one credential of an account. Every password carries a
+// comment (what it is for) and an optional expiry, so temporary passwords
+// can be handed out and stop working on their own.
 type Password struct {
-	ID      string    `json:"id"`
-	Hash    string    `json:"hash"` // scheme-prefixed, e.g. {ARGON2ID}$argon2id$...
-	Kind    string    `json:"kind"` // primary or application
-	Comment string    `json:"comment,omitempty"`
-	Created time.Time `json:"created"`
+	ID        string     `json:"id"`
+	Hash      string     `json:"hash"` // scheme-prefixed, e.g. {ARGON2ID}$argon2id$...
+	Kind      string     `json:"kind"` // primary or application
+	Comment   string     `json:"comment"`
+	ExpiresAt *time.Time `json:"expires_at"` // nil = never
+	Created   time.Time  `json:"created"`
 }
+
+// Expired reports whether the password has expired at t.
+func (p *Password) Expired(at time.Time) bool { return p.ExpiresAt != nil && !at.Before(*p.ExpiresAt) }
 
 // TOTP is an account's second-factor configuration.
 type TOTP struct {

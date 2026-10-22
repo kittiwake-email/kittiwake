@@ -276,10 +276,17 @@ func TestKeyRotationKeepsOldTokensValid(t *testing.T) {
 func TestPasswordManagement(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "short", "", ""); !errors.Is(err, identity.ErrInvalid) {
+	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "short", "", "x", nil); !errors.Is(err, identity.ErrInvalid) {
 		t.Fatal("short accepted")
 	}
-	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "new primary pw", identity.PasswordPrimary, ""); err != nil {
+	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "new primary pw", identity.PasswordPrimary, "", nil); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatal("comment must be required")
+	}
+	past := f.now.Add(-time.Hour)
+	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "temporary pw!", identity.PasswordPrimary, "temp", &past); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatal("expiry in the past accepted")
+	}
+	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "new primary pw", identity.PasswordPrimary, "rotation", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "correct horse"}); !errors.Is(err, ErrInvalidCredentials) {
@@ -288,7 +295,7 @@ func TestPasswordManagement(t *testing.T) {
 	if _, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "new primary pw"}); err != nil {
 		t.Fatal(err)
 	}
-	id, err := f.svc.SetPassword(ctx, f.acct.ID, "second-app-pw", identity.PasswordApplication, "tablet")
+	id, err := f.svc.SetPassword(ctx, f.acct.ID, "second-app-pw", identity.PasswordApplication, "tablet", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,6 +303,27 @@ func TestPasswordManagement(t *testing.T) {
 	if len(v.Value.Passwords) != 3 {
 		t.Fatalf("passwords: %d", len(v.Value.Passwords))
 	}
+	// A temporary primary password is added next to the permanent one and
+	// stops working at its expiry; the permanent one keeps working.
+	exp := f.now.Add(time.Hour)
+	tmpID, err := f.svc.SetPassword(ctx, f.acct.ID, "temporary pw!", identity.PasswordPrimary, "helpdesk reset", &exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "temporary pw!"}); err != nil {
+		t.Fatalf("temporary password: %v", err)
+	}
+	if _, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "new primary pw"}); err != nil {
+		t.Fatalf("permanent password alongside temporary: %v", err)
+	}
+	f.now = exp.Add(time.Minute)
+	if _, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "temporary pw!"}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expired temporary password still works: %v", err)
+	}
+	if _, err := f.svc.Login(ctx, LoginRequest{Username: "wido@example.org", Password: "new primary pw"}); err != nil {
+		t.Fatal("permanent password broken by expiry")
+	}
+	_ = tmpID
 	if err := f.svc.RemovePassword(ctx, f.acct.ID, id); err != nil {
 		t.Fatal(err)
 	}

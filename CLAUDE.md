@@ -153,8 +153,10 @@ These are settled. Do not design around them.
   spec in repo) covers only OAuth/session/self-service endpoints and the admin API. IMAP4rev1
   + IDLE, UIDPLUS, MOVE; POP3 INBOX only. The JMAP server layer is written in this repo.
 - **Identity:** mailbox = UUID that owns typed collections. Accounts link to a mailbox
-  (many-to-one), have roles (`read`, `write`, `send`, `admin`), passwords marked `primary`
-  or `application` (Dovecot-style scheme prefixes; argon2id for new ones), optional TOTP
+  (many-to-one), have roles (`read`, `write`, `send`), passwords marked `primary` or
+  `application`, each with a required comment and optional `expires_at` (temporary
+  passwords; expired ones never match) (Dovecot-style scheme prefixes; argon2id for new
+  ones), optional TOTP
   secret, and API tokens (stored as SHA-256, prefixed `dvt_`, expiry and comment mandatory,
   may only narrow the account's roles). **Admins are tokens, not accounts:** admin tokens
   (`tokens/<hash>` with zero AccountID, listed in `tokens/_admin`) carry `admin` or
@@ -173,6 +175,9 @@ These are settled. Do not design around them.
   mailbox). Sent copy goes to Sent. Relay failure = API error, nothing stored.
 - **Domains, aliases, catch-all** are first-class. LMTP resolution: exact address → alias
   (bounded depth, may fan out) → catch-all → reject. Same answer served to Postfix.
+- **Lifecycle:** accounts belong to a domain and point at a mailbox; deleting an account
+  (or a domain once empty of accounts/aliases) orphans the mailbox with its data, by design;
+  attach a new account to rename/move. `GET /v1/admin/mailboxes?orphaned=true` lists them.
 - **Mailbox state:** `active` | `suspended` (LMTP 450 → MTA queues; users locked out) |
   `disabled` (LMTP 550; socketmap says NOTFOUND so SMTP rejects; users locked out), with a
   required reason. There is no mailbox `enabled` flag; `admin.SetMailboxState` is the only

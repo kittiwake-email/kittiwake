@@ -135,10 +135,11 @@ type HoldRequest struct {
 
 // Password is a redacted password entry (no hash).
 type Password struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"`
-	Comment string    `json:"comment,omitempty"`
-	Created time.Time `json:"created"`
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	Comment   string     `json:"comment"`
+	ExpiresAt *time.Time `json:"expires_at"` // nil = never
+	Created   time.Time  `json:"created"`
 }
 
 // Account is the redacted account view.
@@ -158,18 +159,21 @@ type Account struct {
 // AccountRequest creates (Username, MailboxID, Roles, Password, Enabled) or
 // patches (Roles, Enabled, MailboxID) an account.
 type AccountRequest struct {
-	Username  string   `json:"username,omitempty"`
-	MailboxID string   `json:"mailbox_id,omitempty"`
-	Roles     []string `json:"roles,omitempty"`
-	Password  string   `json:"password,omitempty"`
-	Enabled   *bool    `json:"enabled,omitempty"`
+	Username          string     `json:"username,omitempty"`
+	MailboxID         string     `json:"mailbox_id,omitempty"`
+	Roles             []string   `json:"roles,omitempty"`
+	Password          string     `json:"password,omitempty"`
+	PasswordComment   string     `json:"password_comment,omitempty"`
+	PasswordExpiresAt *time.Time `json:"password_expires_at,omitempty"`
+	Enabled           *bool      `json:"enabled,omitempty"`
 }
 
 // PasswordRequest sets a password. Kind is "primary" (default) or "application".
 type PasswordRequest struct {
-	Password string `json:"password"`
-	Kind     string `json:"kind,omitempty"`
-	Comment  string `json:"comment,omitempty"`
+	Password  string     `json:"password"`
+	Kind      string     `json:"kind,omitempty"`
+	Comment   string     `json:"comment,omitempty"`    // required
+	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil = never
 }
 
 // PasswordSet is the response of setting a password.

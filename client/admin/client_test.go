@@ -434,3 +434,53 @@ func TestExportDownloadImport(t *testing.T) {
 		t.Fatalf("openapi (not served by the test mux): %v", err)
 	}
 }
+
+func TestRenameViaOrphanedMailboxAndTemporaryPassword(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	mb, err := f.c.CreateMailbox(ctx, MailboxRequest{})
+	must(t, err)
+	old, err := f.c.CreateAccount(ctx, AccountRequest{Username: "old@example.org", MailboxID: mb.ID, Roles: []string{"read"}, Password: "firstpassword", PasswordComment: "onboarding"})
+	must(t, err)
+	if len(old.Passwords) != 1 || old.Passwords[0].Comment != "onboarding" || old.Passwords[0].ExpiresAt != nil {
+		t.Fatalf("initial password metadata: %+v", old.Passwords)
+	}
+	// Temporary password with an expiry.
+	exp := f.now.Add(2 * time.Hour)
+	ps, err := f.c.SetPassword(ctx, old.ID, PasswordRequest{Password: "temporary-pw", Comment: "helpdesk reset", ExpiresAt: &exp})
+	must(t, err)
+	if ps.ID == "" {
+		t.Fatal("no password id")
+	}
+	if _, err := f.c.SetPassword(ctx, old.ID, PasswordRequest{Password: "no-comment-pw"}); !IsBadRequest(err) {
+		t.Fatalf("comment must be required: %v", err)
+	}
+	got, err := f.c.GetAccount(ctx, old.ID)
+	must(t, err)
+	if len(got.Passwords) != 2 || got.Passwords[1].ExpiresAt == nil || !got.Passwords[1].ExpiresAt.Equal(exp) {
+		t.Fatalf("passwords after temporary: %+v", got.Passwords)
+	}
+	// Rename: remove the account, the mailbox is orphaned, attach a new one.
+	if o, _ := f.c.ListOrphanedMailboxes(ctx); len(o) != 0 {
+		t.Fatalf("orphaned before: %v", o)
+	}
+	must(t, f.c.DeleteAccount(ctx, old.ID))
+	orphans, err := f.c.ListOrphanedMailboxes(ctx)
+	must(t, err)
+	if len(orphans) != 1 || orphans[0].ID != mb.ID {
+		t.Fatalf("orphaned after delete: %+v", orphans)
+	}
+	nu, err := f.c.CreateAccount(ctx, AccountRequest{Username: "new@example.org", MailboxID: mb.ID, Roles: []string{"read"}})
+	must(t, err)
+	if nu.MailboxID != mb.ID {
+		t.Fatal("new account not on the old mailbox")
+	}
+	if o, _ := f.c.ListOrphanedMailboxes(ctx); len(o) != 0 {
+		t.Fatalf("still orphaned: %v", o)
+	}
+	info, err := f.c.InspectMailbox(ctx, mb.ID)
+	must(t, err)
+	if len(info.Accounts) != 1 || info.Accounts[0] != "new@example.org" {
+		t.Fatalf("accounts after rename: %v", info.Accounts)
+	}
+}

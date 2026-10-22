@@ -280,6 +280,15 @@ func (c *Client) ListMailboxes(ctx context.Context) ([]MailboxListItem, error) {
 	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes", nil, nil, "", &out)
 }
 
+// ListOrphanedMailboxes lists mailboxes with no account attached (after an
+// account or domain was removed; attach a new account to keep the data).
+func (c *Client) ListOrphanedMailboxes(ctx context.Context) ([]MailboxListItem, error) {
+	var out struct {
+		Items []MailboxListItem `json:"items"`
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes", url.Values{"orphaned": {"true"}}, nil, "", &out)
+}
+
 // InspectMailbox returns usage, folders, accounts, hold and limits.
 func (c *Client) InspectMailbox(ctx context.Context, id string) (MailboxInfo, error) {
 	var out MailboxInfo

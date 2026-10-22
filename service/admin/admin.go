@@ -395,7 +395,11 @@ type CreateAccountRequest struct {
 	MailboxID uuid.UUID
 	Roles     []string
 	Password  string // optional initial primary password (plaintext)
-	Enabled   *bool  // default true
+	// PasswordComment and PasswordExpiresAt describe the initial password
+	// (comment defaults to "initial password"; expiry nil = never).
+	PasswordComment   string
+	PasswordExpiresAt *time.Time
+	Enabled           *bool // default true
 }
 
 // CreateAccount creates an account.
@@ -415,7 +419,14 @@ func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (
 		if err != nil {
 			return identity.Account{}, err
 		}
-		a.Passwords = []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}}
+		comment := strings.TrimSpace(req.PasswordComment)
+		if comment == "" {
+			comment = "initial password"
+		}
+		if req.PasswordExpiresAt != nil && !req.PasswordExpiresAt.After(s.Now()) {
+			return identity.Account{}, fmt.Errorf("%w: password expiry must be in the future", ErrInvalid)
+		}
+		a.Passwords = []identity.Password{{Hash: h, Kind: identity.PasswordPrimary, Comment: comment, ExpiresAt: req.PasswordExpiresAt}}
 	}
 	out, err := s.ids.CreateAccount(ctx, a)
 	if err != nil {

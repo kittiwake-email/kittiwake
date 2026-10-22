@@ -573,8 +573,19 @@ delivery to the mailbox.
 
 **Accounts** are linked to a mailbox. Multiple accounts can point to the same mailbox,
 allowing multiple credentials to access one mailbox. An account consists of a username
-(usually the e-mail address), zero or more passwords (each marked primary or application) and
-optionally a TOTP secret. Accounts have an enabled flag; a disabled account cannot log in,
+(usually the e-mail address), zero or more passwords and optionally a TOTP secret. Every
+password is marked primary or application, carries a **comment** (what it is for) and an
+optional **expiry** (null = never): a helpdesk can hand out a temporary password that stops
+working by itself, next to the permanent one. Expired passwords are dropped the next time a
+password is set.
+
+**Lifecycle, by design.** An account belongs to its domain (a domain cannot be removed while
+it still has accounts or aliases) and points at a mailbox; the mailbox owns the data and
+knows nothing about names. Removing an account, or a whole domain, leaves its mailboxes
+**orphaned** with all their mail intact; attaching a new account to an orphaned mailbox is how
+an address is renamed or moved to another domain without touching the data. Orphaned
+mailboxes are listed with `dovetail-admin mailbox list --orphaned` (`GET
+/v1/admin/mailboxes?orphaned=true`); a mailbox is only ever deleted explicitly. Accounts have an enabled flag; a disabled account cannot log in,
 while the mailbox state (see above) decides what happens to inbound mail.
 
 ## Roles

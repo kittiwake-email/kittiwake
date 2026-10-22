@@ -113,7 +113,7 @@ func quotaFrom(sb, hb, sm, hm int64) *admin.QuotaLimits {
 
 func (a *cli) mailbox(args []string) error {
 	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N]
-       mailbox list | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
+       mailbox list [--orphaned] | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
        mailbox set <uuid> [quota flags]                            (quota flags replace the whole quota)
        mailbox suspend <uuid> --reason text    soft: LMTP 450, the MTA queues; users locked out
        mailbox disable <uuid> --reason text    hard: LMTP 550, rejected at SMTP time; users locked out
@@ -140,7 +140,18 @@ func (a *cli) mailbox(args []string) error {
 		}
 		return emit(m, nil)
 	case "list":
-		items, err := a.c.ListMailboxes(a.ctx)
+		fs := newFlagSet("mailbox list")
+		orphaned := fs.Bool("orphaned", false, "only mailboxes without an account (after account/domain removal; attach a new account to keep the data)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var items []admin.MailboxListItem
+		var err error
+		if *orphaned {
+			items, err = a.c.ListOrphanedMailboxes(a.ctx)
+		} else {
+			items, err = a.c.ListMailboxes(a.ctx)
+		}
 		if err != nil {
 			return err
 		}
@@ -379,7 +390,8 @@ func (a *cli) account(args []string) error {
 	const u = `account create --username u@d --mailbox <uuid> [--roles read,write,send] [--password-stdin] [--disabled]
        account list [--domain d] [--prefix p] | get <username|uuid> | delete <id>
        account set <id> [--roles r,..] [--mailbox uuid] [--enable|--disable]
-       account password <id> [--kind primary|application] [--comment text] --password-stdin
+       account password <id> --comment text [--kind primary|application] [--expires YYYY-MM-DD|RFC3339] --password-stdin
+                                              (an expiring primary is added as a temporary password; the permanent one keeps working)
        account totp-disable <id> | sessions <id> | revoke-session <id> <session-id>
        account token create <id> --expires YYYY-MM-DD|RFC3339 --comment text [--roles r,..]
        account tokens <id> | token delete <id> <token-id>`
@@ -503,7 +515,8 @@ func (a *cli) account(args []string) error {
 	case "password":
 		fs := newFlagSet("account password")
 		kind := fs.String("kind", "primary", "primary or application")
-		comment := fs.String("comment", "", "comment (application passwords)")
+		comment := fs.String("comment", "", "what the password is for (required)")
+		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (default: never)")
 		pwStdin := fs.Bool("password-stdin", false, "read the password from stdin (required)")
 		if err := fs.Parse(rest); err != nil {
 			return err
@@ -511,11 +524,22 @@ func (a *cli) account(args []string) error {
 		if !*pwStdin {
 			return errors.New("--password-stdin is required (passwords are never taken from arguments)")
 		}
+		if *comment == "" {
+			return errors.New("--comment is required")
+		}
+		var exp *time.Time
+		if *expires != "" {
+			t, err := parseDate(*expires)
+			if err != nil {
+				return fmt.Errorf("--expires: %w", err)
+			}
+			exp = &t
+		}
 		pw, err := readPasswordStdin()
 		if err != nil {
 			return err
 		}
-		ps, err := a.c.SetPassword(a.ctx, id, admin.PasswordRequest{Password: pw, Kind: *kind, Comment: *comment})
+		ps, err := a.c.SetPassword(a.ctx, id, admin.PasswordRequest{Password: pw, Kind: *kind, Comment: *comment, ExpiresAt: exp})
 		if err != nil {
 			return err
 		}

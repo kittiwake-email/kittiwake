@@ -303,6 +303,8 @@ paths:
     get:
       tags: [admin]
       summary: List all mailboxes with their accounts (walks the meta pool; operator tool)
+      parameters:
+        - { name: orphaned, in: query, schema: { type: boolean }, description: "Only mailboxes with no account attached" }
       responses:
         "200":
           description: Mailboxes
@@ -823,6 +825,8 @@ components:
             properties:
               password: { type: string, minLength: 8 }
               kind: { type: string, enum: [primary, application] }
+              comment: { type: string, description: "What the password is for (required; self-service primary change defaults to 'set by user')" }
+              expires_at: { type: string, format: date-time, nullable: true, description: "When the password stops working; omit for never (temporary passwords)" }
               comment: { type: string }
   responses:
     BadRequest: { description: Invalid input, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
@@ -909,6 +913,7 @@ components:
         id: { type: string }
         kind: { type: string, enum: [primary, application] }
         comment: { type: string }
+        expires_at: { type: string, format: date-time, nullable: true, description: null = never }
         created: { type: string, format: date-time }
     Session:
       type: object
@@ -1032,8 +1037,10 @@ components:
       properties:
         username: { type: string, description: Create only }
         mailbox_id: { type: string, format: uuid, description: On PATCH, relinks the account }
-        roles: { type: array, items: { type: string, enum: [read, write, send, admin] } }
+        roles: { type: array, items: { type: string, enum: [read, write, send] } }
         password: { type: string, description: Create only, initial primary password }
+        password_comment: { type: string, description: "Create only; defaults to 'initial password'" }
+        password_expires_at: { type: string, format: date-time, description: "Create only; omit for never" }
         enabled: { type: boolean }
     Account:
       type: object

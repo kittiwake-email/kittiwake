@@ -263,6 +263,7 @@ func TestSelfService(t *testing.T) {
 		t.Fatalf("app pw me: %v", r.body)
 	}
 	f.expect(f.do("POST", "/v1/me/app-passwords", f.bearer(access), map[string]string{"password": "short"}, ""), 400, "short app pw")
+	f.expect(f.do("POST", "/v1/me/app-passwords", f.bearer(access), map[string]string{"password": "longenough-nocomment"}, ""), 400, "app pw without comment")
 	// Primary password change.
 	f.expect(f.do("PUT", "/v1/me/password", f.bearer(access), map[string]string{"password": "new primary pw"}, ""), 200, "set password")
 	f.expect(f.do("GET", "/v1/me", basic("wido@example.org", "correct horse"), nil, ""), 401, "old primary")

@@ -102,9 +102,13 @@ type LoginRequest struct {
 	Protocol string // for audit; default "rest"
 }
 
-// matchPassword finds the password entry that matches plain.
-func matchPassword(acct *identity.Account, plain string) (*identity.Password, bool) {
+// matchPassword finds the (unexpired) password entry that matches plain.
+func (s *Service) matchPassword(acct *identity.Account, plain string) (*identity.Password, bool) {
+	now := s.Now()
 	for i := range acct.Passwords {
+		if acct.Passwords[i].Expired(now) {
+			continue
+		}
 		ok, err := cryptoauth.VerifyPassword(acct.Passwords[i].Hash, plain)
 		if err == nil && ok {
 			return &acct.Passwords[i], true
@@ -154,7 +158,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 		return Tokens{}, err
 	}
 	acct := v.Value
-	pw, ok := matchPassword(&acct, req.Password)
+	pw, ok := s.matchPassword(&acct, req.Password)
 	if !ok {
 		return fail("wrong password", ErrInvalidCredentials)
 	}
@@ -549,7 +553,7 @@ func (s *Service) VerifyPassword(ctx context.Context, username, password, proto,
 		return actor.Actor{}, err
 	}
 	acct := v.Value
-	pw, ok := matchPassword(&acct, password)
+	pw, ok := s.matchPassword(&acct, password)
 	if !ok {
 		return fail("wrong password", ErrInvalidCredentials)
 	}
@@ -679,10 +683,12 @@ func subjectIfOther(ctx context.Context, username string) string {
 
 // ---- passwords (self-service and admin) ----
 
-// SetPassword adds or replaces a password of the given kind. For primary
-// passwords with an existing one, the old primary is replaced; application
-// passwords are added. Returns the password id.
-func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind, comment string) (string, error) {
+// SetPassword adds or replaces a password of the given kind. A primary
+// password replaces the existing primary (a temporary one with an expiry
+// is added next to it instead, so the permanent one keeps working);
+// application passwords are added. The comment is required; expiresAt is
+// optional (nil = never). Returns the password id.
+func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind, comment string, expiresAt *time.Time) (string, error) {
 	if len(plain) < 8 {
 		return "", fmt.Errorf("%w: password too short", identity.ErrInvalid)
 	}
@@ -692,28 +698,47 @@ func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind
 	if kind != identity.PasswordPrimary && kind != identity.PasswordApplication {
 		return "", fmt.Errorf("%w: password kind", identity.ErrInvalid)
 	}
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return "", fmt.Errorf("%w: password comment is required", identity.ErrInvalid)
+	}
+	now := s.Now().UTC()
+	if expiresAt != nil {
+		t := expiresAt.UTC()
+		if !t.After(now) {
+			return "", fmt.Errorf("%w: password expiry must be in the future", identity.ErrInvalid)
+		}
+		expiresAt = &t
+	}
 	h, err := cryptoauth.HashPassword(plain)
 	if err != nil {
 		return "", err
 	}
 	id := uuid.NewString()
 	a, err := s.ids.UpdateAccount(ctx, acctID, func(a *identity.Account) error {
-		if kind == identity.PasswordPrimary {
-			kept := a.Passwords[:0]
-			for _, p := range a.Passwords {
-				if p.Kind != identity.PasswordPrimary {
-					kept = append(kept, p)
-				}
+		kept := a.Passwords[:0]
+		for _, p := range a.Passwords {
+			// Replace the permanent primary with a permanent primary; drop
+			// expired entries while we are here.
+			if kind == identity.PasswordPrimary && expiresAt == nil && p.Kind == identity.PasswordPrimary && p.ExpiresAt == nil {
+				continue
 			}
-			a.Passwords = kept
+			if p.Expired(now) {
+				continue
+			}
+			kept = append(kept, p)
 		}
-		a.Passwords = append(a.Passwords, identity.Password{ID: id, Hash: h, Kind: kind, Comment: comment, Created: s.Now().UTC()})
+		a.Passwords = append(kept, identity.Password{ID: id, Hash: h, Kind: kind, Comment: comment, ExpiresAt: expiresAt, Created: now})
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-set", Target: kind, Detail: comment, Subject: subjectIfOther(ctx, a.Username)})
+	exp := "never"
+	if expiresAt != nil {
+		exp = expiresAt.Format(time.RFC3339)
+	}
+	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-set", Target: kind, Detail: fmt.Sprintf("comment=%q expires=%s", comment, exp), Subject: subjectIfOther(ctx, a.Username)})
 	return id, nil
 }
 

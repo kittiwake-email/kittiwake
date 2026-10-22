@@ -519,16 +519,17 @@ func (s *Server) oauthRevoke(w http.ResponseWriter, r *http.Request) {
 // ---- self-service ----
 
 type passwordView struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"`
-	Comment string    `json:"comment,omitempty"`
-	Created time.Time `json:"created"`
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	Comment   string     `json:"comment"`
+	ExpiresAt *time.Time `json:"expires_at"`
+	Created   time.Time  `json:"created"`
 }
 
 func passwordViews(pw []identity.Password) []passwordView {
 	out := make([]passwordView, 0, len(pw))
 	for _, p := range pw {
-		out = append(out, passwordView{ID: p.ID, Kind: p.Kind, Comment: p.Comment, Created: p.Created})
+		out = append(out, passwordView{ID: p.ID, Kind: p.Kind, Comment: p.Comment, ExpiresAt: p.ExpiresAt, Created: p.Created})
 	}
 	return out
 }
@@ -599,9 +600,10 @@ func (s *Server) meRevokeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type passwordRequest struct {
-	Password string `json:"password"`
-	Kind     string `json:"kind,omitempty"`
-	Comment  string `json:"comment,omitempty"`
+	Password  string     `json:"password"`
+	Kind      string     `json:"kind,omitempty"`
+	Comment   string     `json:"comment,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil = never
 }
 
 func (s *Server) mePassword(w http.ResponseWriter, r *http.Request) {
@@ -610,12 +612,16 @@ func (s *Server) mePassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	id, err := s.auth.SetPassword(r.Context(), actor.From(r.Context()).AccountID, req.Password, identity.PasswordPrimary, "")
+	comment := req.Comment
+	if comment == "" {
+		comment = "set by user"
+	}
+	id, err := s.auth.SetPassword(r.Context(), actor.From(r.Context()).AccountID, req.Password, identity.PasswordPrimary, comment, req.ExpiresAt)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "kind": identity.PasswordPrimary})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "kind": identity.PasswordPrimary, "comment": comment, "expires_at": req.ExpiresAt})
 }
 
 func (s *Server) meAppPassword(w http.ResponseWriter, r *http.Request) {
@@ -624,12 +630,12 @@ func (s *Server) meAppPassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	id, err := s.auth.SetPassword(r.Context(), actor.From(r.Context()).AccountID, req.Password, identity.PasswordApplication, req.Comment)
+	id, err := s.auth.SetPassword(r.Context(), actor.From(r.Context()).AccountID, req.Password, identity.PasswordApplication, req.Comment, req.ExpiresAt)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id, "kind": identity.PasswordApplication, "comment": req.Comment})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"id": id, "kind": identity.PasswordApplication, "comment": req.Comment, "expires_at": req.ExpiresAt})
 }
 
 func (s *Server) meDeletePassword(w http.ResponseWriter, r *http.Request) {
@@ -953,11 +959,13 @@ func viewAccount(a identity.Account) accountView {
 }
 
 type accountRequest struct {
-	Username  string     `json:"username,omitempty"`
-	MailboxID *uuid.UUID `json:"mailbox_id,omitempty"`
-	Roles     []string   `json:"roles,omitempty"`
-	Password  string     `json:"password,omitempty"`
-	Enabled   *bool      `json:"enabled,omitempty"`
+	Username          string     `json:"username,omitempty"`
+	MailboxID         *uuid.UUID `json:"mailbox_id,omitempty"`
+	Roles             []string   `json:"roles,omitempty"`
+	Password          string     `json:"password,omitempty"`
+	PasswordComment   string     `json:"password_comment,omitempty"`
+	PasswordExpiresAt *time.Time `json:"password_expires_at,omitempty"`
+	Enabled           *bool      `json:"enabled,omitempty"`
 }
 
 func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
@@ -966,7 +974,7 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	cr := admin.CreateAccountRequest{Username: req.Username, Roles: req.Roles, Password: req.Password, Enabled: req.Enabled}
+	cr := admin.CreateAccountRequest{Username: req.Username, Roles: req.Roles, Password: req.Password, PasswordComment: req.PasswordComment, PasswordExpiresAt: req.PasswordExpiresAt, Enabled: req.Enabled}
 	if req.MailboxID != nil {
 		cr.MailboxID = *req.MailboxID
 	}
@@ -991,6 +999,7 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 		Accounts []string             `json:"accounts"`
 		Created  time.Time            `json:"created"`
 	}
+	orphaned := r.URL.Query().Get("orphaned") == "true"
 	items := []item{}
 	err := s.admin.ListMailboxes(r.Context(), func(id uuid.UUID) error {
 		m, err := s.admin.GetMailbox(r.Context(), id)
@@ -1000,6 +1009,9 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 		accts, _, _ := s.admin.ListMailboxAccounts(r.Context(), id)
 		if accts == nil {
 			accts = []string{}
+		}
+		if orphaned && len(accts) > 0 {
+			return nil
 		}
 		items = append(items, item{ID: id, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
 		return nil
@@ -1109,7 +1121,7 @@ func (s *Server) accountPassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	id, err := s.auth.SetPassword(r.Context(), a.ID, req.Password, req.Kind, req.Comment)
+	id, err := s.auth.SetPassword(r.Context(), a.ID, req.Password, req.Kind, req.Comment, req.ExpiresAt)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1118,7 +1130,7 @@ func (s *Server) accountPassword(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = identity.PasswordPrimary
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "kind": kind})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "kind": kind, "comment": req.Comment, "expires_at": req.ExpiresAt})
 }
 
 func (s *Server) accountTOTPDisable(w http.ResponseWriter, r *http.Request) {
