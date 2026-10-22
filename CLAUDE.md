@@ -22,8 +22,8 @@ go test ./mail -run TestRoundTrip -v
 make run-dev          # whole platform in one process on the memory backend with a seeded account
 make integration      # RADOS conformance suite on a real cluster (lab box, see TESTENV.md)
 make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (lab box)
-bin/dovetail check-config --config examples/dovetail.yaml
-bin/dovetail admin --config <cfg> bootstrap --username root@example.org --password-stdin
+bin/dovetail check-config -c examples/dovetail.yaml
+bin/dovetail admin -c <cfg> bootstrap --username root@example.org --password-stdin
 ```
 
 Lab: `TESTENV.md` describes the Ceph test cluster and the `dovetail` box (IPv6-only, no

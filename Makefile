@@ -27,7 +27,7 @@ clean:
 
 # Run everything in one process on the volatile in-memory backend.
 run-dev: build
-	bin/dovetail serve --config examples/dev.yaml --seed-account wido@example.org:devpassword
+	bin/dovetail serve -c examples/dev.yaml --seed-account wido@example.org:devpassword
 
 # Integration tests against a real Ceph cluster (see TESTENV.md).
 integration:

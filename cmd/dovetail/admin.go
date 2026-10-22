@@ -20,7 +20,7 @@ import (
 )
 
 func adminUsage() {
-	fmt.Fprintln(os.Stderr, `usage: dovetail admin --config <file> <subcommand> [flags]
+	fmt.Fprintln(os.Stderr, `usage: dovetail admin -c <file> <subcommand> [flags]
 
 subcommands:
   bootstrap   --username root@example.org [--password-stdin] [--token-lifetime 24h] [--comment text]
@@ -43,7 +43,7 @@ system actor; every action is audited in the admin log.`)
 
 func runAdmin(args []string) error {
 	fs := newFlagSet("admin")
-	cfgPath := fs.String("config", "", "path to the YAML config")
+	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

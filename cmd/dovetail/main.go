@@ -57,7 +57,10 @@ commands:
   serve         run the daemon in the modes listed in the config file
   check-config  parse and validate the config file
   admin         administrative operations against RADOS (see: dovetail admin help)
-  version       print the version`)
+  version       print the version (also: -v, --version)
+
+flags (serve, check-config, admin):
+  -c, --config <file>   config file (default $DOVETAIL_CONFIG or /etc/dovetail/dovetail.yaml)`)
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -104,7 +107,7 @@ func seedAccount(a *app.App, spec string) error {
 
 func runCheckConfig(args []string) error {
 	fs := newFlagSet("check-config")
-	cfgPath := fs.String("config", "", "path to the YAML config (default $DOVETAIL_CONFIG or /etc/dovetail/dovetail.yaml)")
+	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -118,7 +121,7 @@ func runCheckConfig(args []string) error {
 
 func runServe(args []string) error {
 	fs := newFlagSet("serve")
-	cfgPath := fs.String("config", "", "path to the YAML config")
+	cfgPath := configFlag(fs)
 	seed := fs.String("seed-account", "", "development only (memory backend): create user@domain:password with a mailbox at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
