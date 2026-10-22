@@ -354,7 +354,7 @@ func (d *DB) scanAccount(ctx context.Context, q querier, row interface{ Scan(...
 			a.TOTP = &t
 		}
 	}
-	rows, err := q.QueryContext(ctx, "SELECT id, hash, kind, comment, expires_at, created FROM account_passwords WHERE account_id = ? ORDER BY position", id)
+	rows, err := q.QueryContext(ctx, "SELECT id, hash, kind, comment, expires_at, created FROM account_passwords WHERE account_id = ? ORDER BY created, id", id)
 	if err != nil {
 		return 0, identity.Account{}, mapErr(err)
 	}
@@ -398,8 +398,8 @@ func (d *DB) writePasswords(ctx context.Context, tx *sql.Tx, accountID int64, pw
 			p.Created = now
 		}
 		pws[i] = p
-		if _, err := tx.ExecContext(ctx, "INSERT INTO account_passwords (id, account_id, position, hash, kind, comment, expires_at, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			p.ID, accountID, i, p.Hash, p.Kind, p.Comment, nullTime(p.ExpiresAt), p.Created.UTC()); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO account_passwords (id, account_id, hash, kind, comment, expires_at, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			p.ID, accountID, p.Hash, p.Kind, p.Comment, nullTime(p.ExpiresAt), p.Created.UTC()); err != nil {
 			return err
 		}
 	}
