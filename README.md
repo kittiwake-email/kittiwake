@@ -569,10 +569,15 @@ a lease row in the database, so exactly one worker schedules and any worker exec
 
 **Queue design:** a `tasks` table in MariaDB; workers claim due tasks with `SELECT ... FOR
 UPDATE SKIP LOCKED`, so multiple workers never take the same task, and hold them under a
-lease that a crashed worker's tasks fall out of. Tasks carry a run-after time; failed tasks
-are retried with backoff and after a configurable number of attempts land in a dead-letter
-state visible in the admin API. The memory backend keeps the same queue as omap entries with
-a RADOS lock.
+two-minute lease that a running task renews every thirty seconds. A worker that crashes
+stops renewing, and another worker takes the task over within one lease; a worker that is
+stopped (restart, deploy) hands its running task back at once, due immediately and without
+counting a failure. Every long task is written to be resumable: a mailbox removal lists what
+is still there on every pass, so the next worker continues where the last one stopped. A
+worker whose lease was taken over stops and leaves the task alone. Tasks carry a run-after
+time; failed tasks are retried with backoff and after a configurable number of attempts land
+in a dead-letter state visible in the admin API. The memory backend keeps the same queue as
+omap entries with a RADOS lock.
 
 ## Legal hold (read-only lockdown)
 

@@ -404,7 +404,7 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
 			break
 		}
 		for i, e := range entries {
-			if err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
+			if _, err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
 				return err
 			}
 			if err := w.idx.DropRetention(ctx, mb, keys[i]); err != nil {
@@ -423,22 +423,25 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
 }
 
 // deleteMessage removes attachment references and the message objects.
-func (w *Worker) deleteMessage(ctx context.Context, mb, msg uuid.UUID) error {
+// It reports whether the message was still there: a resumed task meets
+// index records whose objects an earlier pass already deleted.
+func (w *Worker) deleteMessage(ctx context.Context, mb, msg uuid.UUID) (bool, error) {
 	data, err := w.msgs.GetDoc(ctx, mb, msg)
+	existed := err == nil
 	if err == nil {
 		var doc mail.Document
 		if json.Unmarshal(data, &doc) == nil {
 			for _, h := range mail.AttachmentHashes(&doc) {
 				if err := w.atts.RemoveRef(ctx, h, mb, msg); err != nil {
-					return err
+					return false, err
 				}
 			}
 			w.log.Info("purged message", slog.String("message_id", doc.MessageID), slog.String("mailbox", mb.String()), slog.String("msg", msg.String()))
 		}
 	} else if !errors.Is(err, message.ErrNotFound) {
-		return err
+		return false, err
 	}
-	return w.msgs.Delete(ctx, mb, msg)
+	return existed, w.msgs.Delete(ctx, mb, msg)
 }
 
 // removeMailbox purges every object of a mailbox whose record is gone.
@@ -470,13 +473,16 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 					break
 				}
 				for _, r := range recs {
-					if err := w.deleteMessage(ctx, mb, r.MessageID); err != nil {
+					existed, err := w.deleteMessage(ctx, mb, r.MessageID)
+					if err != nil {
 						return err
 					}
 					if _, err := w.idx.Remove(ctx, mb, f.ID, r.UID, "remove-mailbox", w.Now()); err != nil {
 						return err
 					}
-					n++
+					if existed {
+						n++
+					}
 					if err := step(); err != nil {
 						return err
 					}
@@ -488,13 +494,16 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 			return err
 		}
 		for i, e := range entries {
-			if err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
+			existed, err := w.deleteMessage(ctx, mb, e.MessageID)
+			if err != nil {
 				return err
 			}
 			if err := w.idx.DropRetention(ctx, mb, keys[i]); err != nil {
 				return err
 			}
-			n++
+			if existed {
+				n++
+			}
 			if err := step(); err != nil {
 				return err
 			}
@@ -516,7 +525,7 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 		return err
 	}
 	for _, i := range leftover {
-		if err := w.deleteMessage(storage.WithID(ctx, i.StorageID), mb, i.Message); err != nil {
+		if _, err := w.deleteMessage(storage.WithID(ctx, i.StorageID), mb, i.Message); err != nil {
 			return err
 		}
 		n++
@@ -620,7 +629,7 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		return err
 	}
 	for _, o := range orphans {
-		if err := w.deleteMessage(storage.WithID(ctx, o.StorageID), o.Mailbox, o.Message); err != nil {
+		if _, err := w.deleteMessage(storage.WithID(ctx, o.StorageID), o.Mailbox, o.Message); err != nil {
 			return err
 		}
 	}

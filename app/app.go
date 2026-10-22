@@ -439,8 +439,19 @@ func (a *App) Run(ctx context.Context) error {
 		}, a.Services.Auditor, a.Log)
 		w.Export = a.Services.Export
 		wctx, wcancel := context.WithCancel(ctx)
-		a.addCloser(func(context.Context) error { wcancel(); return nil })
-		start("worker", func() error { return w.Run(wctx) })
+		done := make(chan struct{})
+		// Stop the worker and wait for it: a running task hands itself
+		// back to the queue on the way out, which needs the database the
+		// closers registered earlier are about to close.
+		a.addCloser(func(sctx context.Context) error {
+			wcancel()
+			select {
+			case <-done:
+			case <-sctx.Done():
+			}
+			return nil
+		})
+		start("worker", func() error { defer close(done); return w.Run(wctx) })
 	}
 	for _, m := range a.ExtraModes {
 		if err := m(ctx, a, start); err != nil {
