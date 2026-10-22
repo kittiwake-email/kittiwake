@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,31 +14,24 @@ import (
 	"dovetail/app"
 	"dovetail/service/actor"
 	"dovetail/service/admin"
-	"dovetail/service/export"
-	"dovetail/store/identity"
 )
+
+// The local admin subcommand is deliberately minimal: it only exists to get
+// an admin API token when there is none (first install, lost tokens).
+// Everything else is done through the admin API with dovetail-admin.
 
 func adminUsage() {
 	fmt.Fprintln(os.Stderr, `usage: dovetail admin -c <file> [-o plain|json] <subcommand> [flags]
 
 subcommands:
-  bootstrap   --username root@example.org [--password-stdin] [--token-lifetime 24h] [--comment text]
-              create the first admin account and an API token (prints the token once)
-  export      dump all identity data (domains, mailboxes, accounts, aliases, tokens) as JSON to stdout
-  import      <file.json>  load an identity dump (existing objects are skipped)
-  domain      create <name> | list | enable <name> | disable <name> | delete <name>
-  mailbox     create | list | inspect <uuid> | recalc <uuid> | delete <uuid>
-  account     create --username u@d --mailbox <uuid> [--roles read,write,send] [--password-stdin]
-              | list [--domain example.org] [--prefix x] | get <username|uuid> | delete <uuid>
-  alias       create <address> --to <uuid|address>[,...] | delete <address>
-  token       create --account <uuid> --expires 2027-01-01 --comment text [--roles read]
-  hold        <mailbox-uuid> --reason text [--case ref] [--no-delivery] [--allow-send] [--sealed]
-  release     <mailbox-uuid> [--note text]
-  export-mailbox <mailbox-uuid> --out file.tar[.gz]   Maildir++ archive with manifest and audit log
-  import-mailbox <mailbox-uuid> --dir /path/to/Maildir | --archive file.tar[.gz]
+  bootstrap  --username root@example.org [--password-stdin] [--token-lifetime 24h] [--comment text]
+             create the first admin account (and its domain) and print an API token once
+  token      --account <uuid|username> [--expires YYYY-MM-DD|RFC3339] [--comment text] [--roles r,...]
+             mint an API token for an existing account (recovery when all tokens are lost)
 
-The CLI talks to RADOS directly with the same config file and acts as the
-system actor; every action is audited in the admin log.`)
+The CLI talks to RADOS directly with the daemon's config file and acts as the
+system actor; both actions are audited in the admin log. All other
+administration is done over the admin API: see dovetail-admin.`)
 }
 
 func runAdmin(args []string) error {
@@ -77,53 +69,14 @@ func runAdmin(args []string) error {
 	}
 	defer a.Close()
 	ctx := actor.With(context.Background(), actor.System("cli"))
-	adm := a.Services.Admin
-	sub, subargs := rest[0], rest[1:]
-	switch sub {
+	switch rest[0] {
 	case "bootstrap":
-		return cmdBootstrap(ctx, adm, subargs)
-	case "export":
-		exp, err := adm.ExportIdentity(ctx)
-		if err != nil {
-			return err
-		}
-		enc := json.NewEncoder(os.Stdout) // always JSON: this is the dump format
-		enc.SetIndent("", "  ")
-		return enc.Encode(exp)
-	case "import":
-		if len(subargs) != 1 {
-			return fmt.Errorf("import needs a file")
-		}
-		data, err := os.ReadFile(subargs[0])
-		if err != nil {
-			return err
-		}
-		summary, err := adm.ImportIdentity(ctx, data)
-		if err != nil {
-			return err
-		}
-		return emit(map[string]string{"summary": summary}, func() { fmt.Println(summary) })
-	case "domain":
-		return cmdDomain(ctx, adm, subargs)
-	case "mailbox":
-		return cmdMailbox(ctx, a, subargs)
-	case "account":
-		return cmdAccount(ctx, adm, subargs)
-	case "alias":
-		return cmdAlias(ctx, adm, subargs)
+		return cmdBootstrap(ctx, a.Services.Admin, rest[1:])
 	case "token":
-		return cmdToken(ctx, adm, subargs)
-	case "hold":
-		return cmdHold(ctx, adm, subargs)
-	case "release":
-		return cmdRelease(ctx, adm, subargs)
-	case "export-mailbox":
-		return cmdExportMailbox(ctx, a, subargs)
-	case "import-mailbox":
-		return cmdImportMailbox(ctx, a, subargs)
+		return cmdToken(ctx, a.Services.Admin, rest[1:])
 	}
 	adminUsage()
-	return fmt.Errorf("unknown admin subcommand %q", sub)
+	return fmt.Errorf("unknown admin subcommand %q", rest[0])
 }
 
 func readPasswordStdin() (string, error) {
@@ -134,8 +87,6 @@ func readPasswordStdin() (string, error) {
 	}
 	return strings.TrimRight(line, "\r\n"), nil
 }
-
-func printJSON(v any) error { return emit(v, nil) }
 
 func cmdBootstrap(ctx context.Context, adm *admin.Service, args []string) error {
 	fs := newFlagSet("bootstrap")
@@ -167,312 +118,36 @@ func cmdBootstrap(ctx context.Context, adm *admin.Service, args []string) error 
 		fmt.Printf("admin account: %s (%s)\n", res.Account.Username, res.Account.ID)
 		fmt.Printf("token id:      %s (expires %s)\n", res.Token.ID, res.Token.ExpiresAt.Format(time.RFC3339))
 		fmt.Printf("token secret:  %s\n", res.Secret)
-		fmt.Println("The secret is shown once. Use it as: Authorization: Bearer <secret>")
+		fmt.Println("The secret is shown once. Use it as: dovetail-admin --token <secret> ...")
 	})
 }
 
-func cmdDomain(ctx context.Context, adm *admin.Service, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("domain: create|list|enable|disable|delete")
-	}
-	switch args[0] {
-	case "create":
-		if len(args) != 2 {
-			return fmt.Errorf("domain create <name>")
-		}
-		d, err := adm.CreateDomain(ctx, identity.Domain{Name: args[1], Enabled: true})
-		if err != nil {
-			return err
-		}
-		return printJSON(d)
-	case "list":
-		names, _, err := adm.ListDomains(ctx, "", 0)
-		if err != nil {
-			return err
-		}
-		if names == nil {
-			names = []string{}
-		}
-		return emit(names, func() {
-			for _, n := range names {
-				fmt.Println(n)
-			}
-		})
-	case "enable", "disable":
-		if len(args) != 2 {
-			return fmt.Errorf("domain %s <name>", args[0])
-		}
-		en := args[0] == "enable"
-		d, err := adm.UpdateDomain(ctx, args[1], func(d *identity.Domain) error { d.Enabled = en; return nil })
-		if err != nil {
-			return err
-		}
-		return printJSON(d)
-	case "delete":
-		if len(args) != 2 {
-			return fmt.Errorf("domain delete <name>")
-		}
-		return adm.DeleteDomain(ctx, args[1])
-	}
-	return fmt.Errorf("unknown domain subcommand %q", args[0])
-}
-
-func cmdMailbox(ctx context.Context, a *app.App, args []string) error {
-	adm := a.Services.Admin
-	if len(args) == 0 {
-		return fmt.Errorf("mailbox: create|inspect|recalc|delete")
-	}
-	parse := func() (uuid.UUID, error) {
-		if len(args) != 2 {
-			return uuid.Nil, fmt.Errorf("mailbox %s <uuid>", args[0])
-		}
-		return uuid.Parse(args[1])
-	}
-	switch args[0] {
-	case "create":
-		m, err := adm.CreateMailbox(ctx, identity.Mailbox{Enabled: true})
-		if err != nil {
-			return err
-		}
-		return printJSON(m)
-	case "list":
-		type row struct {
-			ID       uuid.UUID            `json:"id"`
-			Enabled  bool                 `json:"enabled"`
-			OnHold   bool                 `json:"on_hold"`
-			Quota    identity.QuotaLimits `json:"quota"`
-			Accounts []string             `json:"accounts"`
-		}
-		rows := []row{}
-		err := adm.ListMailboxes(ctx, func(id uuid.UUID) error {
-			m, err := adm.GetMailbox(ctx, id)
-			if err != nil {
-				return nil
-			}
-			accts, _, _ := adm.ListMailboxAccounts(ctx, id)
-			if accts == nil {
-				accts = []string{}
-			}
-			rows = append(rows, row{ID: id, Enabled: m.Enabled, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts})
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		return emit(rows, func() {
-			var cells [][]string
-			for _, r := range rows {
-				cells = append(cells, []string{r.ID.String(), fmt.Sprint(r.Enabled), fmt.Sprint(r.OnHold), strings.Join(r.Accounts, ",")})
-			}
-			table([]string{"MAILBOX", "ENABLED", "HOLD", "ACCOUNTS"}, cells)
-		})
-	case "inspect":
-		id, err := parse()
-		if err != nil {
-			return err
-		}
-		info, err := adm.InspectMailbox(ctx, id, a.DefaultQuota())
-		if err != nil {
-			return err
-		}
-		return printJSON(info)
-	case "recalc":
-		id, err := parse()
-		if err != nil {
-			return err
-		}
-		u, err := adm.RecalculateQuota(ctx, id)
-		if err != nil {
-			return err
-		}
-		return printJSON(u)
-	case "delete":
-		id, err := parse()
-		if err != nil {
-			return err
-		}
-		return adm.DeleteMailbox(ctx, id)
-	}
-	return fmt.Errorf("unknown mailbox subcommand %q", args[0])
-}
-
-func cmdAccount(ctx context.Context, adm *admin.Service, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("account: create|list|get|delete")
-	}
-	switch args[0] {
-	case "list":
-		fs := newFlagSet("account list")
-		domain := fs.String("domain", "", "only this domain (default: all domains)")
-		prefix := fs.String("prefix", "", "username prefix")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		domains := []string{*domain}
-		if *domain == "" {
-			var err error
-			if domains, _, err = adm.ListDomains(ctx, "", 0); err != nil {
-				return err
-			}
-		}
-		rows := []map[string]any{}
-		for _, d := range domains {
-			after := ""
-			for {
-				names, more, err := adm.ListAccounts(ctx, d, *prefix, after, 500)
-				if err != nil {
-					return err
-				}
-				for _, n := range names {
-					after = n
-					a, err := adm.GetAccountByUsername(ctx, n)
-					if err != nil {
-						continue
-					}
-					rows = append(rows, redact(a))
-				}
-				if !more {
-					break
-				}
-			}
-		}
-		return emit(rows, func() {
-			var cells [][]string
-			for _, r := range rows {
-				mb := "-"
-				if id, ok := r["mailbox_id"].(uuid.UUID); ok && id != uuid.Nil {
-					mb = id.String()
-				}
-				cells = append(cells, []string{r["username"].(string), mb, fmt.Sprint(r["enabled"]), strings.Join(r["roles"].([]string), ",")})
-			}
-			table([]string{"USERNAME", "MAILBOX", "ENABLED", "ROLES"}, cells)
-		})
-	case "create":
-		fs := newFlagSet("account create")
-		username := fs.String("username", "", "username (e-mail address)")
-		mbs := fs.String("mailbox", "", "mailbox uuid")
-		roles := fs.String("roles", "read,write,send", "comma-separated roles")
-		pwStdin := fs.Bool("password-stdin", false, "read the primary password from stdin")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		req := admin.CreateAccountRequest{Username: *username, Roles: strings.Split(*roles, ",")}
-		if *mbs != "" {
-			id, err := uuid.Parse(*mbs)
-			if err != nil {
-				return err
-			}
-			req.MailboxID = id
-		}
-		if *pwStdin {
-			pw, err := readPasswordStdin()
-			if err != nil {
-				return err
-			}
-			req.Password = pw
-		}
-		acct, err := adm.CreateAccount(ctx, req)
-		if err != nil {
-			return err
-		}
-		return printJSON(redact(acct))
-	case "get":
-		if len(args) != 2 {
-			return fmt.Errorf("account get <username|uuid>")
-		}
-		var acct identity.Account
-		var err error
-		if id, perr := uuid.Parse(args[1]); perr == nil {
-			acct, err = adm.GetAccount(ctx, id)
-		} else {
-			acct, err = adm.GetAccountByUsername(ctx, args[1])
-		}
-		if err != nil {
-			return err
-		}
-		return printJSON(redact(acct))
-	case "delete":
-		if len(args) != 2 {
-			return fmt.Errorf("account delete <uuid>")
-		}
-		id, err := uuid.Parse(args[1])
-		if err != nil {
-			return err
-		}
-		return adm.DeleteAccount(ctx, id)
-	}
-	return fmt.Errorf("unknown account subcommand %q", args[0])
-}
-
-// redact strips secrets from an account for display.
-func redact(a identity.Account) map[string]any {
-	pws := make([]map[string]any, 0, len(a.Passwords))
-	for _, p := range a.Passwords {
-		pws = append(pws, map[string]any{"id": p.ID, "kind": p.Kind, "comment": p.Comment, "created": p.Created})
-	}
-	return map[string]any{
-		"id": a.ID, "username": a.Username, "domain": a.Domain, "mailbox_id": a.MailboxID, "roles": a.Roles,
-		"enabled": a.Enabled, "passwords": pws, "totp_enabled": a.TOTP != nil && a.TOTP.Confirmed, "created": a.Created, "updated": a.Updated,
-	}
-}
-
-func cmdAlias(ctx context.Context, adm *admin.Service, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("alias: create|delete")
-	}
-	switch args[0] {
-	case "create":
-		fs := newFlagSet("alias create")
-		to := fs.String("to", "", "comma-separated destinations: mailbox uuids or addresses")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if fs.NArg() != 1 || *to == "" {
-			return fmt.Errorf("alias create <address> --to <uuid|address>[,...]")
-		}
-		al := identity.Alias{Address: fs.Arg(0), Enabled: true}
-		for _, d := range strings.Split(*to, ",") {
-			d = strings.TrimSpace(d)
-			if id, err := uuid.Parse(d); err == nil {
-				al.Destinations = append(al.Destinations, identity.Destination{MailboxID: id})
-			} else {
-				al.Destinations = append(al.Destinations, identity.Destination{Address: d})
-			}
-		}
-		out, err := adm.CreateAlias(ctx, al)
-		if err != nil {
-			return err
-		}
-		return printJSON(out)
-	case "delete":
-		if len(args) != 2 {
-			return fmt.Errorf("alias delete <address>")
-		}
-		return adm.DeleteAlias(ctx, args[1])
-	}
-	return fmt.Errorf("unknown alias subcommand %q", args[0])
-}
-
 func cmdToken(ctx context.Context, adm *admin.Service, args []string) error {
-	if len(args) == 0 || args[0] != "create" {
-		return fmt.Errorf("token: create --account <uuid> --expires YYYY-MM-DD --comment text [--roles r1,r2]")
-	}
-	fs := newFlagSet("token create")
-	acct := fs.String("account", "", "account uuid")
-	expires := fs.String("expires", "", "expiry date (YYYY-MM-DD) or RFC3339")
-	comment := fs.String("comment", "", "purpose of the token (required)")
+	fs := newFlagSet("token")
+	acct := fs.String("account", "", "account uuid or username")
+	expires := fs.String("expires", "", "expiry date (YYYY-MM-DD) or RFC3339; default 24h from now")
+	comment := fs.String("comment", "cli-token", "purpose of the token")
 	roles := fs.String("roles", "", "comma-separated roles (default: the account's)")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *acct == "" {
+		return fmt.Errorf("--account is required")
 	}
 	id, err := uuid.Parse(*acct)
 	if err != nil {
-		return fmt.Errorf("--account: %w", err)
+		a, err := adm.GetAccountByUsername(ctx, *acct)
+		if err != nil {
+			return err
+		}
+		id = a.ID
 	}
-	exp, err := time.Parse("2006-01-02", *expires)
-	if err != nil {
-		if exp, err = time.Parse(time.RFC3339, *expires); err != nil {
-			return fmt.Errorf("--expires: %w", err)
+	exp := time.Now().Add(24 * time.Hour)
+	if *expires != "" {
+		if exp, err = time.Parse("2006-01-02", *expires); err != nil {
+			if exp, err = time.Parse(time.RFC3339, *expires); err != nil {
+				return fmt.Errorf("--expires: %w", err)
+			}
 		}
 	}
 	var rs []string
@@ -486,124 +161,5 @@ func cmdToken(ctx context.Context, adm *admin.Service, args []string) error {
 	return emit(map[string]any{"token_id": t.ID, "expires_at": t.ExpiresAt, "roles": t.Roles, "token_secret": secret}, func() {
 		fmt.Printf("token id:     %s (expires %s)\n", t.ID, t.ExpiresAt.Format(time.RFC3339))
 		fmt.Printf("token secret: %s\n", secret)
-	})
-}
-
-func cmdHold(ctx context.Context, adm *admin.Service, args []string) error {
-	fs := newFlagSet("hold")
-	reason := fs.String("reason", "", "reason for the hold (required)")
-	caseRef := fs.String("case", "", "case reference")
-	noDelivery := fs.Bool("no-delivery", false, "refuse new deliveries while on hold")
-	allowSend := fs.Bool("allow-send", false, "allow sending while on hold")
-	sealed := fs.Bool("sealed", false, "deny all user access")
-	if len(args) < 1 {
-		return fmt.Errorf("hold <mailbox-uuid> --reason text")
-	}
-	id, err := uuid.Parse(args[0])
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	accept := !*noDelivery
-	m, err := adm.Hold(ctx, id, admin.HoldRequest{Reason: *reason, CaseRef: *caseRef, AcceptDelivery: &accept, AllowSend: *allowSend, Sealed: *sealed})
-	if err != nil {
-		return err
-	}
-	return printJSON(m)
-}
-
-func cmdRelease(ctx context.Context, adm *admin.Service, args []string) error {
-	fs := newFlagSet("release")
-	note := fs.String("note", "", "note for the audit log")
-	if len(args) < 1 {
-		return fmt.Errorf("release <mailbox-uuid>")
-	}
-	id, err := uuid.Parse(args[0])
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	m, err := adm.Release(ctx, id, *note)
-	if err != nil {
-		return err
-	}
-	return printJSON(m)
-}
-
-func cmdExportMailbox(ctx context.Context, a *app.App, args []string) error {
-	fs := newFlagSet("export-mailbox")
-	out := fs.String("out", "", "output file (.tar or .tar.gz; gzip when the name ends in .gz)")
-	if len(args) < 1 {
-		return fmt.Errorf("export-mailbox <mailbox-uuid> --out file.tar.gz")
-	}
-	id, err := uuid.Parse(args[0])
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if *out == "" {
-		return fmt.Errorf("--out is required")
-	}
-	f, err := os.OpenFile(*out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	sum, err := a.Services.Export.ExportMailbox(ctx, id, f, export.Options{Gzip: strings.HasSuffix(*out, ".gz")})
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return emit(map[string]any{"file": *out, "messages": sum.Messages, "bytes": sum.Bytes, "folders": sum.Folders, "audit": sum.Audit, "errors": sum.Errors}, func() {
-		fmt.Printf("exported %d messages (%d bytes) in %d folders, %d audit records, %d errors -> %s\n", sum.Messages, sum.Bytes, sum.Folders, sum.Audit, len(sum.Errors), *out)
-		for _, e := range sum.Errors {
-			fmt.Println("  error:", e)
-		}
-	})
-}
-
-func cmdImportMailbox(ctx context.Context, a *app.App, args []string) error {
-	fs := newFlagSet("import-mailbox")
-	dir := fs.String("dir", "", "Maildir directory (Dovecot layout) to import")
-	archive := fs.String("archive", "", "tar or tar.gz archive to import")
-	if len(args) < 1 {
-		return fmt.Errorf("import-mailbox <mailbox-uuid> --dir path | --archive file")
-	}
-	id, err := uuid.Parse(args[0])
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	var sum export.Summary
-	switch {
-	case *dir != "":
-		sum, err = a.Services.Export.ImportMaildir(ctx, id, *dir)
-	case *archive != "":
-		f, ferr := os.Open(*archive)
-		if ferr != nil {
-			return ferr
-		}
-		defer f.Close()
-		sum, err = a.Services.Export.ImportArchive(ctx, id, f)
-	default:
-		return fmt.Errorf("one of --dir or --archive is required")
-	}
-	if err != nil {
-		return err
-	}
-	return emit(map[string]any{"messages": sum.Messages, "bytes": sum.Bytes, "folders": sum.Folders, "errors": sum.Errors}, func() {
-		fmt.Printf("imported %d messages (%d bytes) into %d folders, %d errors\n", sum.Messages, sum.Bytes, sum.Folders, len(sum.Errors))
-		for _, e := range sum.Errors {
-			fmt.Println("  error:", e)
-		}
 	})
 }

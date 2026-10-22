@@ -45,14 +45,5 @@ func buildJMAP(a *app.App) http.Handler {
 // buildAdmin assembles the operator-facing listener: the admin REST API only.
 func buildAdmin(a *app.App) http.Handler {
 	srv, _ := restServer(a)
-	mux := http.NewServeMux()
-	mux.Handle("/v1/admin/", srv.AdminHandler())
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			_, _ = w.Write([]byte("dovetail " + app.Version + " (admin)\n"))
-			return
-		}
-		http.NotFound(w, r)
-	})
-	return mux
+	return srv.AdminHandler() // /v1/admin/*, plus /openapi.yaml and / at the root
 }

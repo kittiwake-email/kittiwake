@@ -25,8 +25,9 @@ make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (l
 make deploy           # build here, push binary to the lab box, restart its systemd instances
                       # (dovetail@<mode>, one process per mode; see contrib/systemd, TESTENV.md)
 bin/dovetail check-config -c examples/dovetail.yaml
-bin/dovetail admin -c <cfg> bootstrap --username root@example.org --password-stdin
-bin/dovetail admin -c <cfg> -o json mailbox list     # -o plain|json on admin, check-config, version
+bin/dovetail admin -c <cfg> bootstrap --username root@example.org   # only bootstrap + token live here
+bin/dovetail-admin -u http://[::1]:8081 -t dvt_... mailbox list       # everything else: the API client
+bin/dovetail-admin ... -o json ...                                   # -o plain|json everywhere
 ```
 
 Lab: `TESTENV.md` describes the Ceph test cluster and the `dovetail` box (IPv6-only, no
@@ -51,10 +52,13 @@ service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, a
               (business logic + authorisation + audit; protocol adapters call ONLY these)
 proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3
 app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
-cmd/dovetail  serve | check-config | admin ... | version
+cmd/dovetail  serve | check-config | admin (bootstrap, token only) | version
+cmd/dovetail-admin  operator CLI over client/admin (typed Go client for the admin API)
+client/admin  pure HTTP client for the admin API; importable by third parties
 examples/     dovetail.yaml (full, documented), dev.yaml (memory backend)
 contrib/postfix  main.cf snippet
-api/openapi.yaml REST spec (route↔spec consistency is tested)
+api/openapi.yaml REST spec, embedded (api.OpenAPI) and served at /openapi.yaml on the admin
+              listener; route↔spec consistency is tested — add new routes to both
 ```
 
 Conventions: every store/service test builds a fixture on `rados.NewMemoryClient()`; services
@@ -97,7 +101,9 @@ These are settled. Do not design around them.
   `@<domain>`), `tokens/<sha256>`. Parent objects' omap hold listings. Multi-object writes are
   primary-first and idempotent; updates are conditional on a version xattr. Behind a Go
   interface; RADOS is the only implementation.
-- **Admin API is the only way identity data is created/changed** (plus the `admin` CLI).
+- **Admin API is the only way identity data is created/changed.** `dovetail admin` does only
+  bootstrap/token; operators use `dovetail-admin` (client/admin). Do not add admin features
+  to cmd/dovetail; add them to the API + spec + client.
   Self-service endpoints let accounts manage their own passwords, app passwords, TOTP,
   tokens and sessions. All of it audited.
 - **Postfix integration:** `postfix` mode serves a Sendmail-style socketmap (`domains`,

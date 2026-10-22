@@ -19,6 +19,35 @@ tags:
   - name: self
   - name: admin
 paths:
+  /openapi.yaml:
+    get:
+      tags: [meta]
+      summary: This specification (unauthenticated, admin listener root)
+      security: []
+      responses:
+        "200":
+          description: OpenAPI document
+          content:
+            application/yaml: { schema: { type: string } }
+  /:
+    get:
+      tags: [meta]
+      summary: Identify the admin listener (version, spec location)
+      security: []
+      responses:
+        "200":
+          description: Plain text banner
+          content:
+            text/plain: { schema: { type: string } }
+  /v1/admin/openapi.yaml:
+    get:
+      tags: [admin]
+      summary: This specification (authenticated)
+      responses:
+        "200":
+          description: OpenAPI document
+          content:
+            application/yaml: { schema: { type: string } }
   /v1/oauth/token:
     post:
       tags: [oauth]

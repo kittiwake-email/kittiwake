@@ -20,3 +20,6 @@ systemctl enable --now dovetail.target
 `make deploy` builds the binary locally and copies it to `/usr/local/bin/dovetail` on the
 host `DEPLOY_ADDR` (default: the lab box), then restarts `dovetail.target`. `make deploy-units` installs the
 units, env files and (only if absent) the lab config.
+
+Day-to-day administration goes over the admin listener (`[::1]:8081` in the lab) with
+`dovetail-admin`; `dovetail admin bootstrap` is only for the first token.

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"dovetail/api"
 	"dovetail/proto/httpx"
 	"dovetail/service/actor"
 	"dovetail/service/admin"
@@ -142,7 +144,12 @@ func (s *Server) AdminHandler() http.Handler {
 	adminAuth := httpx.Auth(s.auth, audit.ProtoAdmin, s.cfg.TrustedProxies, s.cfg.Realm)
 	adminRole := httpx.RequireRole(identity.RoleAdmin)
 	adm := func(h http.Handler) http.Handler { return adminAuth(adminRole(h)) }
+	public := func(h http.Handler) http.Handler { return h }
 	reg := func(wrap func(http.Handler) http.Handler, rs ...route) { s.register(mux, wrap, rs...) }
+	// The contract itself, unauthenticated at the root of the admin listener
+	// and authenticated under the API prefix.
+	reg(public, route{"GET /openapi.yaml", s.openAPI}, route{"GET /{$}", s.root})
+	reg(adm, route{"GET /v1/admin/openapi.yaml", s.openAPI})
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
 		route{"POST /v1/admin/domains", s.domainCreate},
@@ -189,6 +196,19 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"POST /v1/admin/import", s.importIdentity},
 	)
 	return mux
+}
+
+// openAPI serves the embedded specification.
+func (s *Server) openAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(api.OpenAPI)
+}
+
+// root identifies the listener.
+func (s *Server) root(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "dovetail %s admin API\nspec: /openapi.yaml\n", Version)
 }
 
 // Handler combines both handlers on one mux (tests and single-listener

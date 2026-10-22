@@ -578,6 +578,10 @@ func TestSpecMatchesRoutes(t *testing.T) {
 	}
 	sort.Strings(specRoutes)
 	routes := f.srv.Routes()
+	for i, r := range routes {
+		routes[i] = strings.Replace(r, " /{$}", " /", 1) // ServeMux exact-root spelling
+	}
+	sort.Strings(routes)
 	if strings.Join(routes, "\n") != strings.Join(specRoutes, "\n") {
 		t.Fatalf("routes and spec differ:\nmux:\n%s\nspec:\n%s", strings.Join(routes, "\n"), strings.Join(specRoutes, "\n"))
 	}

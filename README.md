@@ -802,13 +802,22 @@ user@example.org:password` creates a domain, mailbox, account and an admin on th
 startup, so a developer can speak LMTP, JMAP and the admin API to a fresh process immediately
 (`make run-dev`).
 
-## `dovetail admin` CLI
+## `dovetail admin` and `dovetail-admin`
 
-Talks to RADOS directly with the same config file, for operations that must work without a
-running API: `bootstrap` (first admin account and token), `export` / `import` of identity
-data, `export-mailbox` / `import-mailbox` (Maildir), `hold` / `release`, `reconcile`, and the
-same mailbox maintenance actions as the admin API. It is built on the same service interfaces
-as the API.
+`dovetail admin` talks to RADOS directly with the daemon's config file and does only what
+cannot be done through the API because no token exists yet: `bootstrap` (first admin account
+and token) and `token` (mint a token for an existing account). Everything else is done over
+the admin API so the daemon's code base stays small.
+
+`dovetail-admin` is the operator's tool: a Go client for the admin API (also importable as the
+package `client/admin`) that covers every endpoint: domains, mailboxes, accounts, aliases,
+tokens, sessions, legal hold, audit queries, queues, key rotation, identity export/import and
+Maildir export/import (it packs a local Maildir directory and uploads it). It takes the admin
+URL and token from flags, environment (`DOVETAIL_ADMIN_URL`, `DOVETAIL_ADMIN_TOKEN`) or
+`~/.config/dovetail/admin.yaml`, and prints tables or JSON (`-o json`).
+
+The admin listener serves its own OpenAPI document at `/openapi.yaml` (unauthenticated) so
+other clients can be generated from the exact contract the running version implements.
 
 ## Key dependencies
 
