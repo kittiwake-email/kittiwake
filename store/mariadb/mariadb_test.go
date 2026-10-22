@@ -40,7 +40,7 @@ func open(t *testing.T) *mariadb.DB {
 		"SET FOREIGN_KEY_CHECKS = 0",
 		"TRUNCATE alias_destinations", "TRUNCATE aliases", "TRUNCATE account_passwords", "TRUNCATE tokens", "TRUNCATE accounts",
 		"TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE clusters", "TRUNCATE signing_keys", "TRUNCATE sessions",
-		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin",
+		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin", "TRUNCATE nodes",
 		"SET FOREIGN_KEY_CHECKS = 1",
 	} {
 		if _, err := db.SQL().ExecContext(ctx, stmt); err != nil {

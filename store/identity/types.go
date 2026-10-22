@@ -261,6 +261,25 @@ type Pools struct {
 	Index       string `json:"index"`
 }
 
+// Node is one running daemon mode, as registered by the process itself:
+// every process registers each mode it runs at start and refreshes
+// LastSeen every heartbeat, so other daemons (and operators) can find it.
+// Address is where the mode is reached: the advertised host joined with
+// the mode's listener port. A node whose Expires has passed is gone.
+type Node struct {
+	ID       int64     `json:"id"`
+	Mode     string    `json:"mode"`
+	Address  string    `json:"address"`
+	Host     string    `json:"host"` // the machine's hostname
+	Version  string    `json:"version"`
+	Started  time.Time `json:"started"`
+	LastSeen time.Time `json:"last_seen"`
+	Expires  time.Time `json:"expires"` // LastSeen + 3 heartbeats
+}
+
+// Alive reports whether the node's heartbeat is current at t.
+func (n *Node) Alive(t time.Time) bool { return t.Before(n.Expires) }
+
 // Versioned pairs an object with the version it was read at (RADOS object
 // version; 0 on backends without one).
 type Versioned[T any] struct {

@@ -25,6 +25,7 @@ type Config struct {
 	Mail     Mail     `yaml:"mail"`
 	Quota    Quota    `yaml:"quota"`
 	Database Database `yaml:"database"`
+	Node     Node     `yaml:"node"`
 	Session  Session  `yaml:"session"`
 	Cache    Cache    `yaml:"cache"`
 	Audit    Audit    `yaml:"audit"`
@@ -164,6 +165,19 @@ type Database struct {
 	ReadStickiness time.Duration `yaml:"read_stickiness"`
 }
 
+// Node configures how this process registers itself in the node registry
+// (every mode it runs, with the address others reach it on).
+type Node struct {
+	// Advertise is the host part of the registered addresses: an IPv6 or
+	// IPv4 address or a hostname other nodes can reach. Empty = the first
+	// global unicast address of this machine (IPv6 preferred), else the
+	// hostname. Ports come from the listeners.
+	Advertise string `yaml:"advertise"`
+	// Heartbeat: how often the registration is refreshed; a node is dead
+	// after three missed heartbeats.
+	Heartbeat time.Duration `yaml:"heartbeat"`
+}
+
 // Audit configures audit retention and detail.
 type Audit struct {
 	Retention time.Duration `yaml:"retention"`
@@ -243,6 +257,7 @@ func Default() Config {
 		},
 		Cache:    Cache{Credentials: 5 * time.Second, Identity: 5 * time.Second, Root: 5 * time.Second},
 		Database: Database{ReadStickiness: 2 * time.Second},
+		Node:     Node{Heartbeat: 10 * time.Second},
 		Audit:    Audit{Retention: 365 * 24 * time.Hour},
 		Log:      Log{Level: "info", Format: "json"},
 	}
@@ -305,6 +320,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Database.ReadDSN != "" && c.Database.DSN == "" {
 		return errors.New("config: database.read_dsn needs database.dsn")
+	}
+	if c.Node.Heartbeat <= 0 {
+		return errors.New("config: node.heartbeat must be positive")
 	}
 	if c.Database.ReadStickiness < 0 {
 		return errors.New("config: database.read_stickiness must not be negative")

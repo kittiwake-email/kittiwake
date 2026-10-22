@@ -32,6 +32,7 @@ func Run(t *testing.T, f Factory) {
 		{"ConcurrentUpdates", testConcurrentUpdates},
 		{"Services", testServices},
 		{"Clusters", testClusters},
+		{"Nodes", testNodes},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.fn(t, f) })
 	}
@@ -495,6 +496,56 @@ func testClusters(t *testing.T, f Factory) {
 		t.Fatalf("double delete: %v", err)
 	}
 	if list, _ := s.ListClusters(ctx); len(list) != 1 {
+		t.Fatalf("after delete: %+v", list)
+	}
+}
+
+func testNodes(t *testing.T, f Factory) {
+	s := f(t)
+	ctx := context.Background()
+	now := s.Now()
+	if _, err := s.RegisterNode(ctx, identity.Node{Mode: "search"}); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("address required: %v", err)
+	}
+	a, err := s.RegisterNode(ctx, identity.Node{Mode: "search", Address: "[2001:db8::10]:9100", Host: "node1", Version: "v1", Expires: now.Add(30 * time.Second)})
+	if err != nil || a.ID == 0 || a.LastSeen.IsZero() || a.Started.IsZero() {
+		t.Fatalf("register: %+v %v", a, err)
+	}
+	b, _ := s.RegisterNode(ctx, identity.Node{Mode: "search", Address: "[2001:db8::11]:9100", Host: "node2", Expires: now.Add(30 * time.Second)})
+	_, _ = s.RegisterNode(ctx, identity.Node{Mode: "jmap", Address: "[2001:db8::10]:8080", Host: "node1", Expires: now.Add(30 * time.Second)})
+	if b.ID == a.ID {
+		t.Fatal("ids must differ")
+	}
+	// Heartbeat: same row, refreshed.
+	a2, err := s.RegisterNode(ctx, identity.Node{Mode: "search", Address: "[2001:db8::10]:9100", Host: "node1", Version: "v2", Started: a.Started, Expires: now.Add(60 * time.Second)})
+	if err != nil || a2.ID != a.ID || a2.Version != "v2" || !a2.Expires.After(a.Expires) {
+		t.Fatalf("heartbeat: %+v %v", a2, err)
+	}
+	list, err := s.ListNodes(ctx, "search")
+	if err != nil || len(list) != 2 || list[0].Address != "[2001:db8::10]:9100" {
+		t.Fatalf("list search: %+v %v", list, err)
+	}
+	if all, _ := s.ListNodes(ctx, ""); len(all) != 3 || all[0].Mode != "jmap" {
+		t.Fatalf("list all: %+v", all)
+	}
+	if !list[0].Alive(now.Add(59*time.Second)) || list[0].Alive(now.Add(61*time.Second)) {
+		t.Fatal("alive window")
+	}
+	// Purge removes only expired rows; delete is idempotent.
+	n, err := s.PurgeNodes(ctx, now.Add(45*time.Second))
+	if err != nil || n != 2 {
+		t.Fatalf("purge: %d %v", n, err)
+	}
+	if list, _ := s.ListNodes(ctx, ""); len(list) != 1 || list[0].Mode != "search" {
+		t.Fatalf("after purge: %+v", list)
+	}
+	if err := s.DeleteNode(ctx, "search", "[2001:db8::10]:9100"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteNode(ctx, "search", "[2001:db8::10]:9100"); err != nil {
+		t.Fatalf("double delete: %v", err)
+	}
+	if list, _ := s.ListNodes(ctx, ""); len(list) != 0 {
 		t.Fatalf("after delete: %+v", list)
 	}
 }

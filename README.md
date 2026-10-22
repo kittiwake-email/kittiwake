@@ -76,6 +76,21 @@ The RADOS backend (the RGW-style design: one object per record, exclusive create
 uniqueness, omap for listings) remains for development and tests on the memory backend, and
 both run the same conformance suites. Nothing else is stateful: no Redis, no memcached.
 
+## Node registry
+
+Every process registers each mode it runs in a `nodes` table in the database: mode, the
+address it is reached on (the `node.advertise` host, by default the machine's first global
+address with IPv6 preferred, joined with the mode's listener port), hostname, version, start
+time; it refreshes the row every `node.heartbeat` (10 s) and removes it on orderly shutdown.
+A node whose heartbeat is three intervals old counts as dead and is purged after a day.
+This is the service discovery of the platform: daemons that need another internal service
+(JMAP, IMAP and MCP looking for `search` nodes) read the live list from the database, cache
+it, and pick a node by consistent hashing of the mailbox id so a mailbox keeps hitting the
+node that holds its hot index. For operators, `kittiwake-admin node list` and
+`GET /v1/admin/nodes` show what runs where in which version. Override `node.advertise` when
+the detected address is not the one other nodes can reach (dual-stack hosts, NAT, a name
+that resolves differently per site).
+
 ## Multiple Ceph clusters
 
 One Ceph cluster is a bottleneck long before a million mailboxes: the object count and the

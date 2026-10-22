@@ -258,6 +258,9 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 	case TaskPurgeAudit:
 		return w.purgeAudit(ctx)
 	case TaskOrphanSweep:
+		if n, err := w.ids.PurgeNodes(ctx, w.Now().Add(-24*time.Hour)); err == nil && n > 0 {
+			w.log.Info("purged dead node registrations", slog.Int("rows", n))
+		}
 		return w.orphanSweep(ctx)
 	case TaskExportMailbox:
 		var et ExportTask

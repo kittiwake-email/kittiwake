@@ -174,6 +174,7 @@ func (s *Server) AdminHandler() http.Handler {
 	)
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
+		route{"GET /v1/admin/nodes", s.nodeList},
 		route{"POST /v1/admin/clusters", s.clusterAdd},
 		route{"GET /v1/admin/clusters", s.clusterList},
 		route{"GET /v1/admin/clusters/{cid}", s.clusterGet},
@@ -1624,4 +1625,31 @@ func (s *Server) clusterDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: nodes ----
+
+type nodeView struct {
+	ID       int64     `json:"id"`
+	Mode     string    `json:"mode"`
+	Address  string    `json:"address"`
+	Host     string    `json:"host"`
+	Version  string    `json:"version"`
+	Started  time.Time `json:"started"`
+	LastSeen time.Time `json:"last_seen"`
+	Alive    bool      `json:"alive"`
+}
+
+func (s *Server) nodeList(w http.ResponseWriter, r *http.Request) {
+	list, err := s.admin.ListNodes(r.Context(), r.URL.Query().Get("mode"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	now := time.Now()
+	out := make([]nodeView, 0, len(list))
+	for _, n := range list {
+		out = append(out, nodeView{ID: n.ID, Mode: n.Mode, Address: n.Address, Host: n.Host, Version: n.Version, Started: n.Started, LastSeen: n.LastSeen, Alive: n.Alive(now)})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }

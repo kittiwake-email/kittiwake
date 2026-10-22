@@ -946,3 +946,11 @@ func (s *Service) DeleteCluster(ctx context.Context, id int64) error {
 	s.ok(ctx, uuid.Nil, "cluster-delete", target, "")
 	return nil
 }
+
+// ListNodes lists registered daemon nodes (every mode, alive or recently dead).
+func (s *Service) ListNodes(ctx context.Context, mode string) ([]identity.Node, error) {
+	if err := s.authorizeRead(ctx, "node-list", mode); err != nil {
+		return nil, err
+	}
+	return s.ids.ListNodes(ctx, mode)
+}

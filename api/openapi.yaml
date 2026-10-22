@@ -253,6 +253,33 @@ paths:
                   token: { $ref: "#/components/schemas/Token" }
                   secret: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/admin/nodes:
+    get:
+      tags: [admin]
+      summary: Running daemon nodes (every process registers each mode it runs and heartbeats it)
+      parameters:
+        - { name: mode, in: query, schema: { type: string }, description: Only this mode }
+      responses:
+        "200":
+          description: Nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, format: int64 }
+                        mode: { type: string }
+                        address: { type: string, description: Advertised host joined with the mode's listener port }
+                        host: { type: string }
+                        version: { type: string }
+                        started: { type: string, format: date-time }
+                        last_seen: { type: string, format: date-time }
+                        alive: { type: boolean, description: Heartbeat within three intervals }
   /v1/admin/clusters:
     get:
       tags: [admin]

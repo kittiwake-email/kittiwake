@@ -1152,3 +1152,37 @@ func (a *cli) openapi(args []string) error {
 	}
 	return ok("wrote " + *out)
 }
+
+func (a *cli) node(args []string) error {
+	const u = `node list [--mode lmtp|imap|pop3|jmap|admin|postfix|worker|search]`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("usage: kittiwake-admin " + u)
+		return nil
+	}
+	if args[0] != "list" {
+		return fmt.Errorf("unknown node subcommand %q\nusage: kittiwake-admin %s", args[0], u)
+	}
+	fs := newFlagSet("node list")
+	mode := fs.String("mode", "", "only this mode")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	list, err := a.c.ListNodes(a.ctx, *mode)
+	if err != nil {
+		return err
+	}
+	if list == nil {
+		list = []admin.Node{}
+	}
+	return emit(list, func() {
+		var rows [][]string
+		for _, n := range list {
+			state := "alive"
+			if !n.Alive {
+				state = "dead"
+			}
+			rows = append(rows, []string{n.Mode, n.Address, n.Host, n.Version, state, fmtTime(n.Started), fmtTime(n.LastSeen)})
+		}
+		table([]string{"MODE", "ADDRESS", "HOST", "VERSION", "STATE", "STARTED", "LAST SEEN"}, rows)
+	})
+}

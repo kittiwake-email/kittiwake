@@ -29,6 +29,7 @@ const (
 	nsAliases   = "aliases"
 	nsTokens    = "tokens"
 	nsClusters  = "clusters"
+	nsNodes     = "nodes"
 
 	allDomainsObject = "_all"
 	schemaVersion    = "1"
@@ -46,6 +47,7 @@ type Rados struct {
 	aliases   rados.IOContext
 	tokens    rados.IOContext
 	clusters  rados.IOContext
+	nodes     rados.IOContext
 	Now       func() time.Time
 }
 
@@ -62,6 +64,7 @@ func NewRados(meta rados.IOContext) *Rados {
 		aliases:   meta.Namespace(nsAliases),
 		tokens:    meta.Namespace(nsTokens),
 		clusters:  meta.Namespace(nsClusters),
+		nodes:     meta.Namespace(nsNodes),
 		Now:       time.Now,
 	}
 }
@@ -1157,3 +1160,93 @@ func ValidateServices(services []string) error { return validateServices(service
 
 // ValidateCluster checks and trims a cluster record.
 func ValidateCluster(c *Cluster) error { return validateCluster(c) }
+
+// ---- node registry (one object per mode/address, listing via List) ----
+
+func nodeOID(mode, address string) string { return mode + "/" + address }
+
+func validateNode(n *Node) error {
+	n.Mode, n.Address, n.Host = strings.TrimSpace(n.Mode), strings.TrimSpace(n.Address), strings.TrimSpace(n.Host)
+	if n.Mode == "" || n.Address == "" {
+		return fmt.Errorf("%w: node needs mode and address", ErrInvalid)
+	}
+	return nil
+}
+
+func (s *Rados) RegisterNode(ctx context.Context, n Node) (Node, error) {
+	if err := validateNode(&n); err != nil {
+		return Node{}, err
+	}
+	now := s.Now().UTC()
+	n.LastSeen = now
+	if n.Started.IsZero() {
+		n.Started = now
+	}
+	if cur, err := getJSON[Node](ctx, s.nodes, nodeOID(n.Mode, n.Address)); err == nil {
+		n.ID = cur.Value.ID
+		if cur.Value.Started.Before(n.Started) && !cur.Value.Started.IsZero() && n.Started.Sub(cur.Value.Started) < time.Second {
+			n.Started = cur.Value.Started
+		}
+	} else {
+		id, err := s.nextClusterID(ctx) // shared sequence; ids only need to be unique
+		if err != nil {
+			return Node{}, err
+		}
+		n.ID = id
+	}
+	b, _ := json.Marshal(&n)
+	if _, err := s.nodes.Write(ctx, nodeOID(n.Mode, n.Address), rados.NewWriteTx().WriteFull(b)); err != nil {
+		return Node{}, mapErr(err)
+	}
+	return n, nil
+}
+
+func (s *Rados) ListNodes(ctx context.Context, mode string) ([]Node, error) {
+	var out []Node
+	err := s.nodes.List(ctx, func(oid string) error {
+		if mode != "" && !strings.HasPrefix(oid, mode+"/") {
+			return nil
+		}
+		v, err := getJSON[Node](ctx, s.nodes, oid)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		out = append(out, v.Value)
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Mode != out[j].Mode {
+			return out[i].Mode < out[j].Mode
+		}
+		return out[i].Address < out[j].Address
+	})
+	return out, err
+}
+
+func (s *Rados) DeleteNode(ctx context.Context, mode, address string) error {
+	err := s.nodes.Delete(ctx, nodeOID(mode, address))
+	if errors.Is(err, rados.ErrNotFound) {
+		return nil
+	}
+	return mapErr(err)
+}
+
+func (s *Rados) PurgeNodes(ctx context.Context, cutoff time.Time) (int, error) {
+	all, err := s.ListNodes(ctx, "")
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, x := range all {
+		if x.Expires.Before(cutoff) {
+			if err := s.DeleteNode(ctx, x.Mode, x.Address); err != nil {
+				return n, err
+			}
+			n++
+		}
+	}
+	return n, nil
+}

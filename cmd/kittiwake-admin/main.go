@@ -65,6 +65,7 @@ commands:
   queue     stats|dead|retry
   token     create|list|delete     admin tokens (full or --read-only)
   cluster   add|list|get|set|enable|disable|remove   Ceph cluster registry (placement of new mailboxes)
+  node      list [--mode m]       running daemon nodes (registered with heartbeats)
   keys      rotate
   identity  export|import
   openapi   fetch the OpenAPI spec
@@ -137,6 +138,8 @@ func run(args []string) error {
 		return app.token(sub)
 	case "cluster":
 		return app.cluster(sub)
+	case "node":
+		return app.node(sub)
 	case "keys":
 		return app.keys(sub)
 	case "identity":

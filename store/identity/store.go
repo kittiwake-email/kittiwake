@@ -58,6 +58,16 @@ type Backend interface {
 	ListClusters(ctx context.Context) ([]Cluster, error)
 	UpdateCluster(ctx context.Context, id int64, fn func(*Cluster) error) (Cluster, error)
 	DeleteCluster(ctx context.Context, id int64) error
+
+	// RegisterNode inserts or refreshes the (mode, address) row.
+	RegisterNode(ctx context.Context, n Node) (Node, error)
+	// ListNodes lists nodes of one mode ("" = all), alive or not; callers
+	// filter with Alive.
+	ListNodes(ctx context.Context, mode string) ([]Node, error)
+	// DeleteNode removes the (mode, address) row (orderly shutdown).
+	DeleteNode(ctx context.Context, mode, address string) error
+	// PurgeNodes removes rows that expired before cutoff; returns the count.
+	PurgeNodes(ctx context.Context, cutoff time.Time) (int, error)
 }
 
 // Store is the identity store the services use.
@@ -256,3 +266,18 @@ func (s *Store) UpdateCluster(ctx context.Context, id int64, fn func(*Cluster) e
 	return s.b.UpdateCluster(ctx, id, fn)
 }
 func (s *Store) DeleteCluster(ctx context.Context, id int64) error { return s.b.DeleteCluster(ctx, id) }
+
+// ---- node registry ----
+
+func (s *Store) RegisterNode(ctx context.Context, n Node) (Node, error) {
+	return s.b.RegisterNode(ctx, n)
+}
+func (s *Store) ListNodes(ctx context.Context, mode string) ([]Node, error) {
+	return s.b.ListNodes(ctx, mode)
+}
+func (s *Store) DeleteNode(ctx context.Context, mode, address string) error {
+	return s.b.DeleteNode(ctx, mode, address)
+}
+func (s *Store) PurgeNodes(ctx context.Context, cutoff time.Time) (int, error) {
+	return s.b.PurgeNodes(ctx, cutoff)
+}

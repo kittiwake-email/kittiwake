@@ -632,3 +632,17 @@ func (c *Client) UpdateCluster(ctx context.Context, id int64, req ClusterRequest
 func (c *Client) DeleteCluster(ctx context.Context, id int64) error {
 	return c.do(ctx, http.MethodDelete, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, nil, "", nil)
 }
+
+// ---- nodes ----
+
+// ListNodes lists registered daemon nodes, optionally of one mode.
+func (c *Client) ListNodes(ctx context.Context, mode string) ([]Node, error) {
+	var out struct {
+		Items []Node `json:"items"`
+	}
+	q := url.Values{}
+	if mode != "" {
+		q.Set("mode", mode)
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/nodes", q, nil, "", &out)
+}

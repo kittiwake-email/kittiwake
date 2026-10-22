@@ -383,3 +383,15 @@ type ImportSummary struct {
 type RecalculateResult struct {
 	Usage Usage `json:"usage"`
 }
+
+// Node is a registered daemon mode on some host.
+type Node struct {
+	ID       int64     `json:"id"`
+	Mode     string    `json:"mode"`
+	Address  string    `json:"address"`
+	Host     string    `json:"host"`
+	Version  string    `json:"version"`
+	Started  time.Time `json:"started"`
+	LastSeen time.Time `json:"last_seen"`
+	Alive    bool      `json:"alive"`
+}

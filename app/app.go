@@ -388,6 +388,9 @@ func (a *App) Run(ctx context.Context) error {
 	if a.Clusters != nil {
 		go a.Clusters.Run(ctx, 30*time.Second)
 	}
+	// Node registry: register every mode this process runs, heartbeat it,
+	// deregister on orderly shutdown.
+	go a.registerNodes(ctx)
 	if err := a.serveHTTP("management", a.Cfg.Listen.Management, mgmt, start); err != nil {
 		return err
 	}
@@ -497,4 +500,90 @@ func (a *App) Close() error {
 		return a.Client.Close()
 	}
 	return nil
+}
+
+// nodeAddresses returns (mode, address) for every mode this process runs:
+// the advertised host joined with the mode's listener port. Unix socket
+// listeners register the socket path.
+func (a *App) nodeAddresses() map[string]string {
+	host := a.Cfg.Node.Advertise
+	if host == "" {
+		host = advertiseHost()
+	}
+	ports := map[string]config.Listener{
+		"lmtp": a.Cfg.Listen.LMTP, "imap": a.Cfg.Listen.IMAP, "pop3": a.Cfg.Listen.POP3, "jmap": a.Cfg.Listen.JMAP,
+		"admin": a.Cfg.Listen.Admin, "postfix": a.Cfg.Listen.Postfix, "worker": a.Cfg.Listen.Management,
+	}
+	out := map[string]string{}
+	for _, m := range a.Cfg.Modes {
+		l, ok := ports[m]
+		if !ok {
+			l = a.Cfg.Listen.Management
+		}
+		if strings.HasPrefix(l.Address, "/") {
+			out[m] = host + ":" + l.Address
+			continue
+		}
+		_, port, err := net.SplitHostPort(l.Address)
+		if err != nil {
+			port = "0"
+		}
+		out[m] = net.JoinHostPort(host, port)
+	}
+	return out
+}
+
+// advertiseHost picks the first global unicast address of the machine,
+// IPv6 before IPv4, else the hostname.
+func advertiseHost() string {
+	addrs, _ := net.InterfaceAddrs()
+	var v4 string
+	for _, ad := range addrs {
+		ipn, ok := ad.(*net.IPNet)
+		if !ok || !ipn.IP.IsGlobalUnicast() || ipn.IP.IsPrivate() {
+			continue
+		}
+		if ipn.IP.To4() == nil {
+			return ipn.IP.String()
+		}
+		if v4 == "" {
+			v4 = ipn.IP.String()
+		}
+	}
+	if v4 != "" {
+		return v4
+	}
+	return hostname()
+}
+
+func (a *App) registerNodes(ctx context.Context) {
+	addrs := a.nodeAddresses()
+	started := time.Now().UTC()
+	hb := a.Cfg.Node.Heartbeat
+	beat := func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for mode, addr := range addrs {
+			n := identity.Node{Mode: mode, Address: addr, Host: hostname(), Version: Version, Started: started, Expires: time.Now().UTC().Add(3 * hb)}
+			if _, err := a.Stores.Identity.RegisterNode(cctx, n); err != nil {
+				a.Log.Warn("node registration failed", slog.String("mode", mode), slog.String("address", addr), slog.String("error", err.Error()))
+			}
+		}
+	}
+	beat()
+	t := time.NewTicker(hb)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			for mode, addr := range addrs {
+				_ = a.Stores.Identity.DeleteNode(cctx, mode, addr)
+			}
+			cancel()
+			return
+		case <-t.C:
+			beat()
+		}
+	}
 }
