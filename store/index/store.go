@@ -840,13 +840,43 @@ func (s *Store) Append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 		})
 	}
 	if err := pg.wait(); err != nil {
+		s.unappend(ctx, mb, fid, rec, tid)
 		return Record{}, err
 	}
 	if err := s.putRecord(ctx, mb, fid, rec); err != nil {
+		s.unappend(ctx, mb, fid, rec, tid)
 		return Record{}, err
 	}
 	s.maybeTrim(ctx, mb, rec.ModSeq)
 	return rec, nil
+}
+
+// unappend compensates an Append that failed after the root transaction:
+// the counters and quota usage go back, the change log records the
+// destroy, and the thread membership is dropped, so a failed delivery
+// leaves no trace in the index (the caller removes the message object).
+// Best effort: a crash in the same window is caught by recalc-quota and
+// the orphan sweep instead.
+func (s *Store) unappend(ctx context.Context, mb uuid.UUID, fid string, rec Record, tid string) {
+	now := s.Now().UTC()
+	_, _ = s.updateRoot(ctx, mb, func(r *Root) error {
+		f := r.FolderByID(fid)
+		if f == nil {
+			return ErrNotFound
+		}
+		r.ModSeq++
+		f.ModSeq = r.ModSeq
+		f.Total--
+		f.Size -= rec.Size
+		if !rec.HasFlag(FlagSeen) {
+			f.Unseen--
+		}
+		r.Usage.Bytes -= rec.Size
+		r.Usage.Messages--
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindEmail, Op: OpDestroyed, ID: rec.MessageID.String(), FolderID: fid, UID: rec.UID, Timestamp: now})
+		return nil
+	})
+	_, _ = s.pool(ctx, mb).Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapRemove(threadKey(tid, rec.MessageID)))
 }
 
 // parallel runs functions concurrently and returns the first error.

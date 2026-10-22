@@ -582,6 +582,34 @@ The `worker` mode executes background tasks:
 - Identity reconciliation (repair domain/mailbox/account listings)
 - Search indexing events (no-op until a backend is configured)
 
+**No object outlives its purpose.** Every write that touches more than one RADOS object has
+a single commit point (the folder index record) and undoes itself when it fails before that
+point: a delivery or import that cannot write its message object, raw object or attachment
+takes back the root counters and change-log entry, the thread membership, the message
+objects and the attachment references, so a failed delivery leaves nothing behind. Deleting a
+mailbox removes its messages, raw objects, retention set, index objects, uploads and daily
+audit objects. What only a crash in that window can leave behind is caught by the sweeps,
+each written so that it never walks more than it has to:
+
+- **Attachment GC** (daily) lists the attachment pool, skips objects touched within the
+  grace period, verifies that every reference of the rest points at an existing message
+  (a reference from a delivery that died after the attachment write would otherwise pin
+  the object forever), drops the dangling ones and deletes objects without references. The
+  delete is conditional on the object version it examined, so a reference added by a
+  concurrent delivery is never lost to the collector.
+- **Orphan sweep** (weekly by default; one stat per message object, so it is the only
+  sweep that scales with the total message count) removes message documents without an
+  index or retention entry and `.raw` objects without a document, once they are older than
+  the orphan age, and asks for a quota recalculation of every mailbox it touched, since an
+  orphan is the trace of a torn write that may have left the counters off.
+- **Upload sweep** (hourly) removes expired JMAP uploads from their own namespace.
+- **Audit purge** (daily) removes daily audit objects past the retention; removed mailboxes
+  lose theirs with the mailbox, so nothing depends on the mailbox list for cleanup.
+
+The orphan sweep is the one full pool walk left; with the write paths self-cleaning it is
+insurance rather than a mechanism, and its interval is what to raise first on a large
+installation.
+
 Periodic tasks are enqueued by a scheduler role that the workers elect among themselves with
 a lease row in the database, so exactly one worker schedules and any worker executes.
 

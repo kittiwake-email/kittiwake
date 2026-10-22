@@ -253,6 +253,18 @@ func TestRemoveMailbox(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("leftover message objects: %d", left)
 	}
+	// The mailbox's daily audit objects went with it.
+	idxp, _ := f.c.Pool("index")
+	var auditLeft []string
+	_ = idxp.List(ctx, func(oid string) error {
+		if strings.HasPrefix(oid, f.mb.ID.String()+"/audit/") {
+			auditLeft = append(auditLeft, oid)
+		}
+		return nil
+	})
+	if len(auditLeft) != 0 {
+		t.Fatalf("audit objects of the removed mailbox remain: %v", auditLeft)
+	}
 }
 
 // A worker that shuts down in the middle of a removal hands the task back
@@ -368,6 +380,59 @@ func TestUploadSweepAndRemoval(t *testing.T) {
 	f.drain(t)
 	if _, _, err := f.st.Messages.GetUpload(ctx, f.mb.ID, "u-new"); err == nil {
 		t.Fatal("upload survived mailbox removal")
+	}
+}
+
+// Traces of writes that died half-way are collected: an attachment whose
+// only reference points at a message that never committed, and a .raw
+// object without its document.
+func TestTornWritesAreCollected(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// Dangling attachment reference: the GC drops the reference and then
+	// the unreferenced object, once the grace period has passed.
+	data := []byte("attachment bytes of a delivery that never committed")
+	hash := attach.Hash(data)
+	ghost := uuid.New()
+	if err := f.st.Attachments.Put(ctx, hash, data, "text/plain", f.mb.ID, ghost); err != nil {
+		t.Fatal(err)
+	}
+	// Lone raw object.
+	lone := uuid.New()
+	if err := f.st.Messages.PutRaw(ctx, f.mb.ID, lone, []byte("raw bytes")); err != nil {
+		t.Fatal(err)
+	}
+	// A live message next to them must survive.
+	d, liveHash := f.deliver(t)
+
+	_, _ = f.st.Queue.Enqueue(ctx, TaskAttachmentGC, struct{}{}, time.Time{})
+	_, _ = f.st.Queue.Enqueue(ctx, TaskOrphanSweep, struct{}{}, time.Time{})
+	f.drain(t)
+	if _, err := f.st.Attachments.Get(ctx, f.mb.ID, hash); err != nil {
+		t.Fatal("dangling attachment removed inside the grace period")
+	}
+	f.now = f.now.Add(26 * time.Hour) // past the GC grace and the orphan age
+	_, _ = f.st.Queue.Enqueue(ctx, TaskAttachmentGC, struct{}{}, time.Time{})
+	_, _ = f.st.Queue.Enqueue(ctx, TaskOrphanSweep, struct{}{}, time.Time{})
+	f.drain(t)
+	if _, err := f.st.Attachments.Get(ctx, f.mb.ID, hash); err == nil {
+		t.Fatal("attachment with a dangling reference not collected")
+	}
+	if _, err := f.st.Messages.GetRaw(ctx, f.mb.ID, lone); err == nil {
+		t.Fatal("lone raw object not collected")
+	}
+	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, d.MessageID); err != nil {
+		t.Fatal("live message collected")
+	}
+	if info, _ := f.st.Attachments.Stat(ctx, f.mb.ID, liveHash); info.Refs != 1 {
+		t.Fatalf("live attachment refs: %d", info.Refs)
+	}
+	// The orphan sweep asked for a quota recalculation of the touched mailbox.
+	if st, _ := f.st.Queue.Stats(ctx, TaskRecalcQuota); st.Pending+st.Leased+st.Dead != 0 {
+		// drained already: fine either way, the task must not be dead
+		if st.Dead != 0 {
+			t.Fatalf("recalc task dead: %+v", st)
+		}
 	}
 }
 

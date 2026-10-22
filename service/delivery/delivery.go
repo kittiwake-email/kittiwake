@@ -480,15 +480,16 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 
 	// Attachments (content + reference in one transaction each) are
 	// independent of the index: write them while the index allocates.
-	attDone := make(chan error, 1)
+	var attErr error
+	attDone := make(chan struct{})
 	go func() {
+		defer close(attDone)
 		for _, a := range parsed.Attachments {
 			if err := s.atts.Put(ctx, a.Hash, a.Data, a.ContentType, mb, msgID); err != nil {
-				attDone <- fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
+				attErr = fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
 				return
 			}
 		}
-		attDone <- nil
 	}()
 
 	// Root transaction (UID, modseq, counters, change log) → message object
@@ -517,9 +518,15 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 			return rawErr
 		}
 		// Attachments must exist before the index entry commits.
-		return <-attDone
+		<-attDone
+		return attErr
 	})
 	if err != nil {
+		// Nothing committed: take back what was written so a failed
+		// delivery (quota, storage trouble) leaves no object behind. The
+		// index already undid its counters; the sweeps cover a crash here.
+		<-attDone
+		s.undoStore(ctx, mb, msgID, parsed)
 		if errors.Is(err, index.ErrNotFound) {
 			err = ErrNoFolder
 		}
@@ -540,6 +547,22 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 		}
 	}()
 	return Delivered{MailboxID: mb, MessageID: msgID, FolderID: folderID, UID: rec.UID, Record: rec}, nil
+}
+
+// undoStore removes the message objects and attachment references of a
+// store that did not commit. Best effort, with its own deadline: the
+// request context may already be gone.
+func (s *Service) undoStore(ctx context.Context, mb, msgID uuid.UUID, parsed *mail.Parsed) {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := s.msgs.Delete(uctx, mb, msgID); err != nil {
+		s.log.WarnContext(uctx, "delivery: undo message object failed; the orphan sweep will remove it", slog.String("mailbox", mb.String()), slog.String("message", msgID.String()), slog.String("error", err.Error()))
+	}
+	for _, a := range parsed.Attachments {
+		if err := s.atts.RemoveRef(uctx, a.Hash, mb, msgID); err != nil {
+			s.log.WarnContext(uctx, "delivery: undo attachment reference failed; attachment gc will drop it", slog.String("hash", a.Hash), slog.String("error", err.Error()))
+		}
+	}
 }
 
 // recordFor builds the index record from the parsed document.

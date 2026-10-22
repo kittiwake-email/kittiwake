@@ -91,8 +91,12 @@ type Config struct {
 	LeaseDuration time.Duration
 	// Schedule intervals for periodic tasks.
 	PurgeInterval time.Duration // per-mailbox trash purge
-	GCInterval    time.Duration // attachment GC, audit purge, orphan sweep
-	ScanBatch     int
+	GCInterval    time.Duration // attachment GC, audit purge
+	// OrphanSweepInterval: the orphan sweep lists every message object on
+	// every storage (one stat per object), so it runs rarely; the write
+	// paths undo their own failures and the sweep only catches crashes.
+	OrphanSweepInterval time.Duration
+	ScanBatch           int
 	// ExportDir receives mailbox export archives (export-mailbox tasks).
 	ExportDir string
 }
@@ -151,6 +155,9 @@ func New(cfg Config, st Stores, aud *auditor.Auditor, log *slog.Logger) *Worker 
 	}
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = 24 * time.Hour
+	}
+	if cfg.OrphanSweepInterval <= 0 {
+		cfg.OrphanSweepInterval = 7 * 24 * time.Hour
 	}
 	if cfg.ScanBatch <= 0 {
 		cfg.ScanBatch = 500
@@ -560,7 +567,14 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 			return err
 		}
 	}
-	w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "remove-mailbox", Detail: fmt.Sprintf("messages=%d", n)})
+	// The mailbox's own audit objects (one per day on its index pool) would
+	// otherwise outlive it: the audit purge only walks live mailboxes.
+	days := int(w.cfg.AuditRetention/(24*time.Hour)) + 2
+	if _, err := w.audit.PurgeBefore(ctx, mb, w.Now().Add(24*time.Hour), days); err != nil {
+		return err
+	}
+	// Platform-level event (admin log), not the mailbox log that is gone.
+	w.aud.Log(ctx, auditor.Event{Action: "remove-mailbox", Target: mb.String(), Detail: fmt.Sprintf("messages=%d", n)})
 	return nil
 }
 
@@ -575,8 +589,37 @@ func (w *Worker) attachmentGC(ctx context.Context) error {
 	if err := w.atts.List(ctx, func(cid int64, h string) error { hashes = append(hashes, ref{cid, h}); return nil }); err != nil {
 		return err
 	}
-	deleted := 0
+	deleted, dangling := 0, 0
 	for _, h := range hashes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := w.atts.StatOn(ctx, h.storage, h.hash)
+		if err != nil {
+			if errors.Is(err, attach.ErrNotFound) {
+				continue
+			}
+			return err
+		}
+		if w.Now().Sub(info.Touched) < w.cfg.AttachmentGCGrace {
+			continue // still being written to or just changed: next time
+		}
+		if info.Refs > 0 {
+			// References from messages that never committed (a delivery
+			// that died after the attachment write) would pin the object
+			// forever: check that every referencing message exists.
+			sctx := storage.WithID(ctx, h.storage)
+			n, err := w.atts.DropDanglingRefs(ctx, h.storage, h.hash, func(_ context.Context, mb, msg uuid.UUID) (bool, error) {
+				return w.msgs.Exists(sctx, mb, msg)
+			})
+			if err != nil {
+				return err
+			}
+			dangling += n
+			if n < info.Refs {
+				continue // still referenced
+			}
+		}
 		ok, err := w.atts.DeleteIfUnreferenced(ctx, h.storage, h.hash, w.cfg.AttachmentGCGrace)
 		if err != nil {
 			return err
@@ -585,36 +628,14 @@ func (w *Worker) attachmentGC(ctx context.Context) error {
 			deleted++
 		}
 	}
-	w.log.Info("attachment gc", slog.Int("scanned", len(hashes)), slog.Int("deleted", deleted))
+	w.log.Info("attachment gc", slog.Int("scanned", len(hashes)), slog.Int("deleted", deleted), slog.Int("dangling_refs", dangling))
 	return nil
 }
 
-// purgeAudit drops audit objects past the retention period.
-func (w *Worker) purgeAudit(ctx context.Context) error {
-	cutoff := w.Now().Add(-w.cfg.AuditRetention)
-	days := 60
-	n, err := w.audit.PurgeBefore(ctx, uuid.Nil, cutoff, days)
-	if err != nil {
-		return err
-	}
-	err = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
-		// Mailboxes on hold keep everything.
-		if v, err := w.ids.GetMailbox(ctx, id); err == nil && v.Value.Hold != nil {
-			return nil
-		}
-		m, err := w.audit.PurgeBefore(ctx, id, cutoff, days)
-		n += m
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	w.log.Info("audit purge", slog.Int("objects", n))
-	return nil
-}
-
-// orphanSweep removes message objects that never reached an index and are
-// not waiting in a retention set.
+// orphanSweep removes message objects that no index entry and no retention
+// entry refers to (and lone .raw objects), once they are older than
+// OrphanAge. A mailbox that had an orphan gets its quota recalculated: the
+// orphan is the trace of a torn write that may have left the counters off.
 func (w *Worker) orphanSweep(ctx context.Context) error {
 	cutoff := w.Now().Add(-w.cfg.OrphanAge)
 	retention := map[uuid.UUID]map[uuid.UUID]bool{}
@@ -637,6 +658,10 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		if i.Created.After(cutoff) {
 			return nil
 		}
+		if i.RawOnly {
+			orphans = append(orphans, i)
+			return nil
+		}
 		// The object's own storage answers; the mailbox record may be gone.
 		cctx := storage.WithID(ctx, i.StorageID)
 		if loc, err := index.ParseLocation(i.Location); err == nil {
@@ -655,12 +680,45 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	touched := map[uuid.UUID]bool{}
 	for _, o := range orphans {
 		if _, err := w.deleteMessage(storage.WithID(ctx, o.StorageID), o.Mailbox, o.Message); err != nil {
 			return err
 		}
+		touched[o.Mailbox] = true
 	}
-	w.log.Info("orphan sweep", slog.Int("removed", len(orphans)))
+	for mb := range touched {
+		if _, err := w.ids.GetMailbox(ctx, mb); err == nil {
+			_, _ = w.queue.Enqueue(ctx, TaskRecalcQuota, mailboxPayload{Mailbox: mb}, time.Time{})
+		}
+	}
+	w.log.Info("orphan sweep", slog.Int("removed", len(orphans)), slog.Int("mailboxes_recalculated", len(touched)))
+	return nil
+}
+
+// purgeAudit drops audit objects older than the retention: the admin log
+// and every live mailbox's daily objects (removed mailboxes lose theirs
+// with the mailbox).
+func (w *Worker) purgeAudit(ctx context.Context) error {
+	cutoff := w.Now().Add(-w.cfg.AuditRetention)
+	days := 60
+	n, err := w.audit.PurgeBefore(ctx, uuid.Nil, cutoff, days)
+	if err != nil {
+		return err
+	}
+	err = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+		// Mailboxes on hold keep everything.
+		if v, err := w.ids.GetMailbox(ctx, id); err == nil && v.Value.Hold != nil {
+			return nil
+		}
+		m, err := w.audit.PurgeBefore(ctx, id, cutoff, days)
+		n += m
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	w.log.Info("audit purge", slog.Int("objects", n))
 	return nil
 }
 
@@ -687,11 +745,15 @@ func (w *Worker) schedule(ctx context.Context) {
 		})
 		w.log.Info("scheduled trash purges", slog.Int("mailboxes", n))
 	}
-	for _, typ := range []string{TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep} {
+	for _, typ := range []string{TaskAttachmentGC, TaskPurgeAudit} {
 		if due(typ, w.cfg.GCInterval) {
 			_, _ = w.queue.Enqueue(ctx, typ, struct{}{}, time.Time{})
 			w.log.Info("scheduled", slog.String("task", typ))
 		}
+	}
+	if due(TaskOrphanSweep, w.cfg.OrphanSweepInterval) {
+		_, _ = w.queue.Enqueue(ctx, TaskOrphanSweep, struct{}{}, time.Time{})
+		w.log.Info("scheduled", slog.String("task", TaskOrphanSweep))
 	}
 	if due(TaskUploadSweep, w.cfg.PurgeInterval) {
 		_, _ = w.queue.Enqueue(ctx, TaskUploadSweep, struct{}{}, time.Time{})

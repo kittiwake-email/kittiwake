@@ -118,6 +118,18 @@ func (s *Store) Delete(ctx context.Context, mb, msg uuid.UUID) error {
 	return nil
 }
 
+// Exists reports whether the message document object is there.
+func (s *Store) Exists(ctx context.Context, mb, msg uuid.UUID) (bool, error) {
+	_, err := s.pool(ctx, mb).Stat(ctx, docOID(mb, msg))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, rados.ErrNotFound) {
+		return false, nil
+	}
+	return false, mapErr(err)
+}
+
 // Info describes a stored message object for sweeps.
 type Info struct {
 	StorageID int64
@@ -126,14 +138,24 @@ type Info struct {
 	Created   time.Time
 	Size      uint64
 	Location  string
+	// RawOnly: a .raw object whose document is missing (a delivery that
+	// died between the two writes); nothing references it.
+	RawOnly bool
 }
 
-// List walks every message document on every connected storage (not the
-// .raw objects), calling fn with its info. Used by the orphan sweep and
-// mailbox removal; act on an Info with storage.WithID(ctx, info.StorageID).
+// List walks every message document on every connected storage, calling
+// fn with its info, and afterwards every .raw object that has no document
+// (RawOnly). Used by the orphan sweep and mailbox removal; act on an Info
+// with storage.WithID(ctx, info.StorageID).
 func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 	return s.r.Each(ctx, storage.RoleMessages, func(cid int64, io rados.IOContext) error {
-		return io.List(ctx, func(oid string) error {
+		docs := map[string]bool{}
+		var raws []string
+		err := io.List(ctx, func(oid string) error {
+			if len(oid) == 77 && strings.HasSuffix(oid, ".raw") {
+				raws = append(raws, oid)
+				return nil
+			}
 			if len(oid) != 73 || oid[36] != '/' { // uuid/uuid
 				return nil
 			}
@@ -142,6 +164,7 @@ func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 			if err1 != nil || err2 != nil {
 				return nil
 			}
+			docs[oid] = true
 			st, err := io.Stat(ctx, oid)
 			if err != nil {
 				if errors.Is(err, rados.ErrNotFound) {
@@ -158,6 +181,31 @@ func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 			}
 			return fn(info)
 		})
+		if err != nil {
+			return err
+		}
+		for _, oid := range raws {
+			doc := strings.TrimSuffix(oid, ".raw")
+			if docs[doc] {
+				continue
+			}
+			mb, err1 := uuid.Parse(doc[:36])
+			msg, err2 := uuid.Parse(doc[37:])
+			if err1 != nil || err2 != nil {
+				continue
+			}
+			st, err := io.Stat(ctx, oid)
+			if err != nil {
+				if errors.Is(err, rados.ErrNotFound) {
+					continue
+				}
+				return mapErr(err)
+			}
+			if err := fn(Info{StorageID: cid, Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime, RawOnly: true}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
