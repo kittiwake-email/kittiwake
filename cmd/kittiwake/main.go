@@ -172,7 +172,27 @@ func runServe(args []string) error {
 		}
 	}
 	if *mgmt != "" {
+		// Override for the one-process form; the systemd instances take
+		// each mode's management address from the config.
 		cfg.Listen.Management.Address = *mgmt
+		for _, m := range cfg.Modes {
+			switch m {
+			case "lmtp":
+				cfg.Listen.LMTP.Management = ""
+			case "imap":
+				cfg.Listen.IMAP.Management = ""
+			case "pop3":
+				cfg.Listen.POP3.Management = ""
+			case "jmap":
+				cfg.Listen.JMAP.Management = ""
+			case "admin":
+				cfg.Listen.Admin.Management = ""
+			case "socketmap":
+				cfg.Listen.Socketmap.Management = ""
+			case "worker":
+				cfg.Listen.Worker.Management = ""
+			}
+		}
 	}
 	if len(cfg.Modes) == 0 {
 		return fmt.Errorf("no modes: pass --modes <mode,...> (as the systemd instances do) or set modes in the config")

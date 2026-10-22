@@ -62,6 +62,13 @@ log: {level: debug, format: text}
 	if _, err := Parse([]byte("cache: {root: -1s}\n")); err == nil {
 		t.Fatal("expected negative cache TTL error")
 	}
+	// Management address: a lone mode uses its own, several modes the shared one.
+	if cfg, _ := Parse([]byte("ceph: {backend: memory}\n")); cfg.Listen.ManagementAddress([]string{"imap"}) != "[::1]:9092" || cfg.Listen.ManagementAddress([]string{"worker"}) != "[::1]:9097" || cfg.Listen.ManagementAddress([]string{"imap", "pop3"}) != "[::1]:9090" {
+		t.Fatalf("management addresses: %+v", cfg.Listen)
+	}
+	if _, err := Parse([]byte("modes: [postfix]\nceph: {backend: memory}\n")); err == nil {
+		t.Fatal("old mode name postfix accepted")
+	}
 	// modes is optional (systemd instances pass --modes).
 	if cfg, err := Parse([]byte("database: {dsn: x}\n")); err != nil || len(cfg.Modes) != 0 {
 		t.Fatalf("config without modes: %+v %v", cfg.Modes, err)

@@ -99,7 +99,7 @@ These are settled. Do not design around them.
   below. The service interfaces are the project's public Go API.
 
 - **One Go binary (`kittiwake`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
-  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `postfix`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to the metadata
+  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `socketmap`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to the metadata
   database directly (bootstrap, export/import). Modes combine in one process or split across many.
 - **Mail data in Ceph RADOS, metadata in MariaDB, no Redis.** Stateless daemons via librados
   (cgo; target latest stable Ceph). Per cluster three pools: `messages`, `attachments`,
@@ -126,7 +126,7 @@ These are settled. Do not design around them.
   to cmd/kittiwake; add them to the API + spec + client.
   Self-service endpoints let accounts manage their own passwords, app passwords, TOTP,
   tokens and sessions. All of it audited.
-- **Postfix integration:** `postfix` mode serves a Sendmail-style socketmap (`domains`,
+- **Postfix integration:** `socketmap` mode serves a Sendmail-style socketmap (`domains`,
   `mailboxes`, `aliases` maps) for `virtual_mailbox_domains/maps` and `virtual_alias_maps`.
   Postfix config and helpers live in `contrib/postfix/`.
 - **Scalability is the governing principle** (1M mailboxes, 150k-message mailboxes): count

@@ -4,7 +4,7 @@
 # Modes this process runs, for the one-process form (development, small
 # setups). Under systemd each instance passes its mode (kittiwake@<mode>
 # runs `serve --modes <mode>`), so the line is left out there.
-# modes: [lmtp, jmap, admin, postfix]
+# modes: [lmtp, jmap, admin, socketmap]
 
 # Metadata database (MariaDB 10.6+): domains, mailboxes, accounts, aliases,
 # tokens, sessions, the worker queue and the Ceph cluster registry. Create or
@@ -46,17 +46,21 @@ ceph:
   # pools: {messages: ..., attachments: ..., index: ..., meta: ...}   # memory backend only
 
 listen:
+  # One listener per mode, and per mode the management (metrics, health, /clusters)
+  # address of the process that runs it: the normal deployment is one systemd
+  # instance per mode (kittiwake@<mode>), each needing its own management port.
+  # listen.management is used by a process that runs several modes at once.
   # proxy_protocol: off | optional | required. HAProxy sends PROXY on every
-  # connection, so "required" is the production setting. "optional" delays
-  # the IMAP/POP3/LMTP banner by up to 300 ms for clients that send no
-  # header; use it only for mixed setups.
-  lmtp:       {address: "[::]:24",    proxy_protocol: required}
-  imap:       {address: "[::]:143",   proxy_protocol: required}
-  pop3:       {address: "[::]:110",   proxy_protocol: required}
-  jmap:       {address: "[::]:8080",  proxy_protocol: required}  # JMAP + OAuth + /v1/me, user-facing
-  admin:      {address: "[::1]:8081", proxy_protocol: off}       # /v1/admin, operators only
-  postfix:    {address: "[::1]:2525", proxy_protocol: off}   # socketmap, private network only
-  management: {address: "[::1]:9090", proxy_protocol: off}   # /metrics /healthz /readyz
+  # connection it forwards; "required" refuses anything else, "optional" waits
+  # briefly for a header, "off" is for listeners clients reach directly.
+  lmtp:       {address: "[::]:24",    proxy_protocol: optional, management: "[::1]:9091"}
+  imap:       {address: "[::]:143",   proxy_protocol: optional, management: "[::1]:9092"}
+  pop3:       {address: "[::]:110",   proxy_protocol: optional, management: "[::1]:9093"}
+  jmap:       {address: "[::]:8080",  proxy_protocol: optional, management: "[::1]:9094"}
+  admin:      {address: "[::1]:8081", proxy_protocol: off,      management: "[::1]:9095"}
+  socketmap:  {address: "[::1]:2525", proxy_protocol: off,      management: "[::1]:9096"}   # MTA lookups (Postfix socketmap protocol)
+  worker:     {management: "[::1]:9097"}                                                    # no listener of its own
+  management: {address: "[::1]:9090"}                                                       # one-process form
 
 proxy:
   trusted_addresses: []        # proxies whose X-Forwarded-For is trusted (HTTP fallback)

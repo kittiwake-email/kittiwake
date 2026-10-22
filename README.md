@@ -232,7 +232,7 @@ contacts and calendars.
 
 Postfix must know which domains and recipients Kittiwake accepts so it can reject unknown
 recipients at SMTP time instead of bouncing after LMTP. Since there is no SQL database for
-Postfix to query, Kittiwake's `postfix` mode serves a **Sendmail-style socketmap server**, which
+Postfix to query, Kittiwake's `socketmap` mode serves a **Sendmail-style socketmap server**, which
 Postfix supports natively (`socketmap:inet:host:port:name`, read-only lookups). Maps offered:
 
 - `domains` – for `virtual_mailbox_domains`: is this domain known and enabled
@@ -970,9 +970,11 @@ belonging to an account with the `admin` role, for operating the platform:
 
 The daemon takes a single YAML file as configuration:
 
-- Listen addresses (one listener per mode; JMAP and the admin API are separate listeners
-  and separate code paths); optionally the modes to run in one process, otherwise each
-  systemd instance passes its mode with `--modes`
+- Listen addresses, one per mode, each with the management (metrics, health) address of
+  the process that runs that mode alone; `listen.management` for a process running several
+  modes. JMAP and the admin API are separate listeners and separate code paths. Optionally
+  the modes to run in one process, otherwise each systemd instance passes its mode with
+  `--modes` and takes everything else, including its management port, from the YAML
 - Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
 - Ceph: `config_file` and `options` applied to every cluster connection (clusters
   themselves are registered in the database); pool names only for the memory backend

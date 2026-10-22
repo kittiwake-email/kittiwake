@@ -62,8 +62,7 @@ deploy: build
 	ssh $(DEPLOY_SSH) 'mv /usr/local/bin/kittiwake.new /usr/local/bin/kittiwake && mv /usr/local/bin/kittiwake-admin.new /usr/local/bin/kittiwake-admin && chmod 755 /usr/local/bin/kittiwake /usr/local/bin/kittiwake-admin && kittiwake -v && kittiwake-admin -v && (systemctl try-restart kittiwake.target 2>/dev/null || true)'
 
 deploy-units:
-	ssh $(DEPLOY_SSH) 'install -d /etc/systemd/system /etc/kittiwake/instances'
+	ssh $(DEPLOY_SSH) 'install -d /etc/systemd/system /etc/kittiwake'
 	scp contrib/systemd/kittiwake@.service contrib/systemd/kittiwake.target $(DEPLOY_SCP):/etc/systemd/system/
-	scp contrib/systemd/instances/*.env $(DEPLOY_SCP):/etc/kittiwake/instances/
 	scp examples/lab.yaml $(DEPLOY_SCP):/etc/kittiwake/kittiwake.yaml.example
 	ssh $(DEPLOY_SSH) 'test -f /etc/kittiwake/kittiwake.yaml || cp /etc/kittiwake/kittiwake.yaml.example /etc/kittiwake/kittiwake.yaml; systemctl daemon-reload'

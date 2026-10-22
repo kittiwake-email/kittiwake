@@ -391,7 +391,8 @@ func (a *App) Run(ctx context.Context) error {
 	// Node registry: register every mode this process runs, heartbeat it,
 	// deregister on orderly shutdown.
 	go a.registerNodes(ctx)
-	if err := a.serveHTTP("management", a.Cfg.Listen.Management, mgmt, start); err != nil {
+	mgmtListener := config.Listener{Address: a.Cfg.Listen.ManagementAddress(a.Cfg.Modes), ProxyProtocol: "off"}
+	if err := a.serveHTTP("management", mgmtListener, mgmt, start); err != nil {
 		return err
 	}
 
@@ -404,14 +405,14 @@ func (a *App) Run(ctx context.Context) error {
 		a.addCloser(srv.Shutdown)
 		start("lmtp", func() error { return srv.Serve(ln) })
 	}
-	if a.Cfg.HasMode("postfix") {
+	if a.Cfg.HasMode("socketmap") {
 		srv := socketmap.New(a.Stores.Identity, a.Services.Delivery, a.Log)
-		ln, err := listen(a.Cfg.Listen.Postfix)
+		ln, err := listen(a.Cfg.Listen.Socketmap)
 		if err != nil {
 			return fmt.Errorf("postfix listen: %w", err)
 		}
 		a.addCloser(func(context.Context) error { return srv.Close() })
-		start("postfix", func() error { return srv.Serve(ln) })
+		start("socketmap", func() error { return srv.Serve(ln) })
 	}
 	if a.Cfg.HasMode("jmap") {
 		if a.JMAPHandler == nil {
@@ -510,15 +511,12 @@ func (a *App) nodeAddresses() map[string]string {
 	if host == "" {
 		host = advertiseHost()
 	}
-	ports := map[string]config.Listener{
-		"lmtp": a.Cfg.Listen.LMTP, "imap": a.Cfg.Listen.IMAP, "pop3": a.Cfg.Listen.POP3, "jmap": a.Cfg.Listen.JMAP,
-		"admin": a.Cfg.Listen.Admin, "postfix": a.Cfg.Listen.Postfix, "worker": a.Cfg.Listen.Management,
-	}
 	out := map[string]string{}
 	for _, m := range a.Cfg.Modes {
-		l, ok := ports[m]
-		if !ok {
-			l = a.Cfg.Listen.Management
+		l := a.Cfg.Listen.ByMode(m)
+		if m == "worker" || l.Address == "" {
+			// No listener of its own: register the management address.
+			l = config.Listener{Address: a.Cfg.Listen.ManagementAddress(a.Cfg.Modes)}
 		}
 		if strings.HasPrefix(l.Address, "/") {
 			out[m] = host + ":" + l.Address

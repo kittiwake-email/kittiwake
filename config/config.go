@@ -15,8 +15,8 @@ import (
 
 // Config is the whole configuration file.
 type Config struct {
-	// Modes to run in this process: lmtp, imap, pop3, jmap, admin, postfix,
-	// worker. Optional: a systemd instance passes its mode with --modes
+	// Modes to run in this process: lmtp, imap, pop3, jmap, admin,
+	// socketmap, worker. Optional: a systemd instance passes its mode with --modes
 	// instead; the list is for running several modes in one process.
 	Modes []string `yaml:"modes"`
 
@@ -65,12 +65,15 @@ type Pools struct {
 
 // Listen holds one listener per mode plus the management listener.
 type Listen struct {
-	LMTP       Listener `yaml:"lmtp"`
-	IMAP       Listener `yaml:"imap"`
-	POP3       Listener `yaml:"pop3"`
-	JMAP       Listener `yaml:"jmap"`  // JMAP, OAuth token and self-service endpoints
-	Admin      Listener `yaml:"admin"` // admin REST API, operators only
-	Postfix    Listener `yaml:"postfix"`
+	LMTP      Listener `yaml:"lmtp"`
+	IMAP      Listener `yaml:"imap"`
+	POP3      Listener `yaml:"pop3"`
+	JMAP      Listener `yaml:"jmap"`      // JMAP, OAuth token and self-service endpoints
+	Admin     Listener `yaml:"admin"`     // admin REST API, operators only
+	Socketmap Listener `yaml:"socketmap"` // MTA recipient/domain/alias lookups (Postfix socketmap protocol)
+	Worker    Listener `yaml:"worker"`    // no listener of its own; only its management address
+	// Management is the metrics/health listener of a process that runs
+	// several modes, or of a mode whose entry has no management address.
 	Management Listener `yaml:"management"`
 }
 
@@ -81,6 +84,43 @@ type Listener struct {
 	// ProxyProtocol: "off", "optional" (accept with or without header) or
 	// "required" (reject connections without a PROXY header).
 	ProxyProtocol string `yaml:"proxy_protocol"`
+	// Management is the metrics/health address of the process that runs
+	// this mode on its own (one systemd instance per mode). Every process
+	// needs its own, so it lives next to the mode it belongs to.
+	Management string `yaml:"management"`
+}
+
+// ByMode returns the listener of a mode.
+func (l Listen) ByMode(mode string) Listener {
+	switch mode {
+	case "lmtp":
+		return l.LMTP
+	case "imap":
+		return l.IMAP
+	case "pop3":
+		return l.POP3
+	case "jmap":
+		return l.JMAP
+	case "admin":
+		return l.Admin
+	case "socketmap":
+		return l.Socketmap
+	case "worker":
+		return l.Worker
+	}
+	return Listener{}
+}
+
+// ManagementAddress returns the metrics/health address for a process
+// running the given modes: the mode's own management address when the
+// process runs exactly one mode that has one, else listen.management.
+func (l Listen) ManagementAddress(modes []string) string {
+	if len(modes) == 1 {
+		if m := l.ByMode(modes[0]).Management; m != "" {
+			return m
+		}
+	}
+	return l.Management.Address
 }
 
 // Proxy lists trusted proxies for X-Forwarded-For fallback on HTTP.
@@ -248,12 +288,18 @@ func Default() Config {
 			},
 		},
 		Listen: Listen{
-			LMTP:       Listener{Address: "[::]:24", ProxyProtocol: "optional"},
-			IMAP:       Listener{Address: "[::]:143", ProxyProtocol: "optional"},
-			POP3:       Listener{Address: "[::]:110", ProxyProtocol: "optional"},
-			JMAP:       Listener{Address: "[::]:8080", ProxyProtocol: "optional"},
-			Admin:      Listener{Address: "[::1]:8081", ProxyProtocol: "off"},
-			Postfix:    Listener{Address: "[::1]:2525", ProxyProtocol: "off"},
+			// Per mode: the listener and the management (metrics/health)
+			// address of the process running that mode on its own. One
+			// process per mode is the normal deployment, so every mode has
+			// its own management port; listen.management serves the
+			// one-process form.
+			LMTP:       Listener{Address: "[::]:24", ProxyProtocol: "optional", Management: "[::1]:9091"},
+			IMAP:       Listener{Address: "[::]:143", ProxyProtocol: "optional", Management: "[::1]:9092"},
+			POP3:       Listener{Address: "[::]:110", ProxyProtocol: "optional", Management: "[::1]:9093"},
+			JMAP:       Listener{Address: "[::]:8080", ProxyProtocol: "optional", Management: "[::1]:9094"},
+			Admin:      Listener{Address: "[::1]:8081", ProxyProtocol: "off", Management: "[::1]:9095"},
+			Socketmap:  Listener{Address: "[::1]:2525", ProxyProtocol: "off", Management: "[::1]:9096"},
+			Worker:     Listener{Management: "[::1]:9097"},
 			Management: Listener{Address: "[::1]:9090", ProxyProtocol: "off"},
 		},
 		SMTP: SMTP{RelayHost: "[::1]:25"},
@@ -305,7 +351,10 @@ func Parse(b []byte) (Config, error) {
 }
 
 // ValidModes is the set of accepted mode names.
-var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "admin": true, "postfix": true, "worker": true}
+var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "admin": true, "socketmap": true, "worker": true}
+
+// AllModes lists every mode name.
+var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "admin", "socketmap", "worker"}
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
@@ -314,7 +363,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: unknown mode %q", m)
 		}
 	}
-	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "admin": c.Listen.Admin, "postfix": c.Listen.Postfix, "management": c.Listen.Management} {
+	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "admin": c.Listen.Admin, "socketmap": c.Listen.Socketmap, "management": c.Listen.Management} {
 		switch l.ProxyProtocol {
 		case "", "off", "optional", "required":
 		default:

@@ -1,25 +1,15 @@
 # systemd units
 
-`kittiwake@.service` is a template: the instance name is the mode it runs
-(`lmtp`, `imap`, `pop3`, `jmap`, `admin`, `postfix`, `worker`). All instances read
-`/etc/kittiwake/kittiwake.yaml`; `instances/<mode>.env` gives each one its own
-management port (metrics and health) so they can share a host.
-
-Install:
+`kittiwake@.service` is a template: one instance per mode (`lmtp`, `imap`, `pop3`, `jmap`,
+`admin`, `socketmap`, `worker`). Every instance reads `/etc/kittiwake/kittiwake.yaml`; the
+instance name is the mode it runs, and that mode's management (metrics, health) address
+comes from `listen.<mode>.management` in the same file, so the YAML is the only source of
+truth and a host runs exactly the instances that were enabled on it. `kittiwake.target`
+groups the enabled instances.
 
 ```
 install -m 644 contrib/systemd/kittiwake@.service contrib/systemd/kittiwake.target /etc/systemd/system/
-install -d /etc/kittiwake/instances && install -m 644 contrib/systemd/instances/*.env /etc/kittiwake/instances/
-useradd --system --home /var/lib/kittiwake --shell /usr/sbin/nologin kittiwake
-install -d -o kittiwake -g kittiwake /var/lib/kittiwake /var/lib/kittiwake/exports
-chgrp kittiwake /etc/ceph/ceph.client.kittiwake.keyring && chmod 640 /etc/ceph/ceph.client.kittiwake.keyring
 systemctl daemon-reload
-systemctl enable --now kittiwake.target
+systemctl enable --now kittiwake@imap kittiwake@jmap      # the modes this host runs
+systemctl restart kittiwake.target                        # restart all of them
 ```
-
-`make deploy` builds the binary locally and copies it to `/usr/local/bin/kittiwake` on the
-host `DEPLOY_ADDR` (default: the lab box), then restarts `kittiwake.target`. `make deploy-units` installs the
-units, env files and (only if absent) the lab config.
-
-Day-to-day administration goes over the admin listener (`[::1]:8081` in the lab) with
-`kittiwake-admin`; `kittiwake admin bootstrap` is only for the first token.

@@ -1,6 +1,6 @@
 # Postfix integration with Kittiwake.
 #
-# Kittiwake's "postfix" mode serves a socketmap on [::1]:2525 (see
+# Kittiwake's "socketmap" mode serves a socketmap on [::1]:2525 (see
 # listen.postfix in kittiwake.yaml). Postfix uses it to know which domains and
 # recipients exist, so unknown recipients are rejected at SMTP time. Mail is
 # then handed to Kittiwake over LMTP.
