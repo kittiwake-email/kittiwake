@@ -4,6 +4,10 @@
 # deliver over LMTP, read through JMAP, IMAP and POP3, export the mailbox.
 #
 #   scripts/e2e.sh [config]      (default examples/lab.yaml)
+#   E2E_ATTACH=1 scripts/e2e.sh /etc/dovetail/dovetail.yaml
+#       does not start a daemon but tests the already running services
+#       (e.g. the systemd instances), which also proves that separate
+#       processes see each other's writes through RADOS.
 #
 # Requires: bin/dovetail (make build), python3, curl. Leaves the created
 # test domain in place (e2e-<timestamp>.example) so runs do not collide;
@@ -28,10 +32,14 @@ BOOT=$($BIN admin --config "$CFG" bootstrap --username "admin@$DOMAIN" --token-l
 TOKEN=$(echo "$BOOT" | awk '/token secret/ {print $3}')
 [ -n "$TOKEN" ] || { echo "no token in: $BOOT"; exit 1; }
 
-echo "== start daemon"
-$BIN serve --config "$CFG" >"$LOG" 2>&1 &
-PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; echo "daemon log: $LOG"' EXIT
+if [ -z "${E2E_ATTACH:-}" ]; then
+  echo "== start daemon"
+  $BIN serve --config "$CFG" >"$LOG" 2>&1 &
+  PID=$!
+  trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; echo "daemon log: $LOG"' EXIT
+else
+  echo "== attaching to running services"
+fi
 for i in $(seq 1 50); do curl -s -o /dev/null "http://$ADMIN/" && break; sleep 0.2; done
 curl -sf "http://${JMAP%:*}:9090/readyz" >/dev/null 2>&1 || true
 

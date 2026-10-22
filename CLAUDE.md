@@ -22,6 +22,8 @@ go test ./mail -run TestRoundTrip -v
 make run-dev          # whole platform in one process on the memory backend with a seeded account
 make integration      # RADOS conformance suite on a real cluster (lab box, see TESTENV.md)
 make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (lab box)
+make deploy           # build here, push binary to the lab box, restart its systemd instances
+                      # (dovetail@<mode>, one process per mode; see contrib/systemd, TESTENV.md)
 bin/dovetail check-config -c examples/dovetail.yaml
 bin/dovetail admin -c <cfg> bootstrap --username root@example.org --password-stdin
 ```

@@ -39,3 +39,18 @@ ssh root@2a14:9b80::3143 'cd /root/dovetail && make e2e'           # daemon on l
 (override with `DOVETAIL_TEST_CEPH_CONF`, `DOVETAIL_TEST_CEPH_USER`, `DOVETAIL_TEST_CEPH_POOL`);
 it works in its own RADOS namespaces and cleans up. `make e2e` runs `examples/lab.yaml` and
 leaves a throwaway `e2e-<timestamp>.example` domain in the meta pool.
+
+## systemd instances on the box
+
+The lab box runs every mode as its own systemd instance from `/etc/dovetail/dovetail.yaml`
+(`dovetail@lmtp`, `dovetail@imap`, `dovetail@pop3`, `dovetail@jmap`, `dovetail@admin`,
+`dovetail@postfix`, `dovetail@worker`; grouped in `dovetail.target`), as user `dovetail`,
+binary `/usr/local/bin/dovetail`. Management ports are 9091..9097 in that order
+(`/etc/dovetail/instances/<mode>.env`).
+
+```
+make deploy                 # build locally, copy to /usr/local/bin, restart dovetail.target
+make deploy-units           # (re)install unit files, env files, example config
+ssh root@2a14:9b80::3143 'systemctl status dovetail.target; journalctl -u "dovetail@*" -f'
+ssh root@2a14:9b80::3143 'cd /root/dovetail && E2E_ATTACH=1 BIN=/usr/local/bin/dovetail scripts/e2e.sh /etc/dovetail/dovetail.yaml'
+```
