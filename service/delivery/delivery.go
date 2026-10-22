@@ -442,7 +442,10 @@ func (s *Service) deliver(ctx context.Context, req Request) ([]Delivered, error)
 	actx := actor.With(ctx, sys)
 	var out []Delivered
 	for _, t := range targets {
-		root, err := s.idx.EnsureRoot(ctx, t.MailboxID)
+		if err := s.idx.EnsureExists(ctx, t.MailboxID); err != nil {
+			return out, err
+		}
+		root, err := s.idx.GetRootCached(ctx, t.MailboxID, s.cfg.QuotaStaleness)
 		if err != nil {
 			return out, err
 		}
@@ -503,7 +506,7 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 	if err != nil {
 		return Delivered{}, fmt.Errorf("delivery: parse: %w", err)
 	}
-	if _, err := s.idx.EnsureRoot(ctx, mb); err != nil {
+	if err := s.idx.EnsureExists(ctx, mb); err != nil {
 		return Delivered{}, err
 	}
 	if internalDate.IsZero() {

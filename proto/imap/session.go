@@ -151,12 +151,21 @@ func (s *session) root() (index.Root, error) {
 	return root, nil
 }
 
+// folder resolves a mailbox name. It first consults the root as this
+// process last saw it (no read); only a miss re-reads, so a stream of
+// APPENDs costs no root reads for name resolution.
 func (s *session) folder(name string) (index.Root, *index.Folder, error) {
+	n := normalizeName(name)
+	if root, err := s.srv.mb.RootCached(s.ctx, s.mb, 5*time.Second); err == nil {
+		if f := root.FolderByName(n); f != nil {
+			return root, f, nil
+		}
+	}
 	root, err := s.root()
 	if err != nil {
 		return root, nil, err
 	}
-	f := root.FolderByName(normalizeName(name))
+	f := root.FolderByName(n)
 	if f == nil {
 		return root, nil, noErr(imap.ResponseCodeNonExistent, "No such mailbox")
 	}

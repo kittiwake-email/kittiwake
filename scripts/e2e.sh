@@ -103,6 +103,7 @@ st, exp = req("POST", adminbase + "/v1/admin/mailboxes/%s/export" % MB, {"gzip":
 print("admin: export scheduled task", exp["task_id"][:8])
 st, info = req("GET", adminbase + "/v1/admin/mailboxes/%s" % MB, token=TOKEN)
 assert info["usage"]["messages"] == 2, info["usage"]
+import time; time.sleep(2.5)  # audit records are batched and flushed every second
 st, aud = req("GET", adminbase + "/v1/admin/audit?mailbox=%s&limit=200" % MB, token=TOKEN)
 acts = sorted({a["action"] for a in aud["items"]}); print("audit actions:", acts)
 assert "deliver" in acts and "login" in acts

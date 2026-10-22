@@ -122,6 +122,29 @@ func (s *Service) Root(ctx context.Context, mb uuid.UUID) (index.Root, error) {
 	return s.idx.EnsureRoot(ctx, mb)
 }
 
+// RootCached returns the root as last seen by this process when younger
+// than maxAge (folder-name resolution, where staleness is harmless because
+// a miss falls back to a fresh read).
+func (s *Service) RootCached(ctx context.Context, mb uuid.UUID, maxAge time.Duration) (index.Root, error) {
+	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
+		return index.Root{}, s.deny(ctx, mb, "list", "", err)
+	}
+	return s.idx.GetRootCached(ctx, mb, maxAge)
+}
+
+// ListDesc lists records newest first, starting below beforeUID (0 = the
+// newest). The first page is one omap read however large the folder.
+func (s *Service) ListDesc(ctx context.Context, mb uuid.UUID, folderID string, beforeUID uint32, max int) ([]index.Record, bool, error) {
+	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
+		return nil, false, s.deny(ctx, mb, "list", folderID, err)
+	}
+	recs, more, err := s.idx.ListFolderDesc(ctx, mb, folderID, beforeUID, max)
+	if err != nil {
+		return nil, false, mapIndexErr(err)
+	}
+	return recs, more, nil
+}
+
 // CreateFolder creates a folder.
 func (s *Service) CreateFolder(ctx context.Context, mb uuid.UUID, name string) (*index.Folder, error) {
 	if _, err := s.authorize(ctx, mb, identity.RoleWrite, true); err != nil {

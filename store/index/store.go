@@ -300,6 +300,16 @@ func (s *Store) EnsureRoot(ctx context.Context, mb uuid.UUID) (Root, error) {
 	return r, nil
 }
 
+// EnsureExists is EnsureRoot without the read when this process has seen
+// the root before (delivery only needs existence; Append re-validates).
+func (s *Store) EnsureExists(ctx context.Context, mb uuid.UUID) error {
+	if _, _, ok := s.cached(mb); ok {
+		return nil
+	}
+	_, err := s.EnsureRoot(ctx, mb)
+	return err
+}
+
 // Exists reports whether the mailbox index exists.
 func (s *Store) Exists(ctx context.Context, mb uuid.UUID) (bool, error) {
 	_, err := s.io.Stat(ctx, rootOID(mb))

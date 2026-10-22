@@ -93,65 +93,207 @@ func (sel *selected) removeUID(uid uint32) {
 // sync refreshes the snapshot from the index and emits untagged updates.
 // When allowExpunge is false, vanished messages stay in the snapshot until
 // a later sync may report them.
+// sync brings the session up to date with one change-log read (which
+// also yields the current mailbox modseq): only records that changed are
+// read. A log horizon miss or an implausibly large delta falls back to a
+// full re-list.
 func (sel *selected) sync(w *imapserver.UpdateWriter, allowExpunge bool) error {
-	root, err := sel.s.root()
+	flagChanged, added, current, ok, err := sel.applyChanges()
 	if err != nil {
 		return err
 	}
-	f := root.FolderByID(sel.folderID)
-	if f == nil {
-		return noErr(imap.ResponseCodeNonExistent, "Selected mailbox was deleted")
-	}
-	if f.ModSeq != sel.modseq {
-		recs, err := sel.listAll()
+	if !ok {
+		root, err := sel.s.root()
 		if err != nil {
 			return err
 		}
-		fresh := make(map[uint32]index.Record, len(recs))
-		for _, r := range recs {
-			fresh[r.UID] = r
+		if root.FolderByID(sel.folderID) == nil {
+			return noErr(imap.ResponseCodeNonExistent, "Selected mailbox was deleted")
 		}
-		var flagChanged, added []uint32
-		for _, uid := range sel.uids {
-			old, ok := sel.recs[uid]
-			if !ok {
-				continue // already pending expunge
+		if flagChanged, added, err = sel.relist(); err != nil {
+			return err
+		}
+		current = root.ModSeq
+	}
+	sel.modseq = current
+	return sel.emit(w, flagChanged, added, allowExpunge)
+}
+
+// applyChanges folds the mailbox change log since the session's modseq
+// into the session state. ok=false asks for a full re-list.
+func (sel *selected) applyChanges() (flagChanged, added []uint32, current uint64, ok bool, err error) {
+	const maxDelta = 2000
+	since := sel.modseq
+	var changes []index.Change
+	for {
+		ch, more, cur, err := sel.s.srv.mb.Changes(sel.s.ctx, sel.s.mb, since, 1000)
+		if err != nil {
+			if errors.Is(err, mailbox.ErrNoHorizon) {
+				return nil, nil, 0, false, nil
 			}
-			nr, exists := fresh[uid]
-			switch {
-			case !exists:
-				sel.vanished = append(sel.vanished, uid)
-				delete(sel.recs, uid)
-			case nr.ModSeq != old.ModSeq:
-				sel.recs[uid] = nr
-				flagChanged = append(flagChanged, uid)
+			return nil, nil, 0, false, sel.s.srv.mapErr(err, "sync")
+		}
+		current = cur
+		changes = append(changes, ch...)
+		if len(changes) > maxDelta {
+			return nil, nil, 0, false, nil
+		}
+		if !more || len(ch) == 0 {
+			break
+		}
+		since = ch[len(ch)-1].ModSeq
+	}
+	if len(changes) == 0 {
+		return nil, nil, current, true, nil
+	}
+	for _, c := range changes {
+		if c.Kind == index.KindFolder && c.Op == index.OpDestroyed && c.ID == sel.folderID {
+			return nil, nil, 0, false, nil
+		}
+	}
+	newUIDs := map[uint32]bool{}
+	updUIDs := map[uint32]bool{}
+	for _, c := range changes {
+		if c.Kind != index.KindEmail || c.FolderID != sel.folderID {
+			// A message moved out of this folder is logged under its new
+			// folder; it shows up as a missing record below.
+			continue
+		}
+		switch c.Op {
+		case index.OpCreated:
+			if _, known := sel.recs[c.UID]; !known {
+				newUIDs[c.UID] = true
+			}
+		case index.OpUpdated:
+			if _, known := sel.recs[c.UID]; known {
+				updUIDs[c.UID] = true
+			} else {
+				newUIDs[c.UID] = true // moved into this folder
+			}
+		case index.OpDestroyed:
+			if _, known := sel.recs[c.UID]; known {
+				sel.vanished = append(sel.vanished, c.UID)
+				delete(sel.recs, c.UID)
 			}
 		}
-		known := map[uint32]bool{}
-		for _, uid := range sel.uids {
-			known[uid] = true
-		}
-		for _, r := range recs {
-			if !known[r.UID] {
-				added = append(added, r.UID)
-				sel.recs[r.UID] = r
-			}
-		}
-		sort.Slice(added, func(i, j int) bool { return added[i] < added[j] })
-		sel.uids = append(sel.uids, added...)
-		sort.Slice(sel.uids, func(i, j int) bool { return sel.uids[i] < sel.uids[j] })
-		sel.modseq = f.ModSeq
-		for _, uid := range flagChanged {
-			if seq := sel.seqOf(uid); seq > 0 {
-				if err := w.WriteMessageFlags(seq, imap.UID(uid), toFlags(sel.recs[uid].Flags)); err != nil {
-					return err
+	}
+	// Messages moved away appear as "updated" under another folder; detect
+	// those by re-reading records we have not already seen change.
+	for _, c := range changes {
+		if c.Kind == index.KindEmail && c.FolderID != sel.folderID && c.Op == index.OpUpdated {
+			for uid, r := range sel.recs {
+				if r.MessageID.String() == c.ID {
+					sel.vanished = append(sel.vanished, uid)
+					delete(sel.recs, uid)
+					delete(updUIDs, uid)
+					break
 				}
 			}
 		}
-		if len(added) > 0 {
-			if err := w.WriteNumMessages(uint32(len(sel.uids))); err != nil {
+	}
+	// New records: one newest-first read down to the lowest new UID.
+	if len(newUIDs) > 0 {
+		low := uint32(0)
+		for uid := range newUIDs {
+			if low == 0 || uid < low {
+				low = uid
+			}
+		}
+		before := uint32(0)
+		for {
+			recs, more, err := sel.s.srv.mb.ListDesc(sel.s.ctx, sel.s.mb, sel.folderID, before, 500)
+			if err != nil {
+				return nil, nil, 0, false, sel.s.srv.mapErr(err, "sync")
+			}
+			done := false
+			for _, r := range recs {
+				if newUIDs[r.UID] {
+					sel.recs[r.UID] = r
+					added = append(added, r.UID)
+				}
+				if r.UID <= low {
+					done = true
+					break
+				}
+				before = r.UID
+			}
+			if done || !more || len(recs) == 0 {
+				break
+			}
+		}
+	}
+	for uid := range updUIDs {
+		r, err := sel.s.srv.mb.GetByUID(sel.s.ctx, sel.s.mb, sel.folderID, uid)
+		if err != nil {
+			if errors.Is(err, mailbox.ErrNotFound) {
+				sel.vanished = append(sel.vanished, uid)
+				delete(sel.recs, uid)
+				continue
+			}
+			return nil, nil, 0, false, sel.s.srv.mapErr(err, "sync")
+		}
+		sel.recs[uid] = r
+		flagChanged = append(flagChanged, uid)
+	}
+	sort.Slice(added, func(i, j int) bool { return added[i] < added[j] })
+	sel.uids = append(sel.uids, added...)
+	sort.Slice(sel.uids, func(i, j int) bool { return sel.uids[i] < sel.uids[j] })
+	return flagChanged, added, current, true, nil
+}
+
+// relist is the full fallback: read the whole folder and diff.
+func (sel *selected) relist() (flagChanged, added []uint32, err error) {
+	recs, err := sel.listAll()
+	if err != nil {
+		return nil, nil, err
+	}
+	fresh := make(map[uint32]index.Record, len(recs))
+	for _, r := range recs {
+		fresh[r.UID] = r
+	}
+	for _, uid := range sel.uids {
+		old, ok := sel.recs[uid]
+		if !ok {
+			continue // already pending expunge
+		}
+		nr, exists := fresh[uid]
+		switch {
+		case !exists:
+			sel.vanished = append(sel.vanished, uid)
+			delete(sel.recs, uid)
+		case nr.ModSeq != old.ModSeq:
+			sel.recs[uid] = nr
+			flagChanged = append(flagChanged, uid)
+		}
+	}
+	known := map[uint32]bool{}
+	for _, uid := range sel.uids {
+		known[uid] = true
+	}
+	for _, r := range recs {
+		if !known[r.UID] {
+			added = append(added, r.UID)
+			sel.recs[r.UID] = r
+		}
+	}
+	sort.Slice(added, func(i, j int) bool { return added[i] < added[j] })
+	sel.uids = append(sel.uids, added...)
+	sort.Slice(sel.uids, func(i, j int) bool { return sel.uids[i] < sel.uids[j] })
+	return flagChanged, added, nil
+}
+
+// emit writes the untagged responses for a sync.
+func (sel *selected) emit(w *imapserver.UpdateWriter, flagChanged, added []uint32, allowExpunge bool) error {
+	for _, uid := range flagChanged {
+		if seq := sel.seqOf(uid); seq > 0 {
+			if err := w.WriteMessageFlags(seq, imap.UID(uid), toFlags(sel.recs[uid].Flags)); err != nil {
 				return err
 			}
+		}
+	}
+	if len(added) > 0 {
+		if err := w.WriteNumMessages(uint32(len(sel.uids))); err != nil {
+			return err
 		}
 	}
 	if allowExpunge && len(sel.vanished) > 0 {
