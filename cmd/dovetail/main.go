@@ -36,7 +36,7 @@ func main() {
 	case "admin":
 		err = runAdmin(os.Args[2:])
 	case "version", "--version", "-v":
-		fmt.Println("dovetail", app.Version)
+		err = runVersion(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -59,8 +59,10 @@ commands:
   admin         administrative operations against RADOS (see: dovetail admin help)
   version       print the version (also: -v, --version)
 
-flags (serve, check-config, admin):
-  -c, --config <file>   config file (default $DOVETAIL_CONFIG or /etc/dovetail/dovetail.yaml)`)
+flags:
+  -c, --config <file>   config file (serve, check-config, admin; default $DOVETAIL_CONFIG
+                        or /etc/dovetail/dovetail.yaml)
+  -o, --output <fmt>    plain (default) or json (check-config, admin, version)`)
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -105,18 +107,36 @@ func seedAccount(a *app.App, spec string) error {
 	return nil
 }
 
+func runVersion(args []string) error {
+	fs := newFlagSet("version")
+	of := outputFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := setOutput(*of); err != nil {
+		return err
+	}
+	return emit(map[string]string{"version": app.Version}, func() { fmt.Println("dovetail", app.Version) })
+}
+
 func runCheckConfig(args []string) error {
 	fs := newFlagSet("check-config")
 	cfgPath := configFlag(fs)
+	of := outputFlag(fs)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := setOutput(*of); err != nil {
 		return err
 	}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("config ok: modes=%v backend=%s pools=%+v\n", cfg.Modes, cfg.Ceph.Backend, cfg.Ceph.Pools)
-	return nil
+	return emit(map[string]any{"ok": true, "modes": cfg.Modes, "backend": cfg.Ceph.Backend, "pools": cfg.Ceph.Pools},
+		func() {
+			fmt.Printf("config ok: modes=%v backend=%s pools=%+v\n", cfg.Modes, cfg.Ceph.Backend, cfg.Ceph.Pools)
+		})
 }
 
 func runServe(args []string) error {

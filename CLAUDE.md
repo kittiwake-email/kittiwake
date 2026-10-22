@@ -26,6 +26,7 @@ make deploy           # build here, push binary to the lab box, restart its syst
                       # (dovetail@<mode>, one process per mode; see contrib/systemd, TESTENV.md)
 bin/dovetail check-config -c examples/dovetail.yaml
 bin/dovetail admin -c <cfg> bootstrap --username root@example.org --password-stdin
+bin/dovetail admin -c <cfg> -o json mailbox list     # -o plain|json on admin, check-config, version
 ```
 
 Lab: `TESTENV.md` describes the Ceph test cluster and the `dovetail` box (IPv6-only, no

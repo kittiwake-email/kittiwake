@@ -20,7 +20,7 @@ import (
 )
 
 func adminUsage() {
-	fmt.Fprintln(os.Stderr, `usage: dovetail admin -c <file> <subcommand> [flags]
+	fmt.Fprintln(os.Stderr, `usage: dovetail admin -c <file> [-o plain|json] <subcommand> [flags]
 
 subcommands:
   bootstrap   --username root@example.org [--password-stdin] [--token-lifetime 24h] [--comment text]
@@ -45,7 +45,11 @@ system actor; every action is audited in the admin log.`)
 func runAdmin(args []string) error {
 	fs := newFlagSet("admin")
 	cfgPath := configFlag(fs)
+	of := outputFlag(fs)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := setOutput(*of); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -56,6 +60,11 @@ func runAdmin(args []string) error {
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		return err
+	}
+	// The CLI is interactive: only warnings and errors on stderr (audit
+	// records still land in RADOS; the structured log stream is for daemons).
+	if cfg.Log.Level == "info" || cfg.Log.Level == "debug" {
+		cfg.Log.Level = "warn"
 	}
 	log := app.NewLogger(cfg.Log)
 	client, err := app.Connect(cfg.Ceph)
@@ -78,7 +87,7 @@ func runAdmin(args []string) error {
 		if err != nil {
 			return err
 		}
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(os.Stdout) // always JSON: this is the dump format
 		enc.SetIndent("", "  ")
 		return enc.Encode(exp)
 	case "import":
@@ -93,8 +102,7 @@ func runAdmin(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(summary)
-		return nil
+		return emit(map[string]string{"summary": summary}, func() { fmt.Println(summary) })
 	case "domain":
 		return cmdDomain(ctx, adm, subargs)
 	case "mailbox":
@@ -127,11 +135,7 @@ func readPasswordStdin() (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
+func printJSON(v any) error { return emit(v, nil) }
 
 func cmdBootstrap(ctx context.Context, adm *admin.Service, args []string) error {
 	fs := newFlagSet("bootstrap")
@@ -156,11 +160,15 @@ func cmdBootstrap(ctx context.Context, adm *admin.Service, args []string) error 
 	if err != nil {
 		return err
 	}
-	fmt.Printf("admin account: %s (%s)\n", res.Account.Username, res.Account.ID)
-	fmt.Printf("token id:      %s (expires %s)\n", res.Token.ID, res.Token.ExpiresAt.Format(time.RFC3339))
-	fmt.Printf("token secret:  %s\n", res.Secret)
-	fmt.Println("The secret is shown once. Use it as: Authorization: Bearer <secret>")
-	return nil
+	return emit(map[string]any{
+		"account": res.Account.Username, "account_id": res.Account.ID, "token_id": res.Token.ID,
+		"expires_at": res.Token.ExpiresAt, "token_secret": res.Secret,
+	}, func() {
+		fmt.Printf("admin account: %s (%s)\n", res.Account.Username, res.Account.ID)
+		fmt.Printf("token id:      %s (expires %s)\n", res.Token.ID, res.Token.ExpiresAt.Format(time.RFC3339))
+		fmt.Printf("token secret:  %s\n", res.Secret)
+		fmt.Println("The secret is shown once. Use it as: Authorization: Bearer <secret>")
+	})
 }
 
 func cmdDomain(ctx context.Context, adm *admin.Service, args []string) error {
@@ -182,10 +190,14 @@ func cmdDomain(ctx context.Context, adm *admin.Service, args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, n := range names {
-			fmt.Println(n)
+		if names == nil {
+			names = []string{}
 		}
-		return nil
+		return emit(names, func() {
+			for _, n := range names {
+				fmt.Println(n)
+			}
+		})
 	case "enable", "disable":
 		if len(args) != 2 {
 			return fmt.Errorf("domain %s <name>", args[0])
@@ -224,15 +236,35 @@ func cmdMailbox(ctx context.Context, a *app.App, args []string) error {
 		}
 		return printJSON(m)
 	case "list":
-		fmt.Printf("%-36s  %-8s  %-5s  %s\n", "MAILBOX", "ENABLED", "HOLD", "ACCOUNTS")
-		return adm.ListMailboxes(ctx, func(id uuid.UUID) error {
+		type row struct {
+			ID       uuid.UUID            `json:"id"`
+			Enabled  bool                 `json:"enabled"`
+			OnHold   bool                 `json:"on_hold"`
+			Quota    identity.QuotaLimits `json:"quota"`
+			Accounts []string             `json:"accounts"`
+		}
+		rows := []row{}
+		err := adm.ListMailboxes(ctx, func(id uuid.UUID) error {
 			m, err := adm.GetMailbox(ctx, id)
 			if err != nil {
 				return nil
 			}
 			accts, _, _ := adm.ListMailboxAccounts(ctx, id)
-			fmt.Printf("%-36s  %-8v  %-5v  %s\n", id, m.Enabled, m.Hold != nil, strings.Join(accts, ","))
+			if accts == nil {
+				accts = []string{}
+			}
+			rows = append(rows, row{ID: id, Enabled: m.Enabled, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts})
 			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return emit(rows, func() {
+			var cells [][]string
+			for _, r := range rows {
+				cells = append(cells, []string{r.ID.String(), fmt.Sprint(r.Enabled), fmt.Sprint(r.OnHold), strings.Join(r.Accounts, ",")})
+			}
+			table([]string{"MAILBOX", "ENABLED", "HOLD", "ACCOUNTS"}, cells)
 		})
 	case "inspect":
 		id, err := parse()
@@ -283,7 +315,7 @@ func cmdAccount(ctx context.Context, adm *admin.Service, args []string) error {
 				return err
 			}
 		}
-		fmt.Printf("%-40s  %-36s  %-8s  %s\n", "USERNAME", "MAILBOX", "ENABLED", "ROLES")
+		rows := []map[string]any{}
 		for _, d := range domains {
 			after := ""
 			for {
@@ -297,18 +329,24 @@ func cmdAccount(ctx context.Context, adm *admin.Service, args []string) error {
 					if err != nil {
 						continue
 					}
-					mb := "-"
-					if a.MailboxID != uuid.Nil {
-						mb = a.MailboxID.String()
-					}
-					fmt.Printf("%-40s  %-36s  %-8v  %s\n", a.Username, mb, a.Enabled, strings.Join(a.Roles, ","))
+					rows = append(rows, redact(a))
 				}
 				if !more {
 					break
 				}
 			}
 		}
-		return nil
+		return emit(rows, func() {
+			var cells [][]string
+			for _, r := range rows {
+				mb := "-"
+				if id, ok := r["mailbox_id"].(uuid.UUID); ok && id != uuid.Nil {
+					mb = id.String()
+				}
+				cells = append(cells, []string{r["username"].(string), mb, fmt.Sprint(r["enabled"]), strings.Join(r["roles"].([]string), ",")})
+			}
+			table([]string{"USERNAME", "MAILBOX", "ENABLED", "ROLES"}, cells)
+		})
 	case "create":
 		fs := newFlagSet("account create")
 		username := fs.String("username", "", "username (e-mail address)")
@@ -445,9 +483,10 @@ func cmdToken(ctx context.Context, adm *admin.Service, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("token id:     %s (expires %s)\n", t.ID, t.ExpiresAt.Format(time.RFC3339))
-	fmt.Printf("token secret: %s\n", secret)
-	return nil
+	return emit(map[string]any{"token_id": t.ID, "expires_at": t.ExpiresAt, "roles": t.Roles, "token_secret": secret}, func() {
+		fmt.Printf("token id:     %s (expires %s)\n", t.ID, t.ExpiresAt.Format(time.RFC3339))
+		fmt.Printf("token secret: %s\n", secret)
+	})
 }
 
 func cmdHold(ctx context.Context, adm *admin.Service, args []string) error {
@@ -522,11 +561,12 @@ func cmdExportMailbox(ctx context.Context, a *app.App, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("exported %d messages (%d bytes) in %d folders, %d audit records, %d errors -> %s\n", sum.Messages, sum.Bytes, sum.Folders, sum.Audit, len(sum.Errors), *out)
-	for _, e := range sum.Errors {
-		fmt.Println("  error:", e)
-	}
-	return nil
+	return emit(map[string]any{"file": *out, "messages": sum.Messages, "bytes": sum.Bytes, "folders": sum.Folders, "audit": sum.Audit, "errors": sum.Errors}, func() {
+		fmt.Printf("exported %d messages (%d bytes) in %d folders, %d audit records, %d errors -> %s\n", sum.Messages, sum.Bytes, sum.Folders, sum.Audit, len(sum.Errors), *out)
+		for _, e := range sum.Errors {
+			fmt.Println("  error:", e)
+		}
+	})
 }
 
 func cmdImportMailbox(ctx context.Context, a *app.App, args []string) error {
@@ -560,9 +600,10 @@ func cmdImportMailbox(ctx context.Context, a *app.App, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("imported %d messages (%d bytes) into %d folders, %d errors\n", sum.Messages, sum.Bytes, sum.Folders, len(sum.Errors))
-	for _, e := range sum.Errors {
-		fmt.Println("  error:", e)
-	}
-	return nil
+	return emit(map[string]any{"messages": sum.Messages, "bytes": sum.Bytes, "folders": sum.Folders, "errors": sum.Errors}, func() {
+		fmt.Printf("imported %d messages (%d bytes) into %d folders, %d errors\n", sum.Messages, sum.Bytes, sum.Folders, len(sum.Errors))
+		for _, e := range sum.Errors {
+			fmt.Println("  error:", e)
+		}
+	})
 }
