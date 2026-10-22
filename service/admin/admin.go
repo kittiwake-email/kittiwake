@@ -378,16 +378,23 @@ func (s *Service) EmptyMailbox(ctx context.Context, id uuid.UUID) (messages, fol
 		}
 	}
 	sort.Slice(extra, func(i, j int) bool { return len(extra[i].Name) > len(extra[j].Name) })
+	kept := 0
 	for _, f := range extra {
-		if err := s.idx.DeleteFolder(ctx, id, f.ID); err != nil && !errors.Is(err, index.ErrNotFound) {
+		err := s.idx.DeleteFolder(ctx, id, f.ID)
+		switch {
+		case err == nil:
+			folders++
+		case errors.Is(err, index.ErrNotFound):
+		case errors.Is(err, index.ErrNotEmpty):
+			kept++ // a message arrived meanwhile (a sync is running): leave the folder
+		default:
 			return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
 		}
-		folders++
 	}
 	if s.queue != nil {
 		_, _ = s.queue.Enqueue(ctx, TaskPurgeTrash, map[string]any{"mailbox": id}, time.Time{})
 	}
-	s.ok(ctx, id, "mailbox-empty", id.String(), fmt.Sprintf("messages=%d folders=%d", messages, folders))
+	s.ok(ctx, id, "mailbox-empty", id.String(), fmt.Sprintf("messages=%d folders=%d kept=%d", messages, folders, kept))
 	return messages, folders, nil
 }
 
