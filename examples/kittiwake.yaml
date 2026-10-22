@@ -16,6 +16,15 @@ database:
   # read_dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@unix(/run/mysqld/mysqld.sock)/kittiwake"
   read_stickiness: 2s
 
+# IMAP namespaces. Folders live in one personal namespace with "/" as delimiter.
+# A compatibility namespace maps the same folders under an old layout so clients
+# that were configured for Dovecot or Courier ("IMAP path prefix: INBOX") keep
+# working after migration: "INBOX.Projects.2026" is "Projects/2026".
+imap:
+  compat_namespace:
+    prefix: "INBOX."
+    delimiter: "."
+
 # Node registry: every process registers each mode it runs (address = advertise
 # host + the mode's listener port) and refreshes it every heartbeat, so other
 # daemons find e.g. search nodes and operators see what runs where

@@ -12,10 +12,10 @@ import (
 
 // mailboxObject converts a folder to a JMAP Mailbox object.
 func mailboxObject(root *index.Root, f *index.Folder, readOnly bool) map[string]any {
-	name := f.Name
+	name := index.UnescapeComponent(f.Name)
 	var parentID any
 	if i := strings.LastIndex(f.Name, index.Delimiter); i > 0 {
-		name = f.Name[i+1:]
+		name = index.UnescapeComponent(f.Name[i+1:])
 		if p := root.FolderByName(f.Name[:i]); p != nil {
 			parentID = p.ID
 		}
@@ -307,9 +307,9 @@ func (s *Server) mailboxQuery(ctx context.Context, _ *requestState, args map[str
 
 func leafName(name string) string {
 	if i := strings.LastIndex(name, index.Delimiter); i >= 0 {
-		return name[i+1:]
+		return index.UnescapeComponent(name[i+1:])
 	}
-	return name
+	return index.UnescapeComponent(name)
 }
 
 func matchMailbox(root *index.Root, f *index.Folder, filter map[string]any) bool {
@@ -410,10 +410,11 @@ func (s *Server) mailboxSet(ctx context.Context, st *requestState, args map[stri
 			continue
 		}
 		name, _ := obj["name"].(string)
-		if strings.TrimSpace(name) == "" || strings.Contains(name, index.Delimiter) {
+		if strings.TrimSpace(name) == "" {
 			notCreated[cid] = setError("invalidProperties", "invalid name", "name")
 			continue
 		}
+		name = index.EscapeComponent(name) // a "/" in the name is a character, not hierarchy
 		full := name
 		if pid, ok := obj["parentId"].(string); ok && pid != "" {
 			pid = st.resolveCreatedID(pid)
@@ -471,7 +472,10 @@ func (s *Server) mailboxSet(ctx context.Context, st *requestState, args map[stri
 			notUpdated[id] = setError("notFound", "")
 			continue
 		}
-		newLeaf := leafName(f.Name)
+		newLeaf := f.Name
+		if i := strings.LastIndex(f.Name, index.Delimiter); i >= 0 {
+			newLeaf = f.Name[i+1:]
+		}
 		parentName := ""
 		if i := strings.LastIndex(f.Name, index.Delimiter); i > 0 {
 			parentName = f.Name[:i]
@@ -483,11 +487,11 @@ func (s *Server) mailboxSet(ctx context.Context, st *requestState, args map[stri
 			switch k {
 			case "name":
 				n, ok := v.(string)
-				if !ok || strings.TrimSpace(n) == "" || strings.Contains(n, index.Delimiter) {
+				if !ok || strings.TrimSpace(n) == "" {
 					notUpdated[id] = setError("invalidProperties", "invalid name", "name")
 					bad = true
 				}
-				newLeaf, rename = n, true
+				newLeaf, rename = index.EscapeComponent(n), true
 			case "parentId":
 				if v == nil {
 					parentName = ""

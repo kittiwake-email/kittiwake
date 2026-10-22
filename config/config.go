@@ -26,6 +26,7 @@ type Config struct {
 	Quota    Quota    `yaml:"quota"`
 	Database Database `yaml:"database"`
 	Node     Node     `yaml:"node"`
+	IMAP     IMAP     `yaml:"imap"`
 	Session  Session  `yaml:"session"`
 	Cache    Cache    `yaml:"cache"`
 	Audit    Audit    `yaml:"audit"`
@@ -178,6 +179,21 @@ type Node struct {
 	Heartbeat time.Duration `yaml:"heartbeat"`
 }
 
+// IMAP configures the IMAP adapter beyond its listener.
+type IMAP struct {
+	// CompatNamespace advertises a second personal namespace mapping onto
+	// the same folders, for clients configured for a Dovecot or Courier
+	// layout (typically prefix "INBOX." with delimiter "."). Off when the
+	// prefix is empty. The prefix must end with the delimiter.
+	CompatNamespace CompatNamespace `yaml:"compat_namespace"`
+}
+
+// CompatNamespace is an IMAP namespace alias.
+type CompatNamespace struct {
+	Prefix    string `yaml:"prefix"`
+	Delimiter string `yaml:"delimiter"`
+}
+
 // Audit configures audit retention and detail.
 type Audit struct {
 	Retention time.Duration `yaml:"retention"`
@@ -320,6 +336,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Database.ReadDSN != "" && c.Database.DSN == "" {
 		return errors.New("config: database.read_dsn needs database.dsn")
+	}
+	if p := c.IMAP.CompatNamespace.Prefix; p != "" {
+		d := c.IMAP.CompatNamespace.Delimiter
+		if len(d) != 1 || d == "\\" {
+			return errors.New("config: imap.compat_namespace.delimiter must be one character")
+		}
+		if !strings.HasSuffix(p, d) {
+			return fmt.Errorf("config: imap.compat_namespace.prefix %q must end with the delimiter %q", p, d)
+		}
 	}
 	if c.Node.Heartbeat <= 0 {
 		return errors.New("config: node.heartbeat must be positive")

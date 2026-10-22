@@ -6,6 +6,8 @@ package index
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +37,51 @@ const (
 	RoleTrash   = "trash"
 	RoleArchive = "archive"
 )
+
+// A folder's Name is a Delimiter-separated path. A component that itself
+// contains the delimiter (or a backslash) is stored in escaped form, the
+// way Dovecot's listescape plugin does it: "\2f" for "/" and "\5c" for
+// "\". IMAP passes the stored form through unchanged, which keeps old
+// clients and Dovecot-migrated folder names working; JMAP shows the
+// decoded name.
+
+// EscapeComponent encodes a single display name as a path component.
+func EscapeComponent(s string) string {
+	if !strings.ContainsAny(s, Delimiter+"\\") {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString("\\5c")
+		case rune(Delimiter[0]):
+			b.WriteString("\\2f")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// UnescapeComponent decodes "\xx" sequences; malformed ones stay as is.
+func UnescapeComponent(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+2 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
 
 // Delimiter separates folder path components in Name.
 const Delimiter = "/"

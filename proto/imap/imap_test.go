@@ -48,7 +48,9 @@ const (
 	appPass = "app-password-1234"
 )
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T) *fixture { return newFixtureCfg(t, Config{Hostname: "test"}) }
+
+func newFixtureCfg(t *testing.T, cfg Config) *fixture {
 	t.Helper()
 	c := rados.NewMemoryClient()
 	meta, _ := c.Pool("meta")
@@ -71,7 +73,7 @@ func newFixture(t *testing.T) *fixture {
 		Username: user, MailboxID: f.mb.ID, Enabled: true, Roles: []string{"read", "write", "send"},
 		Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}, {Hash: ah, Kind: identity.PasswordApplication}},
 	})
-	srv := New(Config{Hostname: "test"}, f.auth, mbsvc, f.del, log)
+	srv := New(cfg, f.auth, mbsvc, f.del, log)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -510,4 +512,101 @@ func rendered(t *testing.T, raw string) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+// Old clients configured for a Dovecot/Courier layout ("INBOX." prefix,
+// "." delimiter) keep working through the compatibility namespace, which
+// maps onto the same folders.
+func TestCompatNamespace(t *testing.T) {
+	f := newFixtureCfg(t, Config{Hostname: "test", CompatPrefix: "INBOX.", CompatDelim: "."})
+	c := f.login()
+	ns, err := c.Namespace().Wait()
+	if err != nil || len(ns.Personal) != 2 || ns.Personal[1].Prefix != "INBOX." || ns.Personal[1].Delim != '.' {
+		t.Fatalf("namespace: %+v %v", ns, err)
+	}
+	// Create through the old layout, see it in the canonical one.
+	if err := c.Create("INBOX.Projects.2026", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := c.List("", "Projects/*", nil).Collect()
+	if len(list) != 1 || list[0].Mailbox != "Projects/2026" || list[0].Delim != '/' {
+		t.Fatalf("canonical view: %+v", list)
+	}
+	// The default view does not show the compat names ...
+	list, _ = c.List("", "*", nil).Collect()
+	for _, l := range list {
+		if strings.HasPrefix(l.Mailbox, "INBOX.") {
+			t.Fatalf("compat name leaked into the default view: %s", l.Mailbox)
+		}
+	}
+	// ... but a pattern under the prefix does, with the compat delimiter.
+	list, _ = c.List("", "INBOX.*", nil).Collect()
+	names := map[string]rune{}
+	for _, l := range list {
+		names[l.Mailbox] = l.Delim
+	}
+	if names["INBOX.Projects.2026"] != '.' || names["INBOX.Sent"] != '.' || names["INBOX.Projects"] != '.' {
+		t.Fatalf("compat view: %v", names)
+	}
+	list, _ = c.List("INBOX.", "%", nil).Collect()
+	if len(list) == 0 {
+		t.Fatal("reference form of the compat listing")
+	}
+	// SELECT, STATUS, APPEND and subscriptions by compat name.
+	if _, err := c.Select("INBOX.Projects.2026", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Status("INBOX.Sent", &imap.StatusOptions{NumMessages: true}).Wait()
+	if err != nil || st.Mailbox != "INBOX.Sent" {
+		t.Fatalf("status: %+v %v", st, err)
+	}
+	if err := c.Unsubscribe("INBOX.Projects.2026").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = c.List("", "INBOX.*", &imap.ListOptions{SelectSubscribed: true}).Collect()
+	for _, l := range list {
+		if l.Mailbox == "INBOX.Projects.2026" {
+			t.Fatal("unsubscribe through the compat name did not apply")
+		}
+	}
+	// INBOX itself is INBOX in both views; "INBOX." alone is INBOX too.
+	if _, err := c.Select("INBOX.", nil).Wait(); err != nil {
+		t.Fatalf("select INBOX.: %v", err)
+	}
+	// A folder whose name contains the compat delimiter round-trips escaped.
+	if err := c.Create("Release 1.0", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = c.List("", "INBOX.Release*", nil).Collect()
+	if len(list) != 1 || list[0].Mailbox != "INBOX.Release 1\\2e0" {
+		t.Fatalf("escaped compat name: %q", list[0].Mailbox)
+	}
+	if _, err := c.Select("INBOX.Release 1\\2e0", nil).Wait(); err != nil {
+		t.Fatalf("select escaped compat name: %v", err)
+	}
+	// Rename within the compat view.
+	if err := c.Rename("INBOX.Projects.2026", "INBOX.Archive.2026", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = c.List("", "Archive/*", nil).Collect()
+	if len(list) != 1 || list[0].Mailbox != "Archive/2026" {
+		t.Fatalf("after rename: %+v", list)
+	}
+}
+
+// A "/" inside a folder name is a character, stored escaped the way
+// Dovecot's listescape does it, so a migrated "A\2fB Ltd" is one folder.
+func TestEscapedDelimiterInName(t *testing.T) {
+	f := newFixture(t)
+	c := f.login()
+	if err := c.Create("Clients/A\\2fB Ltd", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := c.List("", "Clients/*", nil).Collect()
+	if len(list) != 1 || list[0].Mailbox != "Clients/A\\2fB Ltd" {
+		t.Fatalf("list: %+v", list)
+	}
+	if _, err := c.Select("Clients/A\\2fB Ltd", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
 }

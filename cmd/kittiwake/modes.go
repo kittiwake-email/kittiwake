@@ -36,7 +36,10 @@ func imapMode(ctx context.Context, a *app.App, start func(string, func() error))
 		return nil
 	}
 	host, _ := os.Hostname()
-	srv := imap.New(imap.Config{Hostname: host, MaxLiteralSize: a.Cfg.Mail.MaxMessageSize}, a.Services.Auth, a.Services.Mailbox, a.Services.Delivery, a.Log)
+	srv := imap.New(imap.Config{
+		Hostname: host, MaxLiteralSize: a.Cfg.Mail.MaxMessageSize,
+		CompatPrefix: a.Cfg.IMAP.CompatNamespace.Prefix, CompatDelim: a.Cfg.IMAP.CompatNamespace.Delimiter,
+	}, a.Services.Auth, a.Services.Mailbox, a.Services.Delivery, a.Log)
 	ln, err := app.Listen(a.Cfg.Listen.IMAP)
 	if err != nil {
 		return fmt.Errorf("imap listen: %w", err)

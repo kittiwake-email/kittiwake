@@ -484,6 +484,34 @@ Drafts, Sent, Junk, Trash and Archive, each tagged with its IMAP SPECIAL-USE att
 6154). Users can create nested folders. Folders are identified internally by an id, not by
 name, so renaming does not move data.
 
+## IMAP namespaces and migrating from Dovecot
+
+Kittiwake has one personal namespace: empty prefix, `/` as hierarchy delimiter, INBOX
+special and case-insensitive, `INBOX/x` a child of INBOX, UTF-8 names (UTF8=ACCEPT; older
+clients send modified UTF-7). No shared or public namespaces.
+
+Two things make a migration from Dovecot or Courier smooth:
+
+- **Compatibility namespace.** `imap.compat_namespace` (prefix `INBOX.`, delimiter `.` is
+  the classic Courier-era layout) advertises a second personal namespace that maps onto the
+  same folders: `INBOX.Projects.2026` is `Projects/2026`, `INBOX.` alone is INBOX. A client
+  still configured with "IMAP path prefix: INBOX" keeps working after the switch, with no
+  reconfiguration on migration day. Like Dovecot's alias namespace it is hidden: LIST shows
+  the compat names only for patterns under the prefix. Children of INBOX (`INBOX/x`) are not
+  shown in the compat view, since they would collide with top-level folders there; a literal
+  compat delimiter in a folder name is escaped as `\2e` in that view.
+- **A delimiter inside a folder name.** A folder called `A/B Ltd` is one folder: stored
+  escaped the way Dovecot's listescape plugin does it (`A\2fB Ltd`, `\5c` for a backslash),
+  passed through unchanged on IMAP, shown decoded on JMAP. A Dovecot installation with
+  listescape hands such names over verbatim through mbsync.
+
+mbsync reads NAMESPACE on both sides, strips the old prefix and translates the delimiter, so
+the common Dovecot layouts (`INBOX.` prefix with `.`, no prefix with `.`, no prefix with `/`,
+`mail/` prefix) land as the right hierarchy without options beyond `Patterns *`. What mbsync
+does not carry: SPECIAL-USE (a localised `Verzonden items` becomes a plain folder next to
+the role folder `Sent`; roles can be assigned afterwards), custom keywords and subscriptions.
+For keyword-preserving bulk moves the Maildir++ importer reads a Dovecot maildir directly.
+
 ## Mailbox provisioning
 
 Mailboxes are created through the admin API (which writes the mailbox object in the meta
@@ -943,6 +971,7 @@ The daemon takes a single YAML file as configuration:
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
 - Session settings: access token lifetime, refresh token lifetime, key rotation interval
 - Cache TTLs: verified credentials, identity objects, mailbox root (see "Caches")
+- IMAP compatibility namespace (prefix and delimiter of an old layout)
 - Spam header name and value for Junk routing
 - Default quota limits, over-quota LMTP reply policy (suspended mailboxes always answer 4xx,
   disabled ones 5xx)

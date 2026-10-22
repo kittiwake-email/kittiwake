@@ -825,3 +825,37 @@ func rendered(t *testing.T, raw string) string {
 	}
 	return string(out)
 }
+
+// A JMAP mailbox name may contain "/": it is one folder, stored escaped,
+// shown decoded, and IMAP sees the escaped form.
+func TestMailboxNameWithSlash(t *testing.T) {
+	f := newFixture(t)
+	r := f.do(call{"Mailbox/set", f.acctArgs(map[string]any{"create": map[string]any{"c": map[string]any{"name": "A/B Ltd"}}}), "s"})
+	res := first(r, t, "Mailbox/set")
+	created, _ := res["created"].(map[string]any)
+	if len(created) != 1 {
+		t.Fatalf("create: %v", res)
+	}
+	var id string
+	for _, v := range created {
+		id = v.(map[string]any)["id"].(string)
+	}
+	r = f.do(call{"Mailbox/get", f.acctArgs(map[string]any{"ids": []string{id}}), "g"})
+	got := first(r, t, "Mailbox/get")["list"].([]any)[0].(map[string]any)
+	if got["name"] != "A/B Ltd" || got["parentId"] != nil {
+		t.Fatalf("name round trip: %v", got)
+	}
+	root, _ := f.idx.GetRoot(context.Background(), f.mb.ID)
+	if root.FolderByID(id).Name != "A\\2fB Ltd" {
+		t.Fatalf("stored form: %q", root.FolderByID(id).Name)
+	}
+	// Rename to another slashed name, and filter by name.
+	r = f.do(call{"Mailbox/set", f.acctArgs(map[string]any{"update": map[string]any{id: map[string]any{"name": "C/D"}}}), "u"})
+	if u := first(r, t, "Mailbox/set")["updated"].(map[string]any); len(u) != 1 {
+		t.Fatalf("rename: %v", r[0].args)
+	}
+	r = f.do(call{"Mailbox/query", f.acctArgs(map[string]any{"filter": map[string]any{"name": "C/D"}}), "q"})
+	if ids := first(r, t, "Mailbox/query")["ids"].([]any); len(ids) != 1 || ids[0] != id {
+		t.Fatalf("query by slashed name: %v", ids)
+	}
+}

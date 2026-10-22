@@ -3,6 +3,7 @@ package imap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -129,7 +130,58 @@ func (s *session) AppendLimit() uint32 {
 }
 
 func (s *session) Namespace() (*imap.NamespaceData, error) {
-	return &imap.NamespaceData{Personal: []imap.NamespaceDescriptor{{Prefix: "", Delim: delim}}}, nil
+	ns := &imap.NamespaceData{Personal: []imap.NamespaceDescriptor{{Prefix: "", Delim: delim}}}
+	if s.srv.cfg.CompatPrefix != "" {
+		ns.Personal = append(ns.Personal, imap.NamespaceDescriptor{Prefix: s.srv.cfg.CompatPrefix, Delim: rune(s.srv.cfg.CompatDelim[0])})
+	}
+	return ns, nil
+}
+
+// compatEnabled reports whether a client name or pattern addresses the
+// compatibility namespace (it starts with the compat prefix).
+func (s *session) inCompat(name string) bool {
+	p := s.srv.cfg.CompatPrefix
+	return p != "" && len(name) >= len(p) && strings.EqualFold(name[:len(p)], p)
+}
+
+// canonical turns a client mailbox name into the stored form. In the
+// compatibility namespace the prefix goes, the compat delimiter becomes
+// ours, and a compat-delimiter escaped as "\xx" becomes a literal.
+func (s *session) canonical(name string) string {
+	if s.inCompat(name) {
+		rest := name[len(s.srv.cfg.CompatPrefix):]
+		if rest == "" {
+			return "INBOX"
+		}
+		cd := s.srv.cfg.CompatDelim
+		parts := strings.Split(rest, cd)
+		for i, p := range parts {
+			parts[i] = index.EscapeComponent(index.UnescapeComponent(p))
+		}
+		return normalizeName(strings.Join(parts, string(delim)))
+	}
+	return normalizeName(name)
+}
+
+// compatName renders a stored name in the compatibility namespace: prefix
+// plus the path with the compat delimiter, a literal compat delimiter in a
+// component escaped as "\xx". INBOX stays INBOX; children of INBOX are not
+// shown there (they would collide with top-level folders).
+func (s *session) compatName(name string) (string, bool) {
+	if name == "INBOX" {
+		return "INBOX", true
+	}
+	if strings.HasPrefix(name, "INBOX"+string(delim)) {
+		return "", false
+	}
+	cd := s.srv.cfg.CompatDelim
+	parts := strings.Split(name, string(delim))
+	for i, p := range parts {
+		// p is the stored form ("/" and "\" already escaped); a literal
+		// compat delimiter gets the same treatment.
+		parts[i] = strings.ReplaceAll(p, cd, fmt.Sprintf("\\%02x", cd[0]))
+	}
+	return s.srv.cfg.CompatPrefix + strings.Join(parts, cd), true
 }
 
 // ---- folders ----
@@ -157,7 +209,7 @@ func (s *session) root() (index.Root, error) {
 // process last saw it (no read); only a miss re-reads, so a stream of
 // APPENDs costs no root reads for name resolution.
 func (s *session) folder(name string) (index.Root, *index.Folder, error) {
-	n := normalizeName(name)
+	n := s.canonical(name)
 	if root, err := s.srv.mb.RootCached(s.ctx, s.mb); err == nil {
 		if f := root.FolderByName(n); f != nil {
 			return root, f, nil
@@ -206,6 +258,16 @@ func (s *session) List(w *imapserver.ListWriter, ref string, patterns []string, 
 	}
 	folders := append([]*index.Folder(nil), root.Folders...)
 	sort.Slice(folders, func(i, j int) bool { return folders[i].Name < folders[j].Name })
+	// A pattern under the compat prefix lists the compat view of the same
+	// folders (hidden otherwise, like Dovecot's alias namespace).
+	var plain, compat []string
+	for _, p := range patterns {
+		if s.inCompat(ref + p) {
+			compat = append(compat, p)
+		} else {
+			plain = append(plain, p)
+		}
+	}
 	for _, f := range folders {
 		if options.SelectSubscribed && !f.Subscribed {
 			continue
@@ -213,17 +275,29 @@ func (s *session) List(w *imapserver.ListWriter, ref string, patterns []string, 
 		if options.SelectSpecialUse && f.Role == "" {
 			continue
 		}
+		shown := f.Name
+		listDelim := delim
 		matched := len(patterns) == 0
-		for _, p := range patterns {
+		for _, p := range plain {
 			if imapserver.MatchList(f.Name, delim, ref, p) {
 				matched = true
 				break
 			}
 		}
+		if !matched && len(compat) > 0 {
+			if cn, ok := s.compatName(f.Name); ok {
+				for _, p := range compat {
+					if imapserver.MatchList(cn, rune(s.srv.cfg.CompatDelim[0]), ref, p) {
+						matched, shown, listDelim = true, cn, rune(s.srv.cfg.CompatDelim[0])
+						break
+					}
+				}
+			}
+		}
 		if !matched {
 			continue
 		}
-		data := &imap.ListData{Delim: delim, Mailbox: f.Name}
+		data := &imap.ListData{Delim: listDelim, Mailbox: shown}
 		if hasChildren(&root, f) {
 			data.Attrs = append(data.Attrs, imap.MailboxAttrHasChildren)
 		} else {
@@ -237,6 +311,7 @@ func (s *session) List(w *imapserver.ListWriter, ref string, patterns []string, 
 		}
 		if options.ReturnStatus != nil {
 			data.Status = statusData(f, options.ReturnStatus)
+			data.Status.Mailbox = shown
 		}
 		if err := w.WriteList(data); err != nil {
 			return err
@@ -280,11 +355,13 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 	if err != nil {
 		return nil, err
 	}
-	return statusData(f, options), nil
+	d := statusData(f, options)
+	d.Mailbox = name // echoed in the form the client used (compat or not)
+	return d, nil
 }
 
 func (s *session) Create(name string, options *imap.CreateOptions) error {
-	name = normalizeName(name)
+	name = s.canonical(name)
 	if _, err := s.srv.mb.CreateFolder(s.ctx, s.mb, name); err != nil {
 		if errors.Is(err, index.ErrExists) || strings.Contains(err.Error(), "already exists") {
 			return noErr(imap.ResponseCodeAlreadyExists, "Mailbox already exists")
@@ -313,7 +390,7 @@ func (s *session) Rename(name, newName string, _ *imap.RenameOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := s.srv.mb.RenameFolder(s.ctx, s.mb, f.ID, normalizeName(newName)); err != nil {
+	if err := s.srv.mb.RenameFolder(s.ctx, s.mb, f.ID, s.canonical(newName)); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			return noErr(imap.ResponseCodeAlreadyExists, "Mailbox already exists")
 		}

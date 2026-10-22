@@ -29,6 +29,12 @@ type Config struct {
 	Hostname       string
 	MaxLiteralSize int64
 	IdleTimeout    time.Duration
+	// CompatPrefix and CompatDelim advertise a second personal namespace
+	// that maps onto the same folders, for clients still configured for a
+	// Dovecot or Courier layout such as prefix "INBOX." with delimiter ".":
+	// "INBOX.Projects.2026" is "Projects/2026". Empty = off.
+	CompatPrefix string
+	CompatDelim  string
 }
 
 // Server is the IMAP server.
