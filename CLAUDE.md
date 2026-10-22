@@ -111,7 +111,12 @@ These are settled. Do not design around them.
   Postfix config and helpers live in `contrib/postfix/`.
 - **Scalability is the governing principle** (1M mailboxes, 150k-message mailboxes): count
   objects and omap keys per message, shard every per-mailbox map, never read a whole folder
-  for a page. Measure on the lab box before/after storage changes.
+  for a page. **Storage is cheap, I/O is expensive:** count RADOS round trips per operation;
+  merge writes into one transaction (change log rides in the root tx via `Root.Log`), run
+  independent writes concurrently (`index.parallel`), batch low-value writes (audit
+  `StartBuffering`), cache hot reads (`index.GetRootCached`, delivery `lookupCache`,
+  `mailbox.RootCached`), and let adapters apply their own writes locally (IMAP
+  `noteAppended`). Measure on the lab box before/after storage changes.
 - **Message format:** ONE object per message: the parsed JSON (schema version, headers
   array, verbatim original header block incl. Received/Message-ID/DKIM, UTF-8 bodies, full
   MIME tree with small parts' content inline and attachment hashes), xattrs mailbox/created/

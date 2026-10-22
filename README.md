@@ -28,7 +28,19 @@ request has to read a whole folder. Concretely:
 - Each component (LMTP, IMAP, POP3, JMAP, admin, worker) runs as its own process and scales
   independently; all state is in RADOS
 
-Measure on the lab cluster (see `TESTENV.md`) before and after storage changes.
+**Storage is cheap, I/O is expensive.** Every RADOS round trip is counted. The write path
+for one delivered message is three sequential round trips on the critical path: the root
+transaction (UID, modseq, counters and the change-log entry in one write), the message
+object written concurrently with the thread-map entries, and the folder index entry. Reads
+that would repeat per message (domain, account, alias, mailbox, root for the quota check)
+are cached per process for a couple of seconds. Audit records are batched into one omap
+write per object per second. Notifications and search events are off the critical path, and
+search events are not written at all until a search backend consumes them. Protocol
+adapters apply what they just wrote themselves instead of reading it back.
+
+Measure on the lab cluster (see `TESTENV.md`) before and after storage changes. Reference
+numbers on the lab cluster (3 small OSDs): one LMTP delivery or IMAP APPEND costs about 15 ms
+sequentially, an mbsync push of 3000 messages (60 MB) takes under a minute.
 
 ## Stateless and scalable, everything in Ceph RADOS
 
