@@ -36,3 +36,16 @@ integration:
 # End-to-end run of the binary on the lab config.
 e2e: build
 	scripts/e2e.sh examples/lab.yaml
+
+# Deploy to the lab box (TESTENV.md): binary to /usr/local/bin, restart all instances.
+DEPLOY_HOST ?= root@[2a14:9b80::3143]
+deploy: build
+	scp bin/dovetail $(DEPLOY_HOST):/usr/local/bin/dovetail.new
+	ssh $(DEPLOY_HOST) 'mv /usr/local/bin/dovetail.new /usr/local/bin/dovetail && chmod 755 /usr/local/bin/dovetail && dovetail -v && (systemctl try-restart dovetail.target 2>/dev/null || true)'
+
+deploy-units:
+	ssh $(DEPLOY_HOST) 'install -d /etc/systemd/system /etc/dovetail/instances'
+	scp contrib/systemd/dovetail@.service contrib/systemd/dovetail.target $(DEPLOY_HOST):/etc/systemd/system/
+	scp contrib/systemd/instances/*.env $(DEPLOY_HOST):/etc/dovetail/instances/
+	scp examples/lab.yaml $(DEPLOY_HOST):/etc/dovetail/dovetail.yaml.example
+	ssh $(DEPLOY_HOST) 'test -f /etc/dovetail/dovetail.yaml || cp /etc/dovetail/dovetail.yaml.example /etc/dovetail/dovetail.yaml; systemctl daemon-reload'

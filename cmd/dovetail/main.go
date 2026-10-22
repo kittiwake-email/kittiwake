@@ -123,12 +123,28 @@ func runServe(args []string) error {
 	fs := newFlagSet("serve")
 	cfgPath := configFlag(fs)
 	seed := fs.String("seed-account", "", "development only (memory backend): create user@domain:password with a mailbox at startup")
+	modes := fs.String("modes", "", "comma-separated modes to run, overriding the config (e.g. imap or lmtp,postfix)")
+	mgmt := fs.String("management", "", "management listener address, overriding the config (metrics/health)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		return err
+	}
+	if *modes != "" {
+		cfg.Modes = nil
+		for _, m := range strings.Split(*modes, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				cfg.Modes = append(cfg.Modes, m)
+			}
+		}
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+	}
+	if *mgmt != "" {
+		cfg.Listen.Management.Address = *mgmt
 	}
 	if len(cfg.Modes) == 0 {
 		return fmt.Errorf("no modes configured")

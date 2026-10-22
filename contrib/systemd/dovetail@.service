@@ -1,0 +1,37 @@
+# Dovetail service template: one instance per mode.
+#   systemctl enable --now dovetail@lmtp dovetail@imap dovetail@pop3 dovetail@jmap \
+#                          dovetail@admin dovetail@postfix dovetail@worker
+# All instances share /etc/dovetail/dovetail.yaml; the instance name selects
+# the mode (--modes %i). Per-instance extras (notably a distinct management
+# port for metrics) come from /etc/dovetail/instances/<mode>.env.
+[Unit]
+Description=Dovetail mail platform (%i)
+Documentation=https://github.com/wido/dovetail
+After=network-online.target
+Wants=network-online.target
+PartOf=dovetail.target
+
+[Service]
+Type=simple
+User=dovetail
+Group=dovetail
+EnvironmentFile=-/etc/dovetail/instances/%i.env
+ExecStart=/usr/local/bin/dovetail serve -c /etc/dovetail/dovetail.yaml --modes %i $DOVETAIL_ARGS
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=40s
+LimitNOFILE=65536
+# Ports below 1024 (LMTP 24, IMAP 143, POP3 110) without root:
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/dovetail
+StateDirectory=dovetail
+RuntimeDirectory=dovetail
+ReadOnlyPaths=/etc/ceph
+
+[Install]
+WantedBy=multi-user.target
