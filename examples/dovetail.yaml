@@ -59,6 +59,10 @@ session:
   key_rotation_interval: 2160h
   issuer: https://mail.example.org   # also the JMAP base URL
 
+auth:
+  cache_ttl: 5s                # reuse a verified password/API token per process this long (0s disables)
+                               # (basic auth costs an argon2id verification per request otherwise)
+
 audit:
   retention: 8760h             # 365 days
   detail: {}                   # per protocol: full (default) | session, e.g. {imap: session}

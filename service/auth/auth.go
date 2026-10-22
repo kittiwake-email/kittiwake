@@ -7,6 +7,8 @@ package auth
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -45,6 +47,9 @@ type Config struct {
 	Issuer               string
 	TOTPSkew             int // steps either side, default 1
 	KeyCacheTTL          time.Duration
+	// CacheTTL caches successful credential verifications (password and
+	// API token) so repeated requests skip RADOS and argon2id. 0 disables.
+	CacheTTL time.Duration
 }
 
 // Service is the auth service.
@@ -59,7 +64,88 @@ type Service struct {
 	keys      session.KeySet
 	keysAt    time.Time
 	keysValid bool
+
+	cache credCache
 }
+
+// credCache remembers successful verifications for Config.CacheTTL. Keys
+// are opaque (hash of the credential); values are the resulting actor.
+// Only positive results are cached, so a wrong password is always checked
+// (and still costs the hash: rate-limit at the proxy).
+type credCache struct {
+	mu      sync.Mutex
+	entries map[string]credEntry
+	byAcct  map[uuid.UUID][]string // account -> keys, for invalidation
+}
+
+type credEntry struct {
+	actor actor.Actor
+	at    time.Time
+}
+
+const maxCredEntries = 20000
+
+func (c *credCache) get(key string, now time.Time, ttl time.Duration) (actor.Actor, bool) {
+	if ttl <= 0 {
+		return actor.Actor{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok || now.Sub(e.at) >= ttl {
+		return actor.Actor{}, false
+	}
+	a := e.actor
+	a.Roles = append([]string(nil), e.actor.Roles...)
+	return a, true
+}
+
+func (c *credCache) put(key string, a actor.Actor, now time.Time, ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[string]credEntry{}
+		c.byAcct = map[uuid.UUID][]string{}
+	}
+	if len(c.entries) >= maxCredEntries {
+		c.entries = map[string]credEntry{}
+		c.byAcct = map[uuid.UUID][]string{}
+	}
+	c.entries[key] = credEntry{actor: a, at: now}
+	if a.AccountID != uuid.Nil {
+		c.byAcct[a.AccountID] = append(c.byAcct[a.AccountID], key)
+	}
+}
+
+// invalidateAccount drops cached verifications of one account (this
+// process; other processes rely on the TTL).
+func (c *credCache) invalidateAccount(id uuid.UUID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, k := range c.byAcct[id] {
+		delete(c.entries, k)
+	}
+	delete(c.byAcct, id)
+}
+
+func (c *credCache) clear() {
+	c.mu.Lock()
+	c.entries, c.byAcct = nil, nil
+	c.mu.Unlock()
+}
+
+func passwordKey(username, password string) string {
+	sum := sha256.Sum256([]byte(username + "\x00" + password))
+	return "p:" + hex.EncodeToString(sum[:])
+}
+
+func tokenKey(token string) string { return "t:" + identity.HashToken(token) }
+
+// InvalidateCache drops every cached verification in this process.
+func (s *Service) InvalidateCache() { s.cache.clear() }
 
 // New returns the service.
 func New(ids *identity.Store, sessions *session.Store, aud *auditor.Auditor, cfg Config) *Service {
@@ -480,7 +566,19 @@ func (s *Service) VerifyAccessToken(ctx context.Context, token string) (actor.Ac
 }
 
 // VerifyAPIToken validates a long-lived API token and returns the actor.
+// Successful verifications are cached for Config.CacheTTL.
 func (s *Service) VerifyAPIToken(ctx context.Context, token string) (actor.Actor, error) {
+	if a, ok := s.cache.get(tokenKey(token), s.Now(), s.cfg.CacheTTL); ok {
+		return a, nil
+	}
+	a, err := s.verifyAPIToken(ctx, token)
+	if err == nil {
+		s.cache.put(tokenKey(token), a, s.Now(), s.cfg.CacheTTL)
+	}
+	return a, err
+}
+
+func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor, error) {
 	v, err := s.ids.LookupToken(ctx, token)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
@@ -538,6 +636,19 @@ func (s *Service) VerifyBearer(ctx context.Context, token string) (actor.Actor, 
 // TOTP-enabled account is refused with ErrTOTPRequired; application
 // passwords always work.
 func (s *Service) VerifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error) {
+	key := passwordKey(strings.ToLower(strings.TrimSpace(username)), password)
+	if a, ok := s.cache.get(key, s.Now(), s.cfg.CacheTTL); ok {
+		a.Protocol, a.ClientIP = proto, clientIP
+		return a, nil
+	}
+	a, err := s.verifyPassword(ctx, username, password, proto, clientIP)
+	if err == nil {
+		s.cache.put(key, a, s.Now(), s.cfg.CacheTTL)
+	}
+	return a, err
+}
+
+func (s *Service) verifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error) {
 	auditCtx := actor.With(ctx, actor.Actor{Username: strings.ToLower(strings.TrimSpace(username)), Protocol: proto, ClientIP: clientIP, Credential: "password"})
 	fail := func(detail string, err error) (actor.Actor, error) {
 		metrics.Auth.WithLabelValues(proto, "failed").Inc()
@@ -656,6 +767,7 @@ func (s *Service) ConfirmTOTP(ctx context.Context, acctID uuid.UUID, code string
 		return nil
 	})
 	if err == nil {
+		s.cache.invalidateAccount(acctID)
 		s.audit.Log(ctx, auditor.Event{Mailbox: acct.MailboxID, Action: "totp-enable"})
 	}
 	return err
@@ -668,6 +780,7 @@ func (s *Service) DisableTOTP(ctx context.Context, acctID uuid.UUID) error {
 		return err
 	}
 	_ = s.sessions.ResetTOTP(ctx, acctID)
+	s.cache.invalidateAccount(acctID)
 	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "totp-disable", Subject: subjectIfOther(ctx, a.Username)})
 	return nil
 }
@@ -734,6 +847,7 @@ func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind
 	if err != nil {
 		return "", err
 	}
+	s.cache.invalidateAccount(acctID)
 	exp := "never"
 	if expiresAt != nil {
 		exp = expiresAt.Format(time.RFC3339)
@@ -763,6 +877,7 @@ func (s *Service) RemovePassword(ctx context.Context, acctID uuid.UUID, pwID str
 	if err != nil {
 		return err
 	}
+	s.cache.invalidateAccount(acctID)
 	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-remove", Target: pwID, Subject: subjectIfOther(ctx, a.Username)})
 	return nil
 }

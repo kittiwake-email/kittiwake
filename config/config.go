@@ -25,6 +25,7 @@ type Config struct {
 	Mail    Mail    `yaml:"mail"`
 	Quota   Quota   `yaml:"quota"`
 	Session Session `yaml:"session"`
+	Auth    Auth    `yaml:"auth"`
 	Audit   Audit   `yaml:"audit"`
 	Export  Export  `yaml:"export"`
 	Log     Log     `yaml:"log"`
@@ -120,6 +121,15 @@ type Session struct {
 	Issuer string `yaml:"issuer"`
 }
 
+// Auth configures credential verification.
+type Auth struct {
+	// CacheTTL: how long a successful password or API-token verification is
+	// reused per process without touching RADOS or hashing again. 0 disables.
+	// A revoked token or changed password keeps working for at most this long
+	// in processes that already verified it.
+	CacheTTL time.Duration `yaml:"cache_ttl"`
+}
+
 // Audit configures audit retention and detail.
 type Audit struct {
 	Retention time.Duration `yaml:"retention"`
@@ -198,6 +208,7 @@ func Default() Config {
 			KeyRotationInterval:  90 * 24 * time.Hour,
 			Issuer:               "dovetail",
 		},
+		Auth:  Auth{CacheTTL: 5 * time.Second},
 		Audit: Audit{Retention: 365 * 24 * time.Hour},
 		Log:   Log{Level: "info", Format: "json"},
 	}
@@ -261,6 +272,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Mail.MaxAliasDepth <= 0 {
 		return errors.New("config: mail.max_alias_depth must be positive")
+	}
+	if c.Auth.CacheTTL < 0 {
+		return errors.New("config: auth.cache_ttl must not be negative")
 	}
 	if c.Session.AccessTokenLifetime <= 0 || c.Session.RefreshTokenLifetime <= 0 {
 		return errors.New("config: session lifetimes must be positive")

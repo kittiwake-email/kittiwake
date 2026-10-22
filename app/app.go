@@ -168,6 +168,7 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 		Auditor: aud,
 		Auth: authsvc.New(st.Identity, st.Sessions, aud, authsvc.Config{
 			AccessTokenLifetime: cfg.Session.AccessTokenLifetime, RefreshTokenLifetime: cfg.Session.RefreshTokenLifetime, Issuer: cfg.Session.Issuer,
+			CacheTTL: cfg.Auth.CacheTTL,
 		}),
 		Delivery: delivery.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, delivery.Config{
 			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, KeepRaw: cfg.Mail.KeepRaw,

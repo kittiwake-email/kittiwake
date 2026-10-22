@@ -705,6 +705,19 @@ Accounts can require a time-based one-time password (TOTP, RFC 6238) with their 
 - JMAP and the REST endpoints authenticate with a bearer token (session access token or
   long-lived API token) or HTTP basic auth.
 
+Session access tokens are JWTs and cost no I/O to verify. An API or admin token costs one or
+two RADOS reads. A password costs two reads plus an argon2id verification, which at the
+default parameters is tens of milliseconds of CPU (measured 54 ms per basic-auth request on
+the four-core lab box against 2.5 ms for a session token), so clients that send basic auth
+on every request would otherwise burn a core per ~20 requests per second. Successful
+verifications are therefore cached per process for `auth.cache_ttl` (default 5 s, 0
+disables): the cache key is a hash of the credential, only positive results are cached, a
+cache hit skips the per-request `login` audit record, and a password change, password
+removal or TOTP change invalidates the account's entries in the process that made it. A
+revoked token or changed password therefore keeps working for at most the TTL in other
+processes. Wrong passwords are never cached and always cost the hash: brute-force throttling
+stays at the proxy.
+
 ## LMTP delivery
 
 When a message is delivered (by Postfix) the platform resolves the recipient address
@@ -817,6 +830,7 @@ The daemon takes a single YAML file as configuration:
 - Audit retention period and per-protocol audit detail level
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
 - Session settings: access token lifetime, refresh token lifetime, key rotation interval
+- Authentication cache TTL (verified passwords and API tokens reused per process)
 - Spam header name and value for Junk routing
 - Default quota limits, over-quota LMTP reply policy (suspended mailboxes always answer 4xx,
   disabled ones 5xx)

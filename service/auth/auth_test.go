@@ -350,3 +350,84 @@ func TestLegacyHashUpgradedOnLogin(t *testing.T) {
 		t.Fatal("upgraded hash does not verify")
 	}
 }
+
+func TestVerificationCache(t *testing.T) {
+	f := newFixture(t)
+	f.svc.cfg.CacheTTL = 5 * time.Second
+	ctx := context.Background()
+
+	// Password: first call verifies (and audits a login), repeats within the
+	// TTL do not touch the store or the audit log.
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "imap", "198.51.100.7"); err != nil {
+		t.Fatal(err)
+	}
+	a, err := f.svc.VerifyPassword(ctx, "WIDO@example.org ", "correct horse", "pop3", "198.51.100.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.AccountID != f.acct.ID || a.Protocol != "pop3" || a.ClientIP != "198.51.100.8" {
+		t.Fatalf("cached actor wrong: %+v", a)
+	}
+	if n := countOf(f.auditActions(t, f.mb.ID), "login:ok"); n != 1 {
+		t.Fatalf("want 1 login audit record, got %d", n)
+	}
+	// A wrong password is never served from the cache.
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "wrong", "imap", ""); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	// Changing the password drops this process's cached entry.
+	if _, err := f.svc.SetPassword(ctx, f.acct.ID, "new secret", identity.PasswordPrimary, "rotated", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "imap", ""); err == nil {
+		t.Fatal("old password still accepted after SetPassword")
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "new secret", "imap", ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := countOf(f.auditActions(t, f.mb.ID), "login:ok"); n != 2 {
+		t.Fatalf("want 2 login audit records, got %d", n)
+	}
+
+	// API token: cached, expires with the TTL, and a revoked token stops
+	// working at the latest after the TTL.
+	trec, tok, err := f.ids.CreateToken(ctx, f.acct.ID, []string{identity.RoleRead}, f.now.Add(24*time.Hour), "cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.VerifyAPIToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ids.DeleteToken(ctx, f.acct.ID, trec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.VerifyAPIToken(ctx, tok); err != nil {
+		t.Fatal("revoked token should still be served from the cache within the TTL")
+	}
+	f.now = f.now.Add(5 * time.Second)
+	if _, err := f.svc.VerifyAPIToken(ctx, tok); err == nil {
+		t.Fatal("revoked token accepted after the TTL")
+	}
+
+	// TTL 0 disables the cache entirely.
+	f.svc.cfg.CacheTTL = 0
+	f.svc.InvalidateCache()
+	for i := 0; i < 2; i++ {
+		if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "new secret", "imap", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := countOf(f.auditActions(t, f.mb.ID), "login:ok"); n != 4 {
+		t.Fatalf("want 4 login audit records with cache off, got %d", n)
+	}
+}
+
+func countOf(ss []string, want string) int {
+	n := 0
+	for _, s := range ss {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
