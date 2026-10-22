@@ -19,6 +19,7 @@ func buildAPI(a *app.App) http.Handler {
 	restSrv := rest.New(rest.Config{
 		Realm: "dovetail", TrustedProxies: trusted, DefaultQuota: a.DefaultQuota(),
 		MaxBody: 1 << 20, Identity: a.Stores.Identity,
+		Export: a.Services.Export, ExportDir: a.Cfg.Export.Directory,
 	}, a.Services.Auth, a.Services.Admin, a.Stores.Audit, a.Stores.Queue, a.Log)
 
 	mux := http.NewServeMux()

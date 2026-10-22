@@ -25,6 +25,7 @@ import (
 	"dovetail/service/actor"
 	"dovetail/service/admin"
 	"dovetail/service/auth"
+	"dovetail/service/export"
 	"dovetail/store/audit"
 	"dovetail/store/identity"
 	"dovetail/store/index"
@@ -44,6 +45,9 @@ type Config struct {
 	// Identity is optional; when set, /v1/me includes the password list and
 	// TOTP state (the auth service does not expose account records).
 	Identity *identity.Store
+	// Export and ExportDir enable mailbox export (worker task) and import.
+	Export    *export.Service
+	ExportDir string
 }
 
 // Server serves the REST endpoints.
@@ -139,6 +143,10 @@ func (s *Server) Handler() http.Handler {
 		route{"PATCH /v1/admin/mailboxes/{id}", s.mailboxPatch},
 		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
 		route{"POST /v1/admin/mailboxes/{id}/recalculate", s.mailboxRecalculate},
+		route{"POST /v1/admin/mailboxes/{id}/export", s.mailboxExport},
+		route{"POST /v1/admin/mailboxes/{id}/import", s.mailboxImport},
+		route{"GET /v1/admin/exports", s.exportList},
+		route{"GET /v1/admin/exports/{name}", s.exportDownload},
 		route{"POST /v1/admin/mailboxes/{id}/hold", s.mailboxHold},
 		route{"DELETE /v1/admin/mailboxes/{id}/hold", s.mailboxRelease},
 		route{"GET /v1/admin/holds", s.holdList},
@@ -196,8 +204,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, identity.ErrInvalid), errors.Is(err, identity.ErrDomainUnknown), errors.Is(err, errBadRequest):
 		status = http.StatusBadRequest
-	case errors.Is(err, admin.ErrForbidden):
+	case errors.Is(err, admin.ErrForbidden), errors.Is(err, export.ErrForbidden):
 		status = http.StatusForbidden
+	case errors.Is(err, export.ErrNotFound):
+		status = http.StatusNotFound
 	case errors.Is(err, auth.ErrTOTPInvalid), errors.Is(err, auth.ErrScope):
 		status = http.StatusBadRequest
 	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired), errors.Is(err, auth.ErrTOTPRequired), errors.Is(err, auth.ErrSessionRevoked):

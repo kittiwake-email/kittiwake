@@ -261,6 +261,96 @@ paths:
         "202": { description: Removal scheduled }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/mailboxes/{id}/export:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    post:
+      tags: [admin]
+      summary: Schedule a Maildir export of the mailbox (worker task)
+      description: >
+        The worker writes a Dovecot-compatible Maildir++ tar archive with a manifest and the
+        mailbox's audit log into the configured export directory. Poll GET /v1/admin/exports.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                gzip: { type: boolean, default: true }
+      responses:
+        "202":
+          description: Export scheduled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string }
+                  mailbox: { type: string, format: uuid }
+                  gzip: { type: boolean }
+                  hint: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { description: Export not configured, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  /v1/admin/mailboxes/{id}/import:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    post:
+      tags: [admin]
+      summary: Import a Maildir archive (tar or tar.gz) into the mailbox
+      requestBody:
+        required: true
+        content:
+          application/x-tar: { schema: { type: string, format: binary } }
+          application/gzip: { schema: { type: string, format: binary } }
+      responses:
+        "200":
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages: { type: integer }
+                  folders: { type: integer }
+                  bytes: { type: integer }
+                  errors: { type: array, items: { type: string } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/exports:
+    get:
+      tags: [admin]
+      summary: List finished exports
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Exports
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        bytes: { type: integer }
+                        modified: { type: string, format: date-time }
+                        url: { type: string }
+                        result: { type: object }
+  /v1/admin/exports/{name}:
+    get:
+      tags: [admin]
+      summary: Download an export archive
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The archive
+          content:
+            application/gzip: { schema: { type: string, format: binary } }
+            application/x-tar: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/mailboxes/{id}/recalculate:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
     post:

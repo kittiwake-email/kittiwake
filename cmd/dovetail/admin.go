@@ -15,6 +15,7 @@ import (
 	"dovetail/app"
 	"dovetail/service/actor"
 	"dovetail/service/admin"
+	"dovetail/service/export"
 	"dovetail/store/identity"
 )
 
@@ -33,6 +34,8 @@ subcommands:
   token       create --account <uuid> --expires 2027-01-01 --comment text [--roles read]
   hold        <mailbox-uuid> --reason text [--case ref] [--no-delivery] [--allow-send] [--sealed]
   release     <mailbox-uuid> [--note text]
+  export-mailbox <mailbox-uuid> --out file.tar[.gz]   Maildir++ archive with manifest and audit log
+  import-mailbox <mailbox-uuid> --dir /path/to/Maildir | --archive file.tar[.gz]
 
 The CLI talks to RADOS directly with the same config file and acts as the
 system actor; every action is audited in the admin log.`)
@@ -105,6 +108,10 @@ func runAdmin(args []string) error {
 		return cmdHold(ctx, adm, subargs)
 	case "release":
 		return cmdRelease(ctx, adm, subargs)
+	case "export-mailbox":
+		return cmdExportMailbox(ctx, a, subargs)
+	case "import-mailbox":
+		return cmdImportMailbox(ctx, a, subargs)
 	}
 	adminUsage()
 	return fmt.Errorf("unknown admin subcommand %q", sub)
@@ -434,4 +441,76 @@ func cmdRelease(ctx context.Context, adm *admin.Service, args []string) error {
 		return err
 	}
 	return printJSON(m)
+}
+
+func cmdExportMailbox(ctx context.Context, a *app.App, args []string) error {
+	fs := newFlagSet("export-mailbox")
+	out := fs.String("out", "", "output file (.tar or .tar.gz; gzip when the name ends in .gz)")
+	if len(args) < 1 {
+		return fmt.Errorf("export-mailbox <mailbox-uuid> --out file.tar.gz")
+	}
+	id, err := uuid.Parse(args[0])
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *out == "" {
+		return fmt.Errorf("--out is required")
+	}
+	f, err := os.OpenFile(*out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	sum, err := a.Services.Export.ExportMailbox(ctx, id, f, export.Options{Gzip: strings.HasSuffix(*out, ".gz")})
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported %d messages (%d bytes) in %d folders, %d audit records, %d errors -> %s\n", sum.Messages, sum.Bytes, sum.Folders, sum.Audit, len(sum.Errors), *out)
+	for _, e := range sum.Errors {
+		fmt.Println("  error:", e)
+	}
+	return nil
+}
+
+func cmdImportMailbox(ctx context.Context, a *app.App, args []string) error {
+	fs := newFlagSet("import-mailbox")
+	dir := fs.String("dir", "", "Maildir directory (Dovecot layout) to import")
+	archive := fs.String("archive", "", "tar or tar.gz archive to import")
+	if len(args) < 1 {
+		return fmt.Errorf("import-mailbox <mailbox-uuid> --dir path | --archive file")
+	}
+	id, err := uuid.Parse(args[0])
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	var sum export.Summary
+	switch {
+	case *dir != "":
+		sum, err = a.Services.Export.ImportMaildir(ctx, id, *dir)
+	case *archive != "":
+		f, ferr := os.Open(*archive)
+		if ferr != nil {
+			return ferr
+		}
+		defer f.Close()
+		sum, err = a.Services.Export.ImportArchive(ctx, id, f)
+	default:
+		return fmt.Errorf("one of --dir or --archive is required")
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("imported %d messages (%d bytes) into %d folders, %d errors\n", sum.Messages, sum.Bytes, sum.Folders, len(sum.Errors))
+	for _, e := range sum.Errors {
+		fmt.Println("  error:", e)
+	}
+	return nil
 }

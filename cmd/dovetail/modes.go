@@ -7,11 +7,28 @@ import (
 
 	"dovetail/app"
 	"dovetail/proto/imap"
+	"dovetail/proto/pop3"
 )
 
-// protocolModes registers the IMAP (and later POP3) servers with the app.
+// protocolModes registers the IMAP and POP3 servers with the app.
 func protocolModes() []app.ModeFunc {
-	return []app.ModeFunc{imapMode}
+	return []app.ModeFunc{imapMode, pop3Mode}
+}
+
+func pop3Mode(ctx context.Context, a *app.App, start func(string, func() error)) error {
+	if !a.Cfg.HasMode("pop3") {
+		return nil
+	}
+	host, _ := os.Hostname()
+	srv := pop3.New(pop3.Config{Hostname: host}, a.Services.Auth, a.Services.Mailbox, a.Log)
+	ln, err := app.Listen(a.Cfg.Listen.POP3)
+	if err != nil {
+		return fmt.Errorf("pop3 listen: %w", err)
+	}
+	a.AddCloser(srv.Shutdown)
+	a.MarkHandled("pop3")
+	start("pop3", func() error { return srv.Serve(ln) })
+	return nil
 }
 
 func imapMode(ctx context.Context, a *app.App, start func(string, func() error)) error {

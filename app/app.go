@@ -26,7 +26,9 @@ import (
 	"dovetail/service/auditor"
 	authsvc "dovetail/service/auth"
 	"dovetail/service/delivery"
+	"dovetail/service/export"
 	"dovetail/service/mailbox"
+	"dovetail/service/submit"
 	"dovetail/store/attach"
 	"dovetail/store/audit"
 	"dovetail/store/identity"
@@ -78,6 +80,8 @@ type Services struct {
 	Delivery *delivery.Service
 	Mailbox  *mailbox.Service
 	Admin    *admin.Service
+	Submit   *submit.Service
+	Export   *export.Service
 }
 
 // App is a configured Dovetail process.
@@ -172,6 +176,15 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 		Mailbox: mailbox.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, mailbox.Config{TrashRetention: cfg.Mail.TrashRetention, DefaultQuota: dq}),
 		Admin:   admin.New(st.Identity, st.Index, st.Queue, aud),
 	}
+	smtpPass, err := cfg.SMTP.Password.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("smtp password: %w", err)
+	}
+	sv.Submit = submit.New(submit.Config{
+		RelayHost: cfg.SMTP.RelayHost, Username: cfg.SMTP.Username, Password: smtpPass, StartTLS: cfg.SMTP.StartTLS,
+		Hostname: hostname(), MaxMessageSize: cfg.Mail.MaxMessageSize,
+	}, st.Identity, st.Index, sv.Delivery, aud, nil, log)
+	sv.Export = export.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Audit, sv.Delivery, aud, log)
 	return &App{Cfg: cfg, Log: log, Client: client, Stores: st, Services: sv}, nil
 }
 
@@ -267,11 +280,12 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 		w := worker.New(worker.Config{
-			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention,
+			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention, ExportDir: a.Cfg.Export.Directory,
 		}, worker.Stores{
 			Identity: a.Stores.Identity, Index: a.Stores.Index, Messages: a.Stores.Messages,
 			Attachments: a.Stores.Attachments, Audit: a.Stores.Audit, Queue: a.Stores.Queue,
 		}, a.Services.Auditor, idxp, a.Log)
+		w.Export = a.Services.Export
 		wctx, wcancel := context.WithCancel(ctx)
 		a.addCloser(func(context.Context) error { wcancel(); return nil })
 		start("worker", func() error { return w.Run(wctx) })

@@ -2,8 +2,12 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 	"dovetail/service/admin"
 	"dovetail/service/auditor"
 	"dovetail/service/delivery"
+	exportsvc "dovetail/service/export"
 	"dovetail/service/mailbox"
 	"dovetail/store/attach"
 	"dovetail/store/audit"
@@ -290,5 +295,36 @@ func TestSchedulerEnqueuesPeriodicTasks(t *testing.T) {
 	defer cancel()
 	if err := f.w.Run(cctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExportMailboxTask(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.deliver(t)
+	dir := t.TempDir()
+	f.w.cfg.ExportDir = dir
+	// Without an export service the task fails and retries.
+	_, _ = f.st.Queue.Enqueue(ctx, TaskExportMailbox, ExportTask{Mailbox: f.mb.ID, Gzip: true}, time.Time{})
+	f.drain(t)
+	if st, _ := f.st.Queue.Stats(ctx, TaskExportMailbox); st.Pending != 1 {
+		t.Fatalf("expected retry: %+v", st)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f.w.Export = exportsvc.New(f.st.Identity, f.st.Index, f.st.Messages, f.st.Attachments, f.st.Audit, f.del, f.w.aud, log)
+	f.now = f.now.Add(2 * time.Hour)
+	f.drain(t)
+	entries, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || !strings.HasSuffix(names[0], ".tar.gz") || !strings.HasSuffix(names[1], ".tar.gz.json") {
+		t.Fatalf("export files: %v", names)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, names[1]))
+	var res ExportResult
+	if err := json.Unmarshal(b, &res); err != nil || res.Messages != 1 || res.Bytes == 0 || res.File != names[0] {
+		t.Fatalf("result: %+v %v", res, err)
 	}
 }

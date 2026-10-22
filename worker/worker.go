@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +25,7 @@ import (
 	"dovetail/service/admin"
 	"dovetail/service/auditor"
 	"dovetail/service/delivery"
+	"dovetail/service/export"
 	"dovetail/store/attach"
 	"dovetail/store/audit"
 	"dovetail/store/identity"
@@ -41,10 +43,31 @@ const (
 	TaskAttachmentGC  = "attachment-gc"
 	TaskPurgeAudit    = "purge-audit"
 	TaskOrphanSweep   = "orphan-sweep"
+	TaskExportMailbox = "export-mailbox"
 )
 
 // AllTypes lists every queue the worker drains.
-var AllTypes = []string{TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota, TaskSearchIndex, TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep}
+var AllTypes = []string{TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota, TaskSearchIndex, TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep, TaskExportMailbox}
+
+// ExportTask is the payload of an export-mailbox task.
+type ExportTask struct {
+	Mailbox   uuid.UUID `json:"mailbox"`
+	Gzip      bool      `json:"gzip"`
+	Requested string    `json:"requested_by"`
+}
+
+// ExportResult is written next to the archive as <name>.json.
+type ExportResult struct {
+	Mailbox   uuid.UUID `json:"mailbox"`
+	File      string    `json:"file"`
+	Bytes     int64     `json:"bytes"`
+	Messages  int       `json:"messages"`
+	Audit     int       `json:"audit"`
+	Errors    []string  `json:"errors,omitempty"`
+	Started   time.Time `json:"started"`
+	Finished  time.Time `json:"finished"`
+	Requested string    `json:"requested_by"`
+}
 
 // Config for the worker.
 type Config struct {
@@ -66,6 +89,8 @@ type Config struct {
 	PurgeInterval time.Duration // per-mailbox trash purge
 	GCInterval    time.Duration // attachment GC, audit purge, orphan sweep
 	ScanBatch     int
+	// ExportDir receives mailbox export archives (export-mailbox tasks).
+	ExportDir string
 }
 
 // Worker drains the task queues.
@@ -82,6 +107,8 @@ type Worker struct {
 	lock  rados.IOContext // index pool, for the scheduler lock object
 	log   *slog.Logger
 	Now   func() time.Time
+	// Export is optional; without it export-mailbox tasks fail.
+	Export *export.Service
 }
 
 // Stores needed by the worker.
@@ -227,8 +254,55 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 		return w.purgeAudit(ctx)
 	case TaskOrphanSweep:
 		return w.orphanSweep(ctx)
+	case TaskExportMailbox:
+		var et ExportTask
+		if err := json.Unmarshal(task.Payload, &et); err != nil || et.Mailbox == uuid.Nil {
+			return fmt.Errorf("bad payload: %v", err)
+		}
+		return w.exportMailbox(ctx, et)
 	}
 	return fmt.Errorf("unknown task type %q", task.Type)
+}
+
+// exportMailbox writes an archive into ExportDir and a JSON result beside it.
+func (w *Worker) exportMailbox(ctx context.Context, et ExportTask) error {
+	if w.Export == nil || w.cfg.ExportDir == "" {
+		return errors.New("export not configured (export.directory)")
+	}
+	if err := os.MkdirAll(w.cfg.ExportDir, 0o750); err != nil {
+		return err
+	}
+	started := w.Now().UTC()
+	name := fmt.Sprintf("%s-%s.tar", et.Mailbox, started.Format("20060102T150405Z"))
+	if et.Gzip {
+		name += ".gz"
+	}
+	final := filepath.Join(w.cfg.ExportDir, name)
+	tmp := final + ".part"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	sum, err := w.Export.ExportMailbox(ctx, et.Mailbox, f, export.Options{Gzip: et.Gzip})
+	cerr := f.Close()
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if cerr != nil {
+		_ = os.Remove(tmp)
+		return cerr
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	st, _ := os.Stat(final)
+	res := ExportResult{Mailbox: et.Mailbox, File: name, Messages: sum.Messages, Audit: sum.Audit, Errors: sum.Errors, Started: started, Finished: w.Now().UTC(), Requested: et.Requested}
+	if st != nil {
+		res.Bytes = st.Size()
+	}
+	b, _ := json.MarshalIndent(res, "", "  ")
+	return os.WriteFile(final+".json", b, 0o640)
 }
 
 // ---- handlers ----

@@ -16,7 +16,7 @@ import (
 // bearer/basic authentication middleware.
 func mountJMAP(a *app.App, mux *http.ServeMux, trusted []net.IPNet) {
 	srv := jmap.New(jmap.Config{
-		BaseURL: a.Cfg.Session.Issuer, MaxUploadSize: a.Cfg.Mail.MaxMessageSize,
+		BaseURL: a.Cfg.Session.Issuer, MaxUploadSize: a.Cfg.Mail.MaxMessageSize, Submit: a.Services.Submit,
 		HoldCheck: func(ctx context.Context, mb uuid.UUID) bool {
 			v, err := a.Stores.Identity.GetMailbox(ctx, mb)
 			return err == nil && v.Value.Hold != nil
