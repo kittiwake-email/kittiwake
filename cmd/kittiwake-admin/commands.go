@@ -392,6 +392,9 @@ func (a *cli) account(args []string) error {
        account list [--domain d] [--prefix p] | get <username|uuid> | delete <id>
        account set <id> [--roles r,..] [--mailbox uuid] [--enable|--disable]
        account password <id> --comment text [--kind primary|application] [--expires YYYY-MM-DD|RFC3339] --password-stdin
+       account password <id> list
+       account password <id> expire <password-id> --expires YYYY-MM-DD|RFC3339|never [--comment text]
+       account password <id> remove <password-id>
                                               (an expiring primary is added as a temporary password; the permanent one keeps working)
        account totp-disable <id> | sessions <id> | revoke-session <id> <session-id>
        account token create <id> --expires YYYY-MM-DD|RFC3339 --comment text [--roles r,..]
@@ -538,6 +541,63 @@ func (a *cli) account(args []string) error {
 		}
 		return ok("deleted " + id)
 	case "password":
+		if len(rest) > 0 {
+			switch rest[0] {
+			case "list":
+				list, err := a.c.ListPasswords(a.ctx, id)
+				if err != nil {
+					return err
+				}
+				if list == nil {
+					list = []admin.Password{}
+				}
+				return emit(list, func() {
+					var rows [][]string
+					for _, p := range list {
+						exp := "never"
+						if p.ExpiresAt != nil {
+							exp = fmtTime(*p.ExpiresAt)
+						}
+						rows = append(rows, []string{p.ID, p.Kind, p.Comment, exp, fmtTime(p.Created)})
+					}
+					table([]string{"ID", "KIND", "COMMENT", "EXPIRES", "CREATED"}, rows)
+				})
+			case "remove":
+				if len(rest) != 2 {
+					return errors.New("usage: kittiwake-admin account password <account> remove <password-id>")
+				}
+				if err := a.c.DeletePassword(a.ctx, id, rest[1]); err != nil {
+					return err
+				}
+				return ok("removed password " + rest[1])
+			case "expire":
+				fs := newFlagSet("account password expire")
+				expires := fs.String("expires", "", "YYYY-MM-DD, RFC3339 or \"never\" (required)")
+				comment := fs.String("comment", "", "new comment (optional)")
+				if len(rest) < 2 {
+					return errors.New("usage: kittiwake-admin account password <account> expire <password-id> --expires DATE|never [--comment text]")
+				}
+				if err := fs.Parse(rest[2:]); err != nil {
+					return err
+				}
+				if *expires == "" {
+					return errors.New("--expires is required (a date, or \"never\")")
+				}
+				req := admin.PasswordUpdate{Comment: *comment}
+				if *expires != "never" {
+					t, err := parseDate(*expires)
+					if err != nil {
+						return fmt.Errorf("--expires: %w", err)
+					}
+					req.ExpiresAt = &t
+				}
+				p, err := a.c.UpdatePassword(a.ctx, id, rest[1], req)
+				if err != nil {
+					return err
+				}
+				return emit(p, nil)
+			}
+		}
 		fs := newFlagSet("account password")
 		kind := fs.String("kind", "primary", "primary or application")
 		comment := fs.String("comment", "", "what the password is for (required)")

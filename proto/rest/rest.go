@@ -204,6 +204,9 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"PATCH /v1/admin/accounts/{id}", s.accountPatch},
 		route{"DELETE /v1/admin/accounts/{id}", s.accountDelete},
 		route{"PUT /v1/admin/accounts/{id}/password", s.accountPassword},
+		route{"GET /v1/admin/accounts/{id}/passwords", s.accountPasswordList},
+		route{"PATCH /v1/admin/accounts/{id}/passwords/{pid}", s.accountPasswordPatch},
+		route{"DELETE /v1/admin/accounts/{id}/passwords/{pid}", s.accountPasswordDelete},
 		route{"DELETE /v1/admin/accounts/{id}/totp", s.accountTOTPDisable},
 		route{"GET /v1/admin/accounts/{id}/sessions", s.accountSessions},
 		route{"DELETE /v1/admin/accounts/{id}/sessions/{sid}", s.accountRevokeSession},
@@ -1186,6 +1189,52 @@ func (s *Server) accountDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.admin.DeleteAccount(r.Context(), a.ID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) accountPasswordList(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": passwordViews(a.Passwords)})
+}
+
+// accountPasswordPatch changes expiry (expires_at: time or null = never)
+// and optionally the comment of one password.
+func (s *Server) accountPasswordPatch(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req struct {
+		ExpiresAt *time.Time `json:"expires_at"`
+		Comment   string     `json:"comment"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	p, err := s.auth.UpdatePassword(r.Context(), a.ID, r.PathValue("pid"), req.ExpiresAt, req.Comment)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, passwordViews([]identity.Password{p})[0])
+}
+
+func (s *Server) accountPasswordDelete(w http.ResponseWriter, r *http.Request) {
+	a, err := s.loadAccount(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.auth.RemovePassword(r.Context(), a.ID, r.PathValue("pid")); err != nil {
 		s.fail(w, r, err)
 		return
 	}

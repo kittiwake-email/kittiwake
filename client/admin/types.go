@@ -178,6 +178,13 @@ type Password struct {
 	Created   time.Time  `json:"created"`
 }
 
+// PasswordUpdate changes expiry (nil = never; the field is always sent)
+// and, when set, the comment.
+type PasswordUpdate struct {
+	ExpiresAt *time.Time `json:"expires_at"`
+	Comment   string     `json:"comment,omitempty"`
+}
+
 // Account is the redacted account view.
 type Account struct {
 	ID          string     `json:"id"`

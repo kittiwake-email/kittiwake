@@ -688,3 +688,46 @@ func TestClusterRegistry(t *testing.T) {
 	f.expect(f.do("GET", "/v1/admin/clusters", ro, nil, ""), 200, "ro list")
 	f.expect(f.do("PATCH", "/v1/admin/clusters/"+id2, ro, map[string]any{"placement": true}, ""), 403, "ro patch")
 }
+
+func TestAdminPasswordManagement(t *testing.T) {
+	f := newFixture(t)
+	a := f.adminAuth()
+	r := f.do("POST", "/v1/admin/domains", a, map[string]any{"name": "pw.example"}, "")
+	f.expect(r, 201, "domain")
+	r = f.do("POST", "/v1/admin/mailboxes", a, map[string]any{}, "")
+	f.expect(r, 201, "mailbox")
+	mb := r.body["id"].(string)
+	r = f.do("POST", "/v1/admin/accounts", a, map[string]any{"username": "u@pw.example", "mailbox_id": mb, "roles": []string{"read"}, "password": "first-password-1"}, "")
+	f.expect(r, 201, "account")
+	id := r.body["id"].(string)
+	// A second, application password with an expiry.
+	exp := f.now.Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	r = f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{"password": "phone-password-1", "kind": "application", "comment": "phone", "expires_at": exp}, "")
+	f.expect(r, 200, "app password")
+	pid := r.body["id"].(string)
+	r = f.do("GET", "/v1/admin/accounts/"+id+"/passwords", a, nil, "")
+	f.expect(r, 200, "list")
+	items := r.body["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("passwords: %v", items)
+	}
+	// Expiry to never, comment changed.
+	r = f.do("PATCH", "/v1/admin/accounts/"+id+"/passwords/"+pid, a, map[string]any{"expires_at": nil, "comment": "old phone"}, "")
+	f.expect(r, 200, "patch")
+	if r.body["expires_at"] != nil || r.body["comment"] != "old phone" {
+		t.Fatalf("patch result: %v", r.body)
+	}
+	// Expiry in the past is refused; unknown id is 404.
+	f.expect(f.do("PATCH", "/v1/admin/accounts/"+id+"/passwords/"+pid, a, map[string]any{"expires_at": f.now.Add(-time.Hour).UTC().Format(time.RFC3339)}, ""), 400, "past expiry")
+	f.expect(f.do("PATCH", "/v1/admin/accounts/"+id+"/passwords/nope", a, map[string]any{"expires_at": nil}, ""), 404, "unknown password")
+	// Remove, then it is gone.
+	f.expect(f.do("DELETE", "/v1/admin/accounts/"+id+"/passwords/"+pid, a, nil, ""), 204, "remove")
+	f.expect(f.do("DELETE", "/v1/admin/accounts/"+id+"/passwords/"+pid, a, nil, ""), 404, "remove twice")
+	r = f.do("GET", "/v1/admin/accounts/"+id+"/passwords", a, nil, "")
+	if len(r.body["items"].([]any)) != 1 {
+		t.Fatalf("after remove: %v", r.body)
+	}
+	// Read-only admins may list, not change.
+	f.expect(f.do("GET", "/v1/admin/accounts/"+id+"/passwords", f.bearer(f.roTk), nil, ""), 200, "ro list")
+	f.expect(f.do("DELETE", "/v1/admin/accounts/"+id+"/passwords/"+pid, f.bearer(f.roTk), nil, ""), 403, "ro remove")
+}

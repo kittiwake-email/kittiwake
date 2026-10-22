@@ -898,6 +898,39 @@ func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind
 }
 
 // RemovePassword deletes a password by id.
+// UpdatePassword changes a password's expiry (nil = never) and, when
+// comment is not empty, its comment. The hash is untouched.
+func (s *Service) UpdatePassword(ctx context.Context, acctID uuid.UUID, pwID string, expiresAt *time.Time, comment string) (identity.Password, error) {
+	if expiresAt != nil && !expiresAt.After(s.Now()) {
+		return identity.Password{}, fmt.Errorf("%w: password expiry must be in the future", identity.ErrInvalid)
+	}
+	var out identity.Password
+	a, err := s.ids.UpdateAccount(ctx, acctID, func(a *identity.Account) error {
+		for i := range a.Passwords {
+			if a.Passwords[i].ID != pwID {
+				continue
+			}
+			a.Passwords[i].ExpiresAt = expiresAt
+			if c := strings.TrimSpace(comment); c != "" {
+				a.Passwords[i].Comment = c
+			}
+			out = a.Passwords[i]
+			return nil
+		}
+		return identity.ErrNotFound
+	})
+	if err != nil {
+		return identity.Password{}, err
+	}
+	s.cache.invalidateAccount(acctID)
+	exp := "never"
+	if expiresAt != nil {
+		exp = expiresAt.UTC().Format(time.RFC3339)
+	}
+	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-update", Target: pwID, Detail: "expires=" + exp, Subject: subjectIfOther(ctx, a.Username)})
+	return out, nil
+}
+
 func (s *Service) RemovePassword(ctx context.Context, acctID uuid.UUID, pwID string) error {
 	a, err := s.ids.UpdateAccount(ctx, acctID, func(a *identity.Account) error {
 		kept := a.Passwords[:0]

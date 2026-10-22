@@ -695,6 +695,51 @@ paths:
         "200": { $ref: "#/components/responses/PasswordCreated" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/passwords:
+    parameters: [{ $ref: "#/components/parameters/accountRef" }]
+    get:
+      tags: [admin]
+      summary: List the account's passwords (never the hashes)
+      responses:
+        "200":
+          description: Passwords
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/PasswordInfo" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/accounts/{id}/passwords/{pid}:
+    parameters:
+      - { $ref: "#/components/parameters/accountRef" }
+      - { name: pid, in: path, required: true, schema: { type: string }, description: Password id }
+    patch:
+      tags: [admin]
+      summary: Change a password's expiry (null = never) and optionally its comment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_at: { type: string, format: date-time, nullable: true }
+                comment: { type: string }
+      responses:
+        "200":
+          description: The password
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PasswordInfo" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Remove a password
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/accounts/{id}/totp:
     parameters: [{ $ref: "#/components/parameters/accountRef" }]
     delete:

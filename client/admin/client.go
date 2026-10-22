@@ -419,6 +419,25 @@ func (c *Client) SetPassword(ctx context.Context, idOrUsername string, req Passw
 	return out, c.do(ctx, http.MethodPut, "/v1/admin/accounts/"+pathEscape(idOrUsername)+"/password", nil, req, "", &out)
 }
 
+// ListPasswords lists an account's passwords (no hashes).
+func (c *Client) ListPasswords(ctx context.Context, idOrUsername string) ([]Password, error) {
+	var out struct {
+		Items []Password `json:"items"`
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/accounts/"+pathEscape(idOrUsername)+"/passwords", nil, nil, "", &out)
+}
+
+// UpdatePassword changes a password's expiry (nil = never) and optionally its comment.
+func (c *Client) UpdatePassword(ctx context.Context, idOrUsername, passwordID string, req PasswordUpdate) (Password, error) {
+	var out Password
+	return out, c.do(ctx, http.MethodPatch, "/v1/admin/accounts/"+pathEscape(idOrUsername)+"/passwords/"+pathEscape(passwordID), nil, req, "", &out)
+}
+
+// DeletePassword removes a password.
+func (c *Client) DeletePassword(ctx context.Context, idOrUsername, passwordID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/admin/accounts/"+pathEscape(idOrUsername)+"/passwords/"+pathEscape(passwordID), nil, nil, "", nil)
+}
+
 // DisableTOTP removes TOTP from an account.
 func (c *Client) DisableTOTP(ctx context.Context, idOrUsername string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/admin/accounts/"+pathEscape(idOrUsername)+"/totp", nil, nil, "", nil)
