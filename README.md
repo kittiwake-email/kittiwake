@@ -253,6 +253,12 @@ under `contrib/postfix/`. No glue code is needed: Postfix speaks socketmap nativ
 
 Sending is in scope. JMAP `EmailSubmission` accepts outbound messages and submits them over
 SMTP to a configurable relay host (typically Postfix), optionally with SASL credentials. The
+hop to the relay uses STARTTLS: `smtp.tls` is `opportunistic` by default (encrypt when the
+relay offers STARTTLS, without certificate verification, like Postfix "may"), `required`
+insists on STARTTLS and a certificate that verifies against the system roots and the relay
+name (`tls_server_name` when the certificate carries another name,
+`tls_insecure_skip_verify` for lab relays), `off` is plain text for a relay on the same
+host. With `required`, SASL credentials never travel in plain text. The
 platform does not queue or retry outbound mail itself beyond the submission; that is the
 MTA's job. If the relay rejects or is unreachable the API returns an error and nothing is
 stored. A copy of every sent message is stored in the Sent folder, going through the same
@@ -992,7 +998,8 @@ The daemon takes a single YAML file as configuration:
 - Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
 - Ceph: `config_file` and `options` applied to every storage connection (the Ceph
   clusters themselves are registered in the database as storage); pool names only for the memory backend
-- Outbound SMTP relay host (and optional SASL credentials)
+- Outbound SMTP relay host, STARTTLS mode (off, opportunistic, required) and optional SASL
+  credentials
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)

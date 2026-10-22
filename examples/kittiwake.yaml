@@ -67,7 +67,10 @@ proxy:
 
 smtp:
   relay_host: "[::1]:25"       # outbound submissions go here (Postfix)
-  # username / password for SASL, starttls: true
+  tls: opportunistic           # off | opportunistic (STARTTLS when offered) | required (STARTTLS + verified certificate)
+  # tls_server_name: mail.example.org   # certificate name when it differs from relay_host
+  # tls_insecure_skip_verify: false     # required, but accept any certificate (lab relays)
+  # username / password for SASL PLAIN (after STARTTLS)
 
 mail:
   max_message_size: 52428800   # 50 MiB

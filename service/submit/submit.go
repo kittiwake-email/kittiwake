@@ -42,14 +42,19 @@ var (
 
 // Config for the service.
 type Config struct {
-	RelayHost      string // host:port of the SMTP relay (Postfix)
-	Username       string // optional SASL PLAIN credentials
-	Password       string
-	StartTLS       bool
-	Hostname       string // EHLO name and Received: host
-	MaxMessageSize int64
-	Timeout        time.Duration
-	MaxRecipients  int
+	RelayHost string // host:port of the SMTP relay (Postfix)
+	Username  string // optional SASL PLAIN credentials
+	Password  string
+	// TLS: "off", "opportunistic" (default: STARTTLS when offered, no
+	// certificate verification) or "required" (STARTTLS and a verified
+	// certificate, unless TLSInsecureSkipVerify).
+	TLS                   string
+	TLSServerName         string
+	TLSInsecureSkipVerify bool
+	Hostname              string // EHLO name and Received: host
+	MaxMessageSize        int64
+	Timeout               time.Duration
+	MaxRecipients         int
 }
 
 // Relay delivers a message to the MTA. The default implementation speaks
@@ -372,22 +377,63 @@ func stripHeader(raw []byte, name string) []byte {
 
 type smtpRelay struct{ cfg Config }
 
-func (r *smtpRelay) Send(ctx context.Context, from string, to []string, data []byte) error {
+// ErrNoStartTLS: smtp.tls is required and the relay does not offer it.
+var ErrNoStartTLS = errors.New("submit: relay does not offer STARTTLS")
+
+// connect dials the relay and negotiates STARTTLS according to the TLS
+// mode. go-smtp only exposes STARTTLS as part of the initial handshake, so
+// an opportunistic connection to a relay without STARTTLS is redone in
+// plain text (one extra round trip for the rare plain relay).
+func (r *smtpRelay) connect(ctx context.Context) (*smtp.Client, error) {
 	d := net.Dialer{Timeout: 30 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", r.cfg.RelayHost)
+	dial := func() (net.Conn, error) { return d.DialContext(ctx, "tcp", r.cfg.RelayHost) }
+	mode := r.cfg.TLS
+	if mode == "" {
+		mode = "opportunistic"
+	}
+	if mode == "off" {
+		conn, err := dial()
+		if err != nil {
+			return nil, err
+		}
+		return smtp.NewClient(conn), nil
+	}
+	host, _, err := net.SplitHostPort(r.cfg.RelayHost)
+	if err != nil {
+		host = r.cfg.RelayHost
+	}
+	tc := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	if r.cfg.TLSServerName != "" {
+		tc.ServerName = r.cfg.TLSServerName
+	}
+	if mode == "opportunistic" || r.cfg.TLSInsecureSkipVerify {
+		tc.InsecureSkipVerify = true //nolint:gosec // opportunistic encryption, documented
+	}
+	conn, err := dial()
+	if err != nil {
+		return nil, err
+	}
+	c, err := smtp.NewClientStartTLS(conn, tc)
+	if err == nil {
+		return c, nil
+	}
+	if !strings.Contains(err.Error(), "doesn't support STARTTLS") {
+		return nil, err
+	}
+	if mode == "required" {
+		return nil, ErrNoStartTLS
+	}
+	conn, err = dial()
+	if err != nil {
+		return nil, err
+	}
+	return smtp.NewClient(conn), nil
+}
+
+func (r *smtpRelay) Send(ctx context.Context, from string, to []string, data []byte) error {
+	c, err := r.connect(ctx)
 	if err != nil {
 		return err
-	}
-	var c *smtp.Client
-	if r.cfg.StartTLS {
-		host, _, _ := net.SplitHostPort(r.cfg.RelayHost)
-		c, err = smtp.NewClientStartTLS(conn, &tls.Config{ServerName: host})
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-	} else {
-		c = smtp.NewClient(conn)
 	}
 	defer c.Close()
 	if err := c.Hello(r.cfg.Hostname); err != nil {

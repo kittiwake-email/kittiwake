@@ -133,7 +133,18 @@ type SMTP struct {
 	RelayHost string `yaml:"relay_host"`
 	Username  string `yaml:"username"`
 	Password  Secret `yaml:"password"`
-	StartTLS  bool   `yaml:"starttls"`
+	// TLS: "off" (plain), "opportunistic" (STARTTLS when the relay offers
+	// it, certificate not verified: encryption against passive listeners,
+	// like Postfix "may") or "required" (STARTTLS must be offered and the
+	// certificate must verify against the system roots and the relay's
+	// host name, or tls_server_name). Default opportunistic.
+	TLS string `yaml:"tls"`
+	// TLSServerName: name to verify the relay certificate against when it
+	// differs from the host in relay_host.
+	TLSServerName string `yaml:"tls_server_name"`
+	// TLSInsecureSkipVerify: with "required", still insist on STARTTLS but
+	// accept any certificate (lab relays with self-signed certificates).
+	TLSInsecureSkipVerify bool `yaml:"tls_insecure_skip_verify"`
 }
 
 // Mail holds message handling policy.
@@ -302,7 +313,7 @@ func Default() Config {
 			Worker:     Listener{Management: "[::1]:9097"},
 			Management: Listener{Address: "[::1]:9090", ProxyProtocol: "off"},
 		},
-		SMTP: SMTP{RelayHost: "[::1]:25"},
+		SMTP: SMTP{RelayHost: "[::1]:25", TLS: "opportunistic"},
 		Mail: Mail{
 			MaxMessageSize:      50 << 20,
 			InlineAttachmentMax: 4 << 10,
@@ -358,6 +369,11 @@ var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "admin", "socketmap", "w
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
+	switch c.SMTP.TLS {
+	case "off", "opportunistic", "required":
+	default:
+		return fmt.Errorf("config: smtp.tls must be off, opportunistic or required, got %q", c.SMTP.TLS)
+	}
 	for _, m := range c.Modes {
 		if !ValidModes[m] {
 			return fmt.Errorf("config: unknown mode %q", m)
