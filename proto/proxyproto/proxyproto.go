@@ -22,7 +22,7 @@ type Mode int
 const (
 	// Off: header not expected; connections are passed through untouched.
 	Off Mode = iota
-		// Optional: parse the header if present, otherwise use the socket
+	// Optional: parse the header if present, otherwise use the socket
 	// address. Costs OptionalHeaderTimeout before the banner on
 	// server-speaks-first protocols; prefer Required behind a proxy and
 	// Off without one.
