@@ -10,13 +10,13 @@ package message
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 
 	"dovetail/rados"
+	"dovetail/store/cluster"
 )
 
 // Sentinel errors.
@@ -27,13 +27,24 @@ var (
 
 // Store is the message store.
 type Store struct {
-	io  rados.IOContext
+	r   cluster.Resolver
 	Now func() time.Time
 }
 
-// New returns a store on the messages pool context.
+// New returns a store on the messages pool context (one cluster).
 func New(messagesPool rados.IOContext) *Store {
-	return &Store{io: messagesPool, Now: time.Now}
+	return NewMulti(cluster.FixedPools(messagesPool, messagesPool, messagesPool))
+}
+
+// NewMulti returns a store that resolves each mailbox's messages pool through r.
+func NewMulti(r cluster.Resolver) *Store { return &Store{r: r, Now: time.Now} }
+
+func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
+	_, io, err := s.r.Pool(ctx, mb, cluster.RoleMessages)
+	if err != nil {
+		return rados.ErrorContext(err)
+	}
+	return io
 }
 
 func docOID(mb, msg uuid.UUID) string { return mb.String() + "/" + msg.String() }
@@ -58,32 +69,32 @@ func (s *Store) Put(ctx context.Context, mb, msg uuid.UUID, doc []byte, loc stri
 		SetXattr("mailbox", []byte(mb.String())).
 		SetXattr("created", []byte(strconv.FormatInt(s.Now().UTC().Unix(), 10))).
 		SetXattr("loc", []byte(loc))
-	_, err := s.io.Write(ctx, docOID(mb, msg), tx)
+	_, err := s.pool(ctx, mb).Write(ctx, docOID(mb, msg), tx)
 	return mapErr(err)
 }
 
 // PutRaw keeps the original bytes next to the document (signed messages).
 func (s *Store) PutRaw(ctx context.Context, mb, msg uuid.UUID, raw []byte) error {
-	_, err := s.io.Write(ctx, rawOID(mb, msg), rados.NewWriteTx().CreateExclusive().WriteFull(raw).
+	_, err := s.pool(ctx, mb).Write(ctx, rawOID(mb, msg), rados.NewWriteTx().CreateExclusive().WriteFull(raw).
 		SetXattr("mailbox", []byte(mb.String())).SetXattr("created", []byte(strconv.FormatInt(s.Now().UTC().Unix(), 10))))
 	return mapErr(err)
 }
 
 // GetDoc returns the document JSON.
 func (s *Store) GetDoc(ctx context.Context, mb, msg uuid.UUID) ([]byte, error) {
-	data, _, err := s.io.Get(ctx, docOID(mb, msg))
+	data, _, err := s.pool(ctx, mb).Get(ctx, docOID(mb, msg))
 	return data, mapErr(err)
 }
 
 // GetRaw returns the kept original bytes, ErrNotFound when none were kept.
 func (s *Store) GetRaw(ctx context.Context, mb, msg uuid.UUID) ([]byte, error) {
-	data, _, err := s.io.Get(ctx, rawOID(mb, msg))
+	data, _, err := s.pool(ctx, mb).Get(ctx, rawOID(mb, msg))
 	return data, mapErr(err)
 }
 
 // Location returns the "<folder>/<uid>" the message is indexed at.
 func (s *Store) Location(ctx context.Context, mb, msg uuid.UUID) (string, error) {
-	x, err := s.io.GetXattrs(ctx, docOID(mb, msg))
+	x, err := s.pool(ctx, mb).GetXattrs(ctx, docOID(mb, msg))
 	if err != nil {
 		return "", mapErr(err)
 	}
@@ -92,14 +103,14 @@ func (s *Store) Location(ctx context.Context, mb, msg uuid.UUID) (string, error)
 
 // SetLocation records a new location after a move.
 func (s *Store) SetLocation(ctx context.Context, mb, msg uuid.UUID, loc string) error {
-	_, err := s.io.Write(ctx, docOID(mb, msg), rados.NewWriteTx().AssertExists().SetXattr("loc", []byte(loc)))
+	_, err := s.pool(ctx, mb).Write(ctx, docOID(mb, msg), rados.NewWriteTx().AssertExists().SetXattr("loc", []byte(loc)))
 	return mapErr(err)
 }
 
 // Delete removes the document and any kept raw copy. Missing is not an error.
 func (s *Store) Delete(ctx context.Context, mb, msg uuid.UUID) error {
 	for _, oid := range []string{docOID(mb, msg), rawOID(mb, msg)} {
-		if err := s.io.Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		if err := s.pool(ctx, mb).Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
 			return mapErr(err)
 		}
 	}
@@ -108,42 +119,43 @@ func (s *Store) Delete(ctx context.Context, mb, msg uuid.UUID) error {
 
 // Info describes a stored message object for sweeps.
 type Info struct {
-	Mailbox  uuid.UUID
-	Message  uuid.UUID
-	Created  time.Time
-	Size     uint64
-	Location string
+	ClusterID int64
+	Mailbox   uuid.UUID
+	Message   uuid.UUID
+	Created   time.Time
+	Size      uint64
+	Location  string
 }
 
-// List walks every message document in the pool (not the .raw objects),
-// calling fn with its info. Used by the orphan sweep and mailbox removal.
+// List walks every message document on every connected cluster (not the
+// .raw objects), calling fn with its info. Used by the orphan sweep and
+// mailbox removal; act on an Info with cluster.WithID(ctx, info.ClusterID).
 func (s *Store) List(ctx context.Context, fn func(Info) error) error {
-	return s.io.List(ctx, func(oid string) error {
-		if len(oid) != 73 || oid[36] != '/' { // uuid/uuid
-			return nil
-		}
-		mb, err1 := uuid.Parse(oid[:36])
-		msg, err2 := uuid.Parse(oid[37:])
-		if err1 != nil || err2 != nil {
-			return nil
-		}
-		st, err := s.io.Stat(ctx, oid)
-		if err != nil {
-			if errors.Is(err, rados.ErrNotFound) {
+	return s.r.Each(ctx, cluster.RoleMessages, func(cid int64, io rados.IOContext) error {
+		return io.List(ctx, func(oid string) error {
+			if len(oid) != 73 || oid[36] != '/' { // uuid/uuid
 				return nil
 			}
-			return mapErr(err)
-		}
-		info := Info{Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime}
-		if x, err := s.io.GetXattrs(ctx, oid); err == nil {
-			if c, err := strconv.ParseInt(string(x["created"]), 10, 64); err == nil {
-				info.Created = time.Unix(c, 0).UTC()
+			mb, err1 := uuid.Parse(oid[:36])
+			msg, err2 := uuid.Parse(oid[37:])
+			if err1 != nil || err2 != nil {
+				return nil
 			}
-			info.Location = string(x["loc"])
-		}
-		return fn(info)
+			st, err := io.Stat(ctx, oid)
+			if err != nil {
+				if errors.Is(err, rados.ErrNotFound) {
+					return nil
+				}
+				return mapErr(err)
+			}
+			info := Info{ClusterID: cid, Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime}
+			if x, err := io.GetXattrs(ctx, oid); err == nil {
+				if c, err := strconv.ParseInt(string(x["created"]), 10, 64); err == nil {
+					info.Created = time.Unix(c, 0).UTC()
+				}
+				info.Location = string(x["loc"])
+			}
+			return fn(info)
+		})
 	})
 }
-
-// ObjectName is the object name of a message, for logs and audit.
-func ObjectName(mb, msg uuid.UUID) string { return fmt.Sprintf("%s/%s", mb, msg) }

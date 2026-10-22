@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,17 @@ type Service struct {
 	queue queue.Store
 	audit *auditor.Auditor
 	Now   func() time.Time
+	// Clusters places new mailboxes and verifies clusters added through
+	// the API. nil means a single implicit cluster (memory backend).
+	Clusters ClusterControl
+}
+
+// ClusterControl is what the admin service needs from the cluster registry.
+type ClusterControl interface {
+	// Pick chooses the cluster for a new mailbox.
+	Pick(ctx context.Context) (int64, error)
+	// Verify connects to a cluster record once and returns its fsid.
+	Verify(c identity.Cluster) (uuid.UUID, error)
 }
 
 // New returns the service. queue may be nil (tasks are then refused).
@@ -147,11 +159,18 @@ func (s *Service) CreateMailbox(ctx context.Context, m identity.Mailbox) (identi
 	if err := s.authorize(ctx, "mailbox-create", ""); err != nil {
 		return identity.Mailbox{}, err
 	}
+	if m.ClusterID == 0 && s.Clusters != nil {
+		id, err := s.Clusters.Pick(ctx)
+		if err != nil {
+			return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
+		}
+		m.ClusterID = id
+	}
 	out, err := s.ids.CreateMailbox(ctx, m)
 	if err != nil {
 		return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
 	}
-	s.ok(ctx, out.ID, "mailbox-create", out.ID.String(), "")
+	s.ok(ctx, out.ID, "mailbox-create", out.ID.String(), fmt.Sprintf("cluster=%d", out.ClusterID))
 	return out, nil
 }
 
@@ -281,11 +300,17 @@ func (s *Service) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	if err := s.authorize(ctx, "mailbox-delete", id.String()); err != nil {
 		return err
 	}
+	// The record carries the cluster; the removal task needs it after the
+	// record is gone.
+	var clusterID int64
+	if v, err := s.ids.GetMailbox(ctx, id); err == nil {
+		clusterID = v.Value.ClusterID
+	}
 	if err := s.ids.DeleteMailbox(ctx, id); err != nil {
 		return s.fail(ctx, id, "mailbox-delete", id.String(), err)
 	}
 	if s.queue != nil {
-		if _, err := s.queue.Enqueue(ctx, TaskRemoveMailbox, map[string]any{"mailbox": id}, time.Time{}); err != nil {
+		if _, err := s.queue.Enqueue(ctx, TaskRemoveMailbox, map[string]any{"mailbox": id, "cluster_id": clusterID}, time.Time{}); err != nil {
 			return s.fail(ctx, id, "mailbox-delete", id.String(), err)
 		}
 	}
@@ -796,4 +821,128 @@ func (s *Service) ImportIdentity(ctx context.Context, data []byte) (string, erro
 	summary := fmt.Sprintf("created=%d skipped=%d tokens-ignored=%d", created, skipped, len(in.Tokens)+len(in.Admins))
 	s.ok(ctx, uuid.Nil, "import-identity", "", summary)
 	return summary, nil
+}
+
+// ---- cluster registry ----
+
+// ClusterRequest describes a cluster to add or change. On add, Key is
+// the CephX secret of User; on update, empty fields keep their value.
+type ClusterRequest struct {
+	Name      string
+	MonHost   string
+	User      string
+	Key       string
+	Pools     identity.Pools
+	Placement *bool
+}
+
+// AddCluster connects to the cluster once to verify the details and read
+// its fsid, then registers it. Placement defaults to enabled.
+func (s *Service) AddCluster(ctx context.Context, req ClusterRequest) (identity.Cluster, error) {
+	if err := s.authorize(ctx, "cluster-add", req.Name); err != nil {
+		return identity.Cluster{}, err
+	}
+	c := identity.Cluster{Name: req.Name, MonHost: req.MonHost, User: req.User, Key: req.Key, Pools: req.Pools, Placement: true}
+	if req.Placement != nil {
+		c.Placement = *req.Placement
+	}
+	if err := identity.ValidateCluster(&c); err != nil {
+		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-add", req.Name, err)
+	}
+	if s.Clusters != nil {
+		fsid, err := s.Clusters.Verify(c)
+		if err != nil {
+			return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-add", req.Name, fmt.Errorf("%w: cannot reach cluster: %v", ErrInvalid, err))
+		}
+		c.FSID = fsid
+	}
+	out, err := s.ids.CreateCluster(ctx, c)
+	if err != nil {
+		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-add", req.Name, err)
+	}
+	s.ok(ctx, uuid.Nil, "cluster-add", out.Name, fmt.Sprintf("id=%d fsid=%s placement=%v", out.ID, out.FSID, out.Placement))
+	return out, nil
+}
+
+// ListClusters lists the registry (keys included: admin only).
+func (s *Service) ListClusters(ctx context.Context) ([]identity.Cluster, error) {
+	if err := s.authorizeRead(ctx, "cluster-list", ""); err != nil {
+		return nil, err
+	}
+	return s.ids.ListClusters(ctx)
+}
+
+// GetCluster returns one cluster.
+func (s *Service) GetCluster(ctx context.Context, id int64) (identity.Cluster, error) {
+	if err := s.authorizeRead(ctx, "cluster-get", strconv.FormatInt(id, 10)); err != nil {
+		return identity.Cluster{}, err
+	}
+	return s.ids.GetCluster(ctx, id)
+}
+
+// UpdateCluster changes connection details or the placement flag. New
+// connection details are verified against the recorded fsid first.
+func (s *Service) UpdateCluster(ctx context.Context, id int64, req ClusterRequest) (identity.Cluster, error) {
+	target := strconv.FormatInt(id, 10)
+	if err := s.authorize(ctx, "cluster-update", target); err != nil {
+		return identity.Cluster{}, err
+	}
+	cur, err := s.ids.GetCluster(ctx, id)
+	if err != nil {
+		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, err)
+	}
+	next := cur
+	if req.Name != "" {
+		next.Name = req.Name
+	}
+	if req.MonHost != "" {
+		next.MonHost = req.MonHost
+	}
+	if req.User != "" {
+		next.User = req.User
+	}
+	if req.Key != "" {
+		next.Key = req.Key
+	}
+	if req.Pools.Messages != "" {
+		next.Pools.Messages = req.Pools.Messages
+	}
+	if req.Pools.Attachments != "" {
+		next.Pools.Attachments = req.Pools.Attachments
+	}
+	if req.Pools.Index != "" {
+		next.Pools.Index = req.Pools.Index
+	}
+	if req.Placement != nil {
+		next.Placement = *req.Placement
+	}
+	if s.Clusters != nil && (next.MonHost != cur.MonHost || next.User != cur.User || next.Key != cur.Key || next.Pools != cur.Pools) {
+		fsid, err := s.Clusters.Verify(next)
+		if err != nil {
+			return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, fmt.Errorf("%w: cannot reach cluster: %v", ErrInvalid, err))
+		}
+		if cur.FSID != uuid.Nil && fsid != cur.FSID {
+			return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, fmt.Errorf("%w: new details reach cluster %s, registry has %s", ErrInvalid, fsid, cur.FSID))
+		}
+		next.FSID = fsid
+	}
+	out, err := s.ids.UpdateCluster(ctx, id, func(c *identity.Cluster) error { *c = next; return nil })
+	if err != nil {
+		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, err)
+	}
+	s.ok(ctx, uuid.Nil, "cluster-update", out.Name, fmt.Sprintf("placement=%v", out.Placement))
+	return out, nil
+}
+
+// DeleteCluster removes a cluster that no mailbox refers to.
+func (s *Service) DeleteCluster(ctx context.Context, id int64) error {
+	target := strconv.FormatInt(id, 10)
+	if err := s.authorize(ctx, "cluster-delete", target); err != nil {
+		return err
+	}
+	if err := s.ids.DeleteCluster(ctx, id); err != nil {
+		return s.fail(ctx, uuid.Nil, "cluster-delete", target, err)
+	}
+	s.ok(ctx, uuid.Nil, "cluster-delete", target, "")
+	return nil
 }

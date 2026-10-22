@@ -37,6 +37,9 @@ var (
 type Client interface {
 	// Pool returns an IOContext for the named pool (default namespace).
 	Pool(name string) (IOContext, error)
+	// FSID returns the cluster's fsid (its identity across reconnects and
+	// config changes).
+	FSID() (string, error)
 	// Close releases the connection. IOContexts obtained from it become invalid.
 	Close() error
 }

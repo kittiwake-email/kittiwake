@@ -77,6 +77,8 @@ type libradosClient struct {
 	conn *ceph.Conn
 }
 
+func (c *libradosClient) FSID() (string, error) { return c.conn.GetFSID() }
+
 func (c *libradosClient) Pool(name string) (IOContext, error) {
 	// Probe once so a bad pool name fails early.
 	probe, err := c.conn.OpenIOContext(name)

@@ -27,6 +27,7 @@ import (
 	"dovetail/service/export"
 	"dovetail/store/attach"
 	"dovetail/store/audit"
+	"dovetail/store/cluster"
 	"dovetail/store/identity"
 	"dovetail/store/index"
 	"dovetail/store/message"
@@ -222,6 +223,9 @@ func (w *Worker) execute(ctx context.Context, task queue.Task) {
 
 type mailboxPayload struct {
 	Mailbox uuid.UUID `json:"mailbox"`
+	// ClusterID pins the cluster for a mailbox whose record is gone
+	// (remove-mailbox); zero means "look it up".
+	ClusterID int64 `json:"cluster_id,omitempty"`
 }
 
 func (w *Worker) handle(ctx context.Context, task queue.Task) error {
@@ -237,6 +241,9 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 	case TaskPurgeTrash:
 		return w.purgeTrash(ctx, mp.Mailbox)
 	case TaskRemoveMailbox:
+		if mp.ClusterID != 0 {
+			ctx = cluster.WithID(ctx, mp.ClusterID)
+		}
 		return w.removeMailbox(ctx, mp.Mailbox)
 	case TaskRecalcQuota:
 		_, err := w.idx.Recalculate(ctx, mp.Mailbox)
@@ -417,17 +424,17 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 		return err
 	}
 	// Anything left in the messages pool for this mailbox (orphans).
-	var leftover []uuid.UUID
+	var leftover []message.Info
 	if err := w.msgs.List(ctx, func(i message.Info) error {
 		if i.Mailbox == mb {
-			leftover = append(leftover, i.Message)
+			leftover = append(leftover, i)
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	for _, id := range leftover {
-		if err := w.deleteMessage(ctx, mb, id); err != nil {
+	for _, i := range leftover {
+		if err := w.deleteMessage(cluster.WithID(ctx, i.ClusterID), mb, i.Message); err != nil {
 			return err
 		}
 		n++
@@ -436,15 +443,20 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 	return nil
 }
 
-// attachmentGC deletes attachment objects nobody references any more.
+// attachmentGC deletes attachment objects nobody references any more, on
+// every connected cluster.
 func (w *Worker) attachmentGC(ctx context.Context) error {
-	var hashes []string
-	if err := w.atts.List(ctx, func(h string) error { hashes = append(hashes, h); return nil }); err != nil {
+	type ref struct {
+		cluster int64
+		hash    string
+	}
+	var hashes []ref
+	if err := w.atts.List(ctx, func(cid int64, h string) error { hashes = append(hashes, ref{cid, h}); return nil }); err != nil {
 		return err
 	}
 	deleted := 0
 	for _, h := range hashes {
-		ok, err := w.atts.DeleteIfUnreferenced(ctx, h, w.cfg.AttachmentGCGrace)
+		ok, err := w.atts.DeleteIfUnreferenced(ctx, h.cluster, h.hash, w.cfg.AttachmentGCGrace)
 		if err != nil {
 			return err
 		}
@@ -485,11 +497,11 @@ func (w *Worker) purgeAudit(ctx context.Context) error {
 func (w *Worker) orphanSweep(ctx context.Context) error {
 	cutoff := w.Now().Add(-w.cfg.OrphanAge)
 	retention := map[uuid.UUID]map[uuid.UUID]bool{}
-	inRetention := func(mb, msg uuid.UUID) bool {
+	inRetention := func(cid int64, mb, msg uuid.UUID) bool {
 		set, ok := retention[mb]
 		if !ok {
 			set = map[uuid.UUID]bool{}
-			entries, _, _, err := w.idx.ListRetention(ctx, mb, time.Time{}, 0)
+			entries, _, _, err := w.idx.ListRetention(cluster.WithID(ctx, cid), mb, time.Time{}, 0)
 			if err == nil {
 				for _, e := range entries {
 					set[e.MessageID] = true
@@ -504,14 +516,16 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		if i.Created.After(cutoff) {
 			return nil
 		}
+		// The object's own cluster answers; the mailbox record may be gone.
+		cctx := cluster.WithID(ctx, i.ClusterID)
 		if loc, err := index.ParseLocation(i.Location); err == nil {
-			if rec, err := w.idx.GetRecord(ctx, i.Mailbox, loc.FolderID, loc.UID); err == nil && rec.MessageID == i.Message {
+			if rec, err := w.idx.GetRecord(cctx, i.Mailbox, loc.FolderID, loc.UID); err == nil && rec.MessageID == i.Message {
 				return nil
 			} else if err != nil && !errors.Is(err, index.ErrNotFound) {
 				return err
 			}
 		}
-		if inRetention(i.Mailbox, i.Message) {
+		if inRetention(i.ClusterID, i.Mailbox, i.Message) {
 			return nil
 		}
 		orphans = append(orphans, i)
@@ -521,7 +535,7 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		return err
 	}
 	for _, o := range orphans {
-		if err := w.deleteMessage(ctx, o.Mailbox, o.Message); err != nil {
+		if err := w.deleteMessage(cluster.WithID(ctx, o.ClusterID), o.Mailbox, o.Message); err != nil {
 			return err
 		}
 	}

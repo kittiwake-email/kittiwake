@@ -144,7 +144,7 @@ func TestDeliverStoresEverything(t *testing.T) {
 	if len(refs) != 1 {
 		t.Fatalf("refs: %v", refs)
 	}
-	info, err := f.atts.Stat(ctx, refs[0])
+	info, err := f.atts.Stat(ctx, f.mb.ID, refs[0])
 	if err != nil || info.Refs != 1 || info.ContentType != "application/pdf" {
 		t.Fatalf("attachment: %+v %v", info, err)
 	}
@@ -152,7 +152,7 @@ func TestDeliverStoresEverything(t *testing.T) {
 	if _, err := f.msgs.GetRaw(ctx, f.mb.ID, d.MessageID); err == nil {
 		t.Fatal("raw copy kept for an unsigned message")
 	}
-	rendered, err := mail.Render(&doc, func(h string) ([]byte, error) { return f.atts.Get(ctx, h) })
+	rendered, err := mail.Render(&doc, func(h string) ([]byte, error) { return f.atts.Get(ctx, f.mb.ID, h) })
 	if err != nil || int64(len(rendered)) != rec.Size || rec.Size != doc.Size {
 		t.Fatalf("render: %v len=%d rec=%d doc=%d", err, len(rendered), rec.Size, doc.Size)
 	}
@@ -166,7 +166,7 @@ func TestDeliverStoresEverything(t *testing.T) {
 	}
 	// Second delivery of the same attachment dedups: refs 2, one object.
 	out2, _ := f.svc.Deliver(ctx, Request{Recipient: "wido@example.org", Raw: []byte(raw)})
-	info, _ = f.atts.Stat(ctx, refs[0])
+	info, _ = f.atts.Stat(ctx, f.mb.ID, refs[0])
 	if info.Refs != 2 || out2[0].UID != 2 {
 		t.Fatalf("dedup: refs=%d uid=%d", info.Refs, out2[0].UID)
 	}

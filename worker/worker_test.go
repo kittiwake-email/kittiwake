@@ -120,7 +120,7 @@ func TestPurgeTrashAndAttachmentGC(t *testing.T) {
 	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, d1.MessageID); err == nil {
 		t.Fatal("not purged")
 	}
-	info, _ := f.st.Attachments.Stat(ctx, hash)
+	info, _ := f.st.Attachments.Stat(ctx, f.mb.ID, hash)
 	if info.Refs != 1 {
 		t.Fatalf("refs after purge: %d", info.Refs)
 	}
@@ -134,13 +134,13 @@ func TestPurgeTrashAndAttachmentGC(t *testing.T) {
 	_, _ = f.st.Queue.Enqueue(ctx, TaskPurgeTrash, mailboxPayload{Mailbox: f.mb.ID}, time.Time{})
 	_, _ = f.st.Queue.Enqueue(ctx, TaskAttachmentGC, struct{}{}, time.Time{})
 	f.drain(t)
-	if _, err := f.st.Attachments.Get(ctx, hash); err != nil {
+	if _, err := f.st.Attachments.Get(ctx, f.mb.ID, hash); err != nil {
 		t.Fatal("deleted inside grace")
 	}
 	f.now = f.now.Add(2 * time.Hour)
 	_, _ = f.st.Queue.Enqueue(ctx, TaskAttachmentGC, struct{}{}, time.Time{})
 	f.drain(t)
-	if _, err := f.st.Attachments.Get(ctx, hash); err == nil {
+	if _, err := f.st.Attachments.Get(ctx, f.mb.ID, hash); err == nil {
 		t.Fatal("unreferenced attachment not collected")
 	}
 	st, _ := f.st.Queue.Stats(ctx, TaskPurgeTrash)
@@ -210,7 +210,7 @@ func TestRemoveMailbox(t *testing.T) {
 	if ok, _ := f.st.Index.Exists(ctx, f.mb.ID); ok {
 		t.Fatal("index remains")
 	}
-	info, _ := f.st.Attachments.Stat(ctx, hash)
+	info, _ := f.st.Attachments.Stat(ctx, f.mb.ID, hash)
 	if info.Refs != 0 {
 		t.Fatalf("attachment refs remain: %d", info.Refs)
 	}

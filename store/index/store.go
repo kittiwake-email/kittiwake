@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"dovetail/rados"
+	"dovetail/store/cluster"
 )
 
 const (
@@ -37,7 +38,7 @@ const (
 
 // Store is the mailbox index store on the index pool.
 type Store struct {
-	io  rados.IOContext
+	r   cluster.Resolver
 	Now func() time.Time
 
 	// roots caches the last root seen per mailbox so an optimistic update
@@ -55,7 +56,20 @@ const maxCachedRoots = 10000
 
 // New returns a store on the index pool context.
 func New(indexPool rados.IOContext) *Store {
-	return &Store{io: indexPool, Now: time.Now}
+	return NewMulti(cluster.FixedPools(indexPool, indexPool, indexPool))
+}
+
+// NewMulti returns a store that resolves each mailbox's index pool through r.
+func NewMulti(r cluster.Resolver) *Store { return &Store{r: r, Now: time.Now} }
+
+// pool returns the mailbox's index pool, or a context that fails every
+// operation with the resolution error (cluster unavailable).
+func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
+	_, io, err := s.r.Pool(ctx, mb, cluster.RoleIndex)
+	if err != nil {
+		return rados.ErrorContext(err)
+	}
+	return io
 }
 
 func (s *Store) cacheRoot(mb uuid.UUID, vr versionedRoot) {
@@ -143,7 +157,7 @@ type versionedRoot struct {
 }
 
 func (s *Store) getRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, error) {
-	data, ver, err := s.io.Get(ctx, rootOID(mb))
+	data, ver, err := s.pool(ctx, mb).Get(ctx, rootOID(mb))
 	if err != nil {
 		return versionedRoot{}, mapErr(err)
 	}
@@ -212,7 +226,7 @@ func (s *Store) updateRoot(ctx context.Context, mb uuid.UUID, fn func(r *Root) e
 			}
 			tx.OmapSet(kv)
 		}
-		ver, err := s.io.Write(ctx, rootOID(mb), tx)
+		ver, err := s.pool(ctx, mb).Write(ctx, rootOID(mb), tx)
 		if err == nil {
 			r.pending = nil
 			s.cacheRoot(mb, versionedRoot{root: r, version: ver})
@@ -288,7 +302,7 @@ func (s *Store) EnsureRoot(ctx context.Context, mb uuid.UUID) (Root, error) {
 		b, _ := json.Marshal(&c)
 		kv[changeKey(c.ModSeq)] = b
 	}
-	ver, err := s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().CreateExclusive().WriteFull(data).OmapSet(kv))
+	ver, err := s.pool(ctx, mb).Write(ctx, rootOID(mb), rados.NewWriteTx().CreateExclusive().WriteFull(data).OmapSet(kv))
 	if errors.Is(err, rados.ErrExists) {
 		vr, err := s.getRoot(ctx, mb)
 		return vr.root, err
@@ -312,7 +326,7 @@ func (s *Store) EnsureExists(ctx context.Context, mb uuid.UUID) error {
 
 // Exists reports whether the mailbox index exists.
 func (s *Store) Exists(ctx context.Context, mb uuid.UUID) (bool, error) {
-	_, err := s.io.Stat(ctx, rootOID(mb))
+	_, err := s.pool(ctx, mb).Stat(ctx, rootOID(mb))
 	if errors.Is(err, rados.ErrNotFound) {
 		return false, nil
 	}
@@ -333,7 +347,7 @@ func (s *Store) Changes(ctx context.Context, mb uuid.UUID, since uint64, max int
 	if since >= vr.root.ModSeq {
 		return nil, false, vr.root.ModSeq, nil
 	}
-	kv, more, err := s.io.OmapList(ctx, rootOID(mb), "c/", changeKey(since), max)
+	kv, more, err := s.pool(ctx, mb).OmapList(ctx, rootOID(mb), "c/", changeKey(since), max)
 	if err != nil {
 		return nil, false, 0, mapErr(err)
 	}
@@ -362,7 +376,7 @@ func (s *Store) TrimChanges(ctx context.Context, mb uuid.UUID, keep int) error {
 	}
 	var rm []string
 	for {
-		kv, more, err := s.io.OmapList(ctx, rootOID(mb), "c/", "", 512)
+		kv, more, err := s.pool(ctx, mb).OmapList(ctx, rootOID(mb), "c/", "", 512)
 		if err != nil {
 			return mapErr(err)
 		}
@@ -375,7 +389,7 @@ func (s *Store) TrimChanges(ctx context.Context, mb uuid.UUID, keep int) error {
 		if len(rm) == n || !more || len(rm)-n < len(kv) {
 			break
 		}
-		if _, err := s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().OmapRemove(rm[n:]...)); err != nil {
+		if _, err := s.pool(ctx, mb).Write(ctx, rootOID(mb), rados.NewWriteTx().OmapRemove(rm[n:]...)); err != nil {
 			return mapErr(err)
 		}
 		rm = rm[:n]
@@ -390,7 +404,7 @@ func (s *Store) TrimChanges(ctx context.Context, mb uuid.UUID, keep int) error {
 		return err
 	}
 	if len(rm) > 0 {
-		if _, err := s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().OmapRemove(rm...)); err != nil {
+		if _, err := s.pool(ctx, mb).Write(ctx, rootOID(mb), rados.NewWriteTx().OmapRemove(rm...)); err != nil {
 			return mapErr(err)
 		}
 	}
@@ -539,7 +553,7 @@ func (s *Store) DeleteFolder(ctx context.Context, mb uuid.UUID, id string) error
 		return err
 	}
 	for _, oid := range shards {
-		if err := s.io.Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		if err := s.pool(ctx, mb).Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
 			return mapErr(err)
 		}
 	}
@@ -586,7 +600,7 @@ func (s *Store) UpdateFolder(ctx context.Context, mb uuid.UUID, id string, fn fu
 // ---- messages ----
 
 func (s *Store) getRecord(ctx context.Context, mb uuid.UUID, fid string, uid uint32) (Record, error) {
-	m, err := s.io.OmapGet(ctx, folderOID(mb, fid, uid), []string{uidKey(uid)})
+	m, err := s.pool(ctx, mb).OmapGet(ctx, folderOID(mb, fid, uid), []string{uidKey(uid)})
 	if err != nil {
 		return Record{}, mapErr(err)
 	}
@@ -606,7 +620,7 @@ func (s *Store) putRecord(ctx context.Context, mb uuid.UUID, fid string, rec Rec
 	if err != nil {
 		return err
 	}
-	_, err = s.io.Write(ctx, folderOID(mb, fid, rec.UID), rados.NewWriteTx().OmapSet(map[string][]byte{uidKey(rec.UID): data}))
+	_, err = s.pool(ctx, mb).Write(ctx, folderOID(mb, fid, rec.UID), rados.NewWriteTx().OmapSet(map[string][]byte{uidKey(rec.UID): data}))
 	return mapErr(err)
 }
 
@@ -616,8 +630,8 @@ func (s *Store) GetRecord(ctx context.Context, mb uuid.UUID, fid string, uid uin
 }
 
 // listShard returns the records of one shard object, newest first.
-func (s *Store) listShard(ctx context.Context, oid, after string, max int) ([]Record, bool, error) {
-	kv, more, err := s.io.OmapList(ctx, oid, "", after, max)
+func (s *Store) listShard(ctx context.Context, mb uuid.UUID, oid, after string, max int) ([]Record, bool, error) {
+	kv, more, err := s.pool(ctx, mb).OmapList(ctx, oid, "", after, max)
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
 			return nil, false, nil
@@ -667,7 +681,7 @@ func (s *Store) ListFolderDesc(ctx context.Context, mb uuid.UUID, fid string, be
 		if max > 0 {
 			want = max - len(records)
 		}
-		recs, shardMore, err := s.listShard(ctx, oid, after, want)
+		recs, shardMore, err := s.listShard(ctx, mb, oid, after, want)
 		if err != nil {
 			return nil, false, err
 		}
@@ -699,7 +713,7 @@ func (s *Store) ListFolder(ctx context.Context, mb uuid.UUID, fid string, afterU
 	top := (f.UIDNext - 1) >> shardBits
 	for k := afterUID >> shardBits; k <= top; k++ {
 		oid := folderOID(mb, fid, k<<shardBits)
-		recs, _, err := s.listShard(ctx, oid, "", 0)
+		recs, _, err := s.listShard(ctx, mb, oid, "", 0)
 		if err != nil {
 			return nil, false, err
 		}
@@ -736,7 +750,7 @@ func (s *Store) threadFor(ctx context.Context, mb uuid.UUID, rec *Record) (strin
 	}
 	found := map[string]string{}
 	for oid, keys := range byShard {
-		m, err := s.io.OmapGet(ctx, oid, keys)
+		m, err := s.pool(ctx, mb).OmapGet(ctx, oid, keys)
 		if err != nil {
 			if errors.Is(err, rados.ErrNotFound) {
 				continue
@@ -814,14 +828,14 @@ func (s *Store) Append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 		pg.go_(func() error { return store(rec.UID, rec.ModSeq) })
 	}
 	pg.go_(func() error {
-		_, err := s.io.Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(tid, rec.MessageID): loc}))
+		_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(tid, rec.MessageID): loc}))
 		return mapErr(err)
 	})
 	if rec.MsgIDHeader != "" {
 		// threadFor already resolved an existing mapping into tid, so an
 		// unconditional write is idempotent (no read needed).
 		pg.go_(func() error {
-			_, err := s.io.Write(ctx, threadOID(mb, rec.MsgIDHeader), rados.NewWriteTx().OmapSet(map[string][]byte{msgidKey(rec.MsgIDHeader): []byte(tid)}))
+			_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, rec.MsgIDHeader), rados.NewWriteTx().OmapSet(map[string][]byte{msgidKey(rec.MsgIDHeader): []byte(tid)}))
 			return mapErr(err)
 		})
 	}
@@ -993,11 +1007,11 @@ func (s *Store) Move(ctx context.Context, mb uuid.UUID, from string, uid uint32,
 	}
 	var pg parallel
 	pg.go_(func() error {
-		_, err := s.io.Write(ctx, folderOID(mb, from, oldUID), rados.NewWriteTx().OmapRemove(uidKey(oldUID)))
+		_, err := s.pool(ctx, mb).Write(ctx, folderOID(mb, from, oldUID), rados.NewWriteTx().OmapRemove(uidKey(oldUID)))
 		return mapErr(err)
 	})
 	pg.go_(func() error {
-		_, err := s.io.Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(rec.ThreadID, rec.MessageID): []byte(loc.String())}))
+		_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(rec.ThreadID, rec.MessageID): []byte(loc.String())}))
 		return mapErr(err)
 	})
 	if err := pg.wait(); err != nil {
@@ -1044,16 +1058,16 @@ func (s *Store) Remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 	}
 	// Retention entry first so a crash never loses the message's trail,
 	// then the index and thread removals concurrently.
-	if _, err := s.io.Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{retentionKey(entry.PurgeAt, rec.MessageID): data})); err != nil {
+	if _, err := s.pool(ctx, mb).Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{retentionKey(entry.PurgeAt, rec.MessageID): data})); err != nil {
 		return RetentionEntry{}, mapErr(err)
 	}
 	var pg parallel
 	pg.go_(func() error {
-		_, err := s.io.Write(ctx, folderOID(mb, fid, uid), rados.NewWriteTx().OmapRemove(uidKey(uid)))
+		_, err := s.pool(ctx, mb).Write(ctx, folderOID(mb, fid, uid), rados.NewWriteTx().OmapRemove(uidKey(uid)))
 		return mapErr(err)
 	})
 	pg.go_(func() error {
-		_, err := s.io.Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapRemove(threadKey(rec.ThreadID, rec.MessageID)))
+		_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapRemove(threadKey(rec.ThreadID, rec.MessageID)))
 		if errors.Is(err, rados.ErrNotFound) {
 			return nil
 		}
@@ -1068,7 +1082,7 @@ func (s *Store) Remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 
 // ListRetention lists retention entries due before `before` (all if zero).
 func (s *Store) ListRetention(ctx context.Context, mb uuid.UUID, before time.Time, max int) (entries []RetentionEntry, keys []string, more bool, err error) {
-	kv, more, err := s.io.OmapList(ctx, retentionOID(mb), "", "", max)
+	kv, more, err := s.pool(ctx, mb).OmapList(ctx, retentionOID(mb), "", "", max)
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
 			return nil, nil, false, nil
@@ -1095,7 +1109,7 @@ func (s *Store) DropRetention(ctx context.Context, mb uuid.UUID, keys ...string)
 	if len(keys) == 0 {
 		return nil
 	}
-	_, err := s.io.Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapRemove(keys...))
+	_, err := s.pool(ctx, mb).Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapRemove(keys...))
 	if errors.Is(err, rados.ErrNotFound) {
 		return nil
 	}
@@ -1104,7 +1118,7 @@ func (s *Store) DropRetention(ctx context.Context, mb uuid.UUID, keys ...string)
 
 // ThreadMembers returns the locations of all messages in a thread.
 func (s *Store) ThreadMembers(ctx context.Context, mb uuid.UUID, tid string) ([]Location, error) {
-	kv, _, err := s.io.OmapList(ctx, threadOID(mb, tid), "t/"+tid+"/", "", 0)
+	kv, _, err := s.pool(ctx, mb).OmapList(ctx, threadOID(mb, tid), "t/"+tid+"/", "", 0)
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
 			return nil, nil
@@ -1190,7 +1204,7 @@ func (s *Store) Recalculate(ctx context.Context, mb uuid.UUID) (Root, error) {
 
 // Notify tells watchers of the mailbox that something changed. Best effort.
 func (s *Store) Notify(ctx context.Context, mb uuid.UUID, payload []byte) error {
-	err := s.io.Notify(ctx, rootOID(mb), payload)
+	err := s.pool(ctx, mb).Notify(ctx, rootOID(mb), payload)
 	if errors.Is(err, rados.ErrNotFound) {
 		return nil
 	}
@@ -1199,7 +1213,7 @@ func (s *Store) Notify(ctx context.Context, mb uuid.UUID, payload []byte) error 
 
 // Watch subscribes to mailbox change notifications.
 func (s *Store) Watch(ctx context.Context, mb uuid.UUID) (rados.Watcher, error) {
-	w, err := s.io.Watch(ctx, rootOID(mb))
+	w, err := s.pool(ctx, mb).Watch(ctx, rootOID(mb))
 	return w, mapErr(err)
 }
 
@@ -1221,7 +1235,7 @@ func (s *Store) DeleteAll(ctx context.Context, mb uuid.UUID) error {
 	}
 	oids = append(oids, retentionOID(mb), rootOID(mb))
 	for _, oid := range oids {
-		if err := s.io.Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		if err := s.pool(ctx, mb).Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
 			return mapErr(err)
 		}
 	}

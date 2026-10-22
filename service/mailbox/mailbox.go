@@ -327,7 +327,7 @@ func (s *Service) raw(ctx context.Context, mb uuid.UUID, msg uuid.UUID) ([]byte,
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("mailbox: decode document %s: %w", msg, err)
 	}
-	out, err := mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, h) })
+	out, err := mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, mb, h) })
 	if err != nil {
 		return nil, fmt.Errorf("mailbox: render %s: %w", msg, err)
 	}
@@ -343,7 +343,7 @@ func (s *Service) Attachment(ctx context.Context, mb uuid.UUID, hash string) ([]
 	if len(hash) != 64 {
 		return nil, "", ErrNotFound
 	}
-	data, err := s.atts.Get(ctx, hash)
+	data, err := s.atts.Get(ctx, mb, hash)
 	if err != nil {
 		if errors.Is(err, attach.ErrNotFound) {
 			return nil, "", ErrNotFound
@@ -351,7 +351,7 @@ func (s *Service) Attachment(ctx context.Context, mb uuid.UUID, hash string) ([]
 		return nil, "", err
 	}
 	ct := "application/octet-stream"
-	if info, err := s.atts.Stat(ctx, hash); err == nil && info.ContentType != "" {
+	if info, err := s.atts.Stat(ctx, mb, hash); err == nil && info.ContentType != "" {
 		ct = info.ContentType
 	}
 	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-attachment", Target: hash})

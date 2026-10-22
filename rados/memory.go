@@ -18,12 +18,38 @@ type MemoryClient struct {
 	pools map[string]*memPool
 	// Now is the clock used for mtimes and lock expiry; tests may override it.
 	Now func() time.Time
+	// Fsid identifies the fake cluster (random per client; tests may set it).
+	Fsid string
 }
 
 // NewMemoryClient returns an empty in-memory cluster.
 func NewMemoryClient() *MemoryClient {
-	return &MemoryClient{pools: map[string]*memPool{}, Now: time.Now}
+	return &MemoryClient{pools: map[string]*memPool{}, Now: time.Now, Fsid: newFSID()}
 }
+
+func newFSID() string {
+	var b [16]byte
+	for i := range b {
+		b[i] = byte(time.Now().UnixNano() >> (uint(i%8) * 8))
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	const hexdigits = "0123456789abcdef"
+	out := make([]byte, 36)
+	j := 0
+	for i, c := range b {
+		if i == 4 || i == 6 || i == 8 || i == 10 {
+			out[j] = '-'
+			j++
+		}
+		out[j], out[j+1] = hexdigits[c>>4], hexdigits[c&0x0f]
+		j += 2
+	}
+	return string(out)
+}
+
+// FSID implements Client.
+func (c *MemoryClient) FSID() (string, error) { return c.Fsid, nil }
 
 type memPool struct {
 	mu    sync.Mutex

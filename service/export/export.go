@@ -378,7 +378,7 @@ func (s *Service) rawOf(ctx context.Context, mb, msg uuid.UUID) ([]byte, error) 
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
 	}
-	return mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, h) })
+	return mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, mb, h) })
 }
 
 // ---- import ----
