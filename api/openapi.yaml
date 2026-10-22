@@ -1075,15 +1075,25 @@ components:
         roles: { type: array, items: { type: string } }
         credential: { type: string, enum: [password, app-password, token, session] }
         totp_enabled: { type: boolean }
-        passwords: { type: array, items: { $ref: "#/components/schemas/PasswordInfo" } }
+        passwords: { type: array, items: { $ref: "#/components/schemas/OwnPassword" } }
         token_id: { type: string }
         session_id: { type: string }
-    PasswordInfo:
+    OwnPassword:
       type: object
+      description: A password as the account holder sees it (no hash details)
       properties:
         id: { type: string }
         kind: { type: string, enum: [primary, application] }
-        scheme: { type: string, description: Hash scheme (ARGON2ID for passwords set here; a migrated hash keeps its scheme until the first login) }
+        comment: { type: string }
+        expires_at: { type: string, format: date-time, nullable: true, description: null = never }
+        created: { type: string, format: date-time }
+    PasswordInfo:
+      type: object
+      description: A password as an admin sees it
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [primary, application] }
+        scheme: { type: string, description: Hash scheme (ARGON2ID for passwords set here; a migrated hash keeps its scheme until the first login). Admin views only. }
         comment: { type: string }
         expires_at: { type: string, format: date-time, nullable: true, description: null = never }
         created: { type: string, format: date-time }

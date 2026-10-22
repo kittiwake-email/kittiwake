@@ -195,8 +195,8 @@ func TestOAuthPasswordAndRefresh(t *testing.T) {
 	if r.body["username"] != "wido@example.org" || r.body["credential"] != "session" || r.body["totp_enabled"] != false {
 		t.Fatalf("me: %v", r.body)
 	}
-	if pw := r.body["passwords"].([]any); len(pw) != 1 || pw[0].(map[string]any)["hash"] != nil {
-		t.Fatalf("passwords leak or missing: %v", pw)
+	if pw := r.body["passwords"].([]any); len(pw) != 1 || pw[0].(map[string]any)["hash"] != nil || pw[0].(map[string]any)["scheme"] != nil {
+		t.Fatalf("passwords leak hash details or missing: %v", pw)
 	}
 	// Refresh rotates; old refresh token reuse → invalid_grant and session dead.
 	r = f.do("POST", "/v1/oauth/token", "", map[string]string{"grant_type": "refresh_token", "refresh_token": refresh}, "")

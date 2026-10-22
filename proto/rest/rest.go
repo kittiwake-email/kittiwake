@@ -538,18 +538,26 @@ func (s *Server) oauthRevoke(w http.ResponseWriter, r *http.Request) {
 // ---- self-service ----
 
 type passwordView struct {
-	ID        string     `json:"id"`
-	Kind      string     `json:"kind"`
-	Scheme    string     `json:"scheme"` // hash scheme, e.g. ARGON2ID or a migrated SHA512-CRYPT
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Scheme is the hash scheme (ARGON2ID, or a migrated SHA512-CRYPT
+	// until the first login). Admin views only: it tells an operator how
+	// far a migration got and means nothing to the account holder.
+	Scheme    string     `json:"scheme,omitempty"`
 	Comment   string     `json:"comment"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	Created   time.Time  `json:"created"`
 }
 
-func passwordViews(pw []identity.Password) []passwordView {
+// passwordViews lists passwords; withScheme adds the hash scheme (admin).
+func passwordViews(pw []identity.Password, withScheme bool) []passwordView {
 	out := make([]passwordView, 0, len(pw))
 	for _, p := range pw {
-		out = append(out, passwordView{ID: p.ID, Kind: p.Kind, Scheme: cryptoauth.Scheme(p.Hash), Comment: p.Comment, ExpiresAt: p.ExpiresAt, Created: p.Created})
+		v := passwordView{ID: p.ID, Kind: p.Kind, Comment: p.Comment, ExpiresAt: p.ExpiresAt, Created: p.Created}
+		if withScheme {
+			v.Scheme = cryptoauth.Scheme(p.Hash)
+		}
+		out = append(out, v)
 	}
 	return out
 }
@@ -586,7 +594,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			out.Services = []string{}
 		}
 		out.TOTPEnabled = v.Value.TOTP != nil && v.Value.TOTP.Confirmed
-		out.Passwords = passwordViews(v.Value.Passwords)
+		out.Passwords = passwordViews(v.Value.Passwords, false)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -1032,7 +1040,7 @@ func viewAccount(a identity.Account) accountView {
 	}
 	return accountView{
 		ID: a.ID, Username: a.Username, Name: a.Name, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Services: services, Enabled: a.Enabled,
-		TOTPEnabled: a.TOTP != nil && a.TOTP.Confirmed, Passwords: passwordViews(a.Passwords), Created: a.Created, Updated: a.Updated,
+		TOTPEnabled: a.TOTP != nil && a.TOTP.Confirmed, Passwords: passwordViews(a.Passwords, true), Created: a.Created, Updated: a.Updated,
 	}
 }
 
@@ -1206,7 +1214,7 @@ func (s *Server) accountPasswordList(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": passwordViews(a.Passwords)})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": passwordViews(a.Passwords, true)})
 }
 
 // accountPasswordPatch changes expiry (expires_at: time or null = never)
@@ -1230,7 +1238,7 @@ func (s *Server) accountPasswordPatch(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, passwordViews([]identity.Password{p})[0])
+	httpx.WriteJSON(w, http.StatusOK, passwordViews([]identity.Password{p}, true)[0])
 }
 
 func (s *Server) accountPasswordDelete(w http.ResponseWriter, r *http.Request) {

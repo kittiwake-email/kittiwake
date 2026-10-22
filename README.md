@@ -710,7 +710,8 @@ or the `hash` field of the admin password endpoint): Dovecot-prefixed forms such
 `{SHA512-CRYPT}$6$...`, `{BLF-CRYPT}$2y$...`, `{SSHA512}...`, `{ARGON2ID}...`, or a bare
 `$6$`, `$5$`, `$2y$` or `$argon2id$` hash whose scheme is inferred. The hash is checked for
 shape, never verified, stored verbatim, audited as a migrated hash, and shown with its
-scheme in the password list; the first successful login upgrades it to argon2id, so a
+scheme in the admin password list (the account holder's own `/v1/me` view carries no hash
+details); the first successful login upgrades it to argon2id, so a
 migrated user base converges on the current scheme without password resets. Schemes we
 cannot verify (MD5-CRYPT) are refused.
 
