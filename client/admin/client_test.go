@@ -75,7 +75,7 @@ func newFixture(t *testing.T) *fixture {
 	srv := rest.New(rest.Config{Realm: "test", DefaultQuota: identity.QuotaLimits{HardBytes: 1 << 30}, Identity: f.ids, Export: exp, ExportDir: dir}, authSvc, adm, auditStore, q, log)
 	f.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(f.ts.Close)
-	f.w = worker.New(worker.Config{ExportDir: dir, PollInterval: time.Millisecond}, worker.Stores{Identity: f.ids, Index: f.idx, Messages: msgs, Attachments: atts, Audit: auditStore, Queue: q}, aud, idxp, log)
+	f.w = worker.New(worker.Config{ExportDir: dir, PollInterval: time.Millisecond}, worker.Stores{Identity: f.ids, Index: f.idx, Messages: msgs, Attachments: atts, Audit: auditStore, Queue: q}, aud, log)
 	f.w.Export = exp
 
 	ctx := context.Background()

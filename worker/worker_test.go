@@ -53,7 +53,8 @@ func newFixture(t *testing.T) *fixture {
 	msgp, _ := c.Pool("messages")
 	attp, _ := c.Pool("attachments")
 	f.st = Stores{Identity: identity.New(meta), Index: index.New(idxp), Messages: message.New(msgp), Attachments: attach.New(attp), Audit: audit.New(idxp), Queue: queue.New(idxp)}
-	f.st.Index.Now, f.st.Messages.Now, f.st.Attachments.Now, f.st.Audit.Now, f.st.Queue.Now, f.st.Identity.Now = now, now, now, now, now, now
+	f.st.Index.Now, f.st.Messages.Now, f.st.Attachments.Now, f.st.Audit.Now, f.st.Identity.Now = now, now, now, now, now
+	f.st.Queue.SetNow(now)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	aud := auditor.New(f.st.Audit, log, nil)
 	aud.Now = now
@@ -63,7 +64,7 @@ func newFixture(t *testing.T) *fixture {
 	f.mbx.Now = now
 	f.adm = admin.New(f.st.Identity, f.st.Index, f.st.Queue, aud)
 	f.adm.Now = now
-	f.w = New(Config{PostHoldGrace: time.Hour, AttachmentGCGrace: time.Hour, OrphanAge: time.Hour, AuditRetention: 48 * time.Hour, PollInterval: time.Millisecond}, f.st, aud, idxp, log)
+	f.w = New(Config{PostHoldGrace: time.Hour, AttachmentGCGrace: time.Hour, OrphanAge: time.Hour, AuditRetention: 48 * time.Hour, PollInterval: time.Millisecond}, f.st, aud, log)
 	f.w.Now = now
 	ctx := context.Background()
 	_, _ = f.st.Identity.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
@@ -278,7 +279,7 @@ func TestSchedulerEnqueuesPeriodicTasks(t *testing.T) {
 		t.Fatalf("leader did not reschedule: %+v", st)
 	}
 	// A second worker cannot lead while the lock is fresh...
-	w2 := New(Config{PollInterval: time.Millisecond}, f.st, f.w.aud, f.w.lock, f.w.log)
+	w2 := New(Config{PollInterval: time.Millisecond}, f.st, f.w.aud, f.w.log)
 	w2.Now = f.w.Now
 	w2.schedule(ctx)
 	st, _ = f.st.Queue.Stats(ctx, TaskPurgeTrash)

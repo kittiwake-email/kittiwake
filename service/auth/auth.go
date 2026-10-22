@@ -55,7 +55,7 @@ type Config struct {
 // Service is the auth service.
 type Service struct {
 	ids      *identity.Store
-	sessions *session.Store
+	sessions session.Store
 	audit    *auditor.Auditor
 	cfg      Config
 	Now      func() time.Time
@@ -148,7 +148,7 @@ func tokenKey(token string) string { return "t:" + identity.HashToken(token) }
 func (s *Service) InvalidateCache() { s.cache.clear() }
 
 // New returns the service.
-func New(ids *identity.Store, sessions *session.Store, aud *auditor.Auditor, cfg Config) *Service {
+func New(ids *identity.Store, sessions session.Store, aud *auditor.Auditor, cfg Config) *Service {
 	if cfg.TOTPSkew == 0 {
 		cfg.TOTPSkew = 1
 	}

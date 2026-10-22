@@ -65,16 +65,38 @@ func (k *KeySet) ByID(id string) *auth.SigningKey {
 	return nil
 }
 
-// Store is the session store.
-type Store struct {
+// Store is what the auth service needs from a session database. Two
+// backends exist: MariaDB (production) and RADOS (development, tests).
+type Store interface {
+	SetNow(func() time.Time)
+	Create(ctx context.Context, acct uuid.UUID, roles []string, client, ip string, lifetime time.Duration) (Session, string, error)
+	Get(ctx context.Context, acct uuid.UUID, id string) (Session, error)
+	Refresh(ctx context.Context, acct uuid.UUID, id, presented, ip string, lifetime time.Duration) (Session, string, error)
+	Touch(ctx context.Context, acct uuid.UUID, id, ip string) error
+	Revoke(ctx context.Context, acct uuid.UUID, id string) error
+	RevokeAll(ctx context.Context, acct uuid.UUID) error
+	List(ctx context.Context, acct uuid.UUID) ([]Session, error)
+	Keys(ctx context.Context) (KeySet, error)
+	Rotate(ctx context.Context, keep int) (KeySet, error)
+	ClaimTOTPStep(ctx context.Context, acct uuid.UUID, step int64) (bool, error)
+	ResetTOTP(ctx context.Context, acct uuid.UUID) error
+}
+
+// Rados is the session store on a RADOS index pool: one omap object per
+// account for sessions, one object for the key set, one per account for
+// TOTP replay state.
+type Rados struct {
 	io  rados.IOContext
 	Now func() time.Time
 }
 
-// New returns a store on the index pool context.
-func New(indexPool rados.IOContext) *Store {
-	return &Store{io: indexPool, Now: time.Now}
+// New returns the RADOS store on the index pool context.
+func New(indexPool rados.IOContext) *Rados {
+	return &Rados{io: indexPool, Now: time.Now}
 }
+
+// SetNow installs the clock.
+func (s *Rados) SetNow(now func() time.Time) { s.Now = now }
 
 const keysOID = "keys/jwt"
 
@@ -94,7 +116,7 @@ func mapErr(err error) error {
 // ---- sessions ----
 
 // Create stores a new session and returns it with the plaintext refresh token.
-func (s *Store) Create(ctx context.Context, acct uuid.UUID, roles []string, client, ip string, lifetime time.Duration) (Session, string, error) {
+func (s *Rados) Create(ctx context.Context, acct uuid.UUID, roles []string, client, ip string, lifetime time.Duration) (Session, string, error) {
 	plain, hash, err := auth.NewRefreshToken()
 	if err != nil {
 		return Session{}, "", err
@@ -110,7 +132,7 @@ func (s *Store) Create(ctx context.Context, acct uuid.UUID, roles []string, clie
 	return sess, plain, nil
 }
 
-func (s *Store) put(ctx context.Context, sess Session) error {
+func (s *Rados) put(ctx context.Context, sess Session) error {
 	data, err := json.Marshal(&sess)
 	if err != nil {
 		return err
@@ -120,7 +142,7 @@ func (s *Store) put(ctx context.Context, sess Session) error {
 }
 
 // Get returns a session.
-func (s *Store) Get(ctx context.Context, acct uuid.UUID, id string) (Session, error) {
+func (s *Rados) Get(ctx context.Context, acct uuid.UUID, id string) (Session, error) {
 	m, err := s.io.OmapGet(ctx, sessionsOID(acct), []string{id})
 	if err != nil {
 		return Session{}, mapErr(err)
@@ -139,7 +161,7 @@ func (s *Store) Get(ctx context.Context, acct uuid.UUID, id string) (Session, er
 // Refresh validates the presented refresh token for the session, rotates it
 // and extends the sliding expiry. A reused (already rotated) token revokes
 // the session and returns ErrReused. Returns the new plaintext token.
-func (s *Store) Refresh(ctx context.Context, acct uuid.UUID, id, presented, ip string, lifetime time.Duration) (Session, string, error) {
+func (s *Rados) Refresh(ctx context.Context, acct uuid.UUID, id, presented, ip string, lifetime time.Duration) (Session, string, error) {
 	sess, err := s.Get(ctx, acct, id)
 	if err != nil {
 		return Session{}, "", err
@@ -175,7 +197,7 @@ func (s *Store) Refresh(ctx context.Context, acct uuid.UUID, id, presented, ip s
 }
 
 // Touch records use of the session (access token issued or used).
-func (s *Store) Touch(ctx context.Context, acct uuid.UUID, id, ip string) error {
+func (s *Rados) Touch(ctx context.Context, acct uuid.UUID, id, ip string) error {
 	sess, err := s.Get(ctx, acct, id)
 	if err != nil {
 		return err
@@ -188,7 +210,7 @@ func (s *Store) Touch(ctx context.Context, acct uuid.UUID, id, ip string) error 
 }
 
 // Revoke deletes a session. Missing is not an error.
-func (s *Store) Revoke(ctx context.Context, acct uuid.UUID, id string) error {
+func (s *Rados) Revoke(ctx context.Context, acct uuid.UUID, id string) error {
 	_, err := s.io.Write(ctx, sessionsOID(acct), rados.NewWriteTx().OmapRemove(id))
 	if errors.Is(err, rados.ErrNotFound) {
 		return nil
@@ -197,7 +219,7 @@ func (s *Store) Revoke(ctx context.Context, acct uuid.UUID, id string) error {
 }
 
 // RevokeAll deletes every session of the account.
-func (s *Store) RevokeAll(ctx context.Context, acct uuid.UUID) error {
+func (s *Rados) RevokeAll(ctx context.Context, acct uuid.UUID) error {
 	err := s.io.Delete(ctx, sessionsOID(acct))
 	if errors.Is(err, rados.ErrNotFound) {
 		return nil
@@ -206,7 +228,7 @@ func (s *Store) RevokeAll(ctx context.Context, acct uuid.UUID) error {
 }
 
 // List returns the account's sessions, dropping expired ones.
-func (s *Store) List(ctx context.Context, acct uuid.UUID) ([]Session, error) {
+func (s *Rados) List(ctx context.Context, acct uuid.UUID) ([]Session, error) {
 	kv, _, err := s.io.OmapList(ctx, sessionsOID(acct), "", "", 0)
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
@@ -237,7 +259,7 @@ func (s *Store) List(ctx context.Context, acct uuid.UUID) ([]Session, error) {
 // ---- signing keys ----
 
 // Keys returns the key set, creating the first key if none exists.
-func (s *Store) Keys(ctx context.Context) (KeySet, error) {
+func (s *Rados) Keys(ctx context.Context) (KeySet, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		data, _, err := s.io.Get(ctx, keysOID)
 		if err == nil {
@@ -265,7 +287,7 @@ func (s *Store) Keys(ctx context.Context) (KeySet, error) {
 
 // Rotate adds a new current key and keeps the previous `keep` keys so
 // outstanding access tokens still verify.
-func (s *Store) Rotate(ctx context.Context, keep int) (KeySet, error) {
+func (s *Rados) Rotate(ctx context.Context, keep int) (KeySet, error) {
 	if _, err := s.Keys(ctx); err != nil {
 		return KeySet{}, err
 	}
@@ -303,7 +325,7 @@ func (s *Store) Rotate(ctx context.Context, keep int) (KeySet, error) {
 
 // ClaimTOTPStep records that `step` was used for the account. It returns
 // false if step is not greater than the last recorded step (replay).
-func (s *Store) ClaimTOTPStep(ctx context.Context, acct uuid.UUID, step int64) (bool, error) {
+func (s *Rados) ClaimTOTPStep(ctx context.Context, acct uuid.UUID, step int64) (bool, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		data, ver, err := s.io.Get(ctx, totpOID(acct))
 		if errors.Is(err, rados.ErrNotFound) {
@@ -330,7 +352,7 @@ func (s *Store) ClaimTOTPStep(ctx context.Context, acct uuid.UUID, step int64) (
 }
 
 // ResetTOTP clears replay state (when TOTP is disabled or re-enrolled).
-func (s *Store) ResetTOTP(ctx context.Context, acct uuid.UUID) error {
+func (s *Rados) ResetTOTP(ctx context.Context, acct uuid.UUID) error {
 	err := s.io.Delete(ctx, totpOID(acct))
 	if errors.Is(err, rados.ErrNotFound) {
 		return nil

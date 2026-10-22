@@ -20,7 +20,7 @@ import (
 	"dovetail/store/queue"
 )
 
-func newSvc(t *testing.T) (*Service, *identity.Store, *queue.Store, context.Context, context.Context) {
+func newSvc(t *testing.T) (*Service, *identity.Store, queue.Store, context.Context, context.Context) {
 	t.Helper()
 	c := rados.NewMemoryClient()
 	meta, _ := c.Pool("meta")

@@ -78,7 +78,7 @@ type Service struct {
 	idx   *index.Store
 	msgs  *message.Store
 	atts  *attach.Store
-	queue *queue.Store
+	queue queue.Store
 	audit *auditor.Auditor
 	log   *slog.Logger
 	cfg   Config
@@ -106,7 +106,7 @@ func (s *Service) getMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbo
 }
 
 // New returns the service. queue may be nil (events dropped).
-func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attach.Store, q *queue.Store, aud *auditor.Auditor, log *slog.Logger, cfg Config) *Service {
+func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attach.Store, q queue.Store, aud *auditor.Auditor, log *slog.Logger, cfg Config) *Service {
 	if cfg.MaxAliasDepth <= 0 {
 		cfg.MaxAliasDepth = 5
 	}

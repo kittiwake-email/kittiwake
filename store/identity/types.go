@@ -40,6 +40,35 @@ var ValidRoles = map[string]bool{RoleRead: true, RoleWrite: true, RoleSend: true
 // AdminRoles is the set of roles an admin token may carry (exactly one).
 var AdminRoles = map[string]bool{RoleAdmin: true, RoleAdminRead: true}
 
+// Services an account may use. The set grows (CalDAV, CardDAV); an account
+// lists the ones it is allowed to log in to, so a phone-only user can be
+// restricted to JMAP.
+const (
+	ServiceIMAP = "imap"
+	ServicePOP3 = "pop3"
+	ServiceJMAP = "jmap" // the JMAP listener, including its REST self-service endpoints
+)
+
+// KnownServices is the set of services an account may list.
+var KnownServices = map[string]bool{ServiceIMAP: true, ServicePOP3: true, ServiceJMAP: true}
+
+// AllServices returns every known service, in a stable order.
+func AllServices() []string { return []string{ServiceIMAP, ServicePOP3, ServiceJMAP} }
+
+// ServiceFor maps a protocol name (as used in audit records) to the
+// service an account must have to use it. Unknown protocols map to "".
+func ServiceFor(proto string) string {
+	switch proto {
+	case "imap":
+		return ServiceIMAP
+	case "pop3":
+		return ServicePOP3
+	case "jmap", "rest":
+		return ServiceJMAP
+	}
+	return ""
+}
+
 // Password kinds.
 const (
 	PasswordPrimary     = "primary"
@@ -92,7 +121,10 @@ var ValidStates = map[string]bool{StateActive: true, StateSuspended: true, State
 
 // Mailbox is the container for a user's data.
 type Mailbox struct {
-	ID          uuid.UUID   `json:"id"`
+	ID uuid.UUID `json:"id"`
+	// ClusterID is the Ceph cluster (registry id) holding the mailbox's
+	// data; 0 only in the single-cluster memory backend.
+	ClusterID   int64       `json:"cluster_id"`
 	State       string      `json:"state"` // active | suspended | disabled
 	StateReason string      `json:"state_reason,omitempty"`
 	StateSince  time.Time   `json:"state_since"`
@@ -139,11 +171,22 @@ type Account struct {
 	Domain    string     `json:"domain"`
 	MailboxID uuid.UUID  `json:"mailbox_id"`
 	Roles     []string   `json:"roles"`
+	Services  []string   `json:"services"` // which of KnownServices the account may log in to
 	Passwords []Password `json:"passwords"`
 	TOTP      *TOTP      `json:"totp,omitempty"`
 	Enabled   bool       `json:"enabled"`
 	Created   time.Time  `json:"created"`
 	Updated   time.Time  `json:"updated"`
+}
+
+// HasService reports whether the account may use the service.
+func (a *Account) HasService(svc string) bool {
+	for _, x := range a.Services {
+		if x == svc {
+			return true
+		}
+	}
+	return false
 }
 
 // HasRole reports whether the account has the role.
@@ -194,8 +237,32 @@ func (t *Token) Expired(at time.Time) bool { return !at.Before(t.ExpiresAt) }
 // IsAdmin reports whether this is an admin token (not bound to an account).
 func (t *Token) IsAdmin() bool { return t.AccountID == uuid.Nil }
 
-// Versioned pairs an object with the RADOS version it was read at, for
-// optimistic concurrency.
+// Cluster is one Ceph cluster in the registry. Mailboxes reference it by
+// ID; the fsid (read from the cluster on connect) verifies that the
+// connection details still point at the same cluster. Key is the Ceph
+// secret of User.
+type Cluster struct {
+	ID        int64     `json:"id"`
+	FSID      uuid.UUID `json:"fsid"`
+	Name      string    `json:"name"`
+	MonHost   string    `json:"mon_host"` // comma-separated, as ceph.conf mon_host
+	User      string    `json:"user"`
+	Key       string    `json:"key"`
+	Pools     Pools     `json:"pools"`
+	Placement bool      `json:"placement"` // accepts new mailboxes
+	Created   time.Time `json:"created"`
+	Updated   time.Time `json:"updated"`
+}
+
+// Pools are the data pools of a cluster.
+type Pools struct {
+	Messages    string `json:"messages"`
+	Attachments string `json:"attachments"`
+	Index       string `json:"index"`
+}
+
+// Versioned pairs an object with the version it was read at (RADOS object
+// version; 0 on backends without one).
 type Versioned[T any] struct {
 	Value   T
 	Version uint64

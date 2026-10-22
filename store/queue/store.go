@@ -36,8 +36,40 @@ type Task struct {
 	LeaseKey string `json:"-"`
 }
 
-// Store is the queue store.
-type Store struct {
+// Store is what workers and services need from a task queue. Two
+// backends exist: MariaDB (production) and RADOS (development, tests).
+// Lead and Due back the scheduler: one worker leads at a time and
+// enqueues periodic tasks whose interval has elapsed.
+type Store interface {
+	SetNow(func() time.Time)
+	Enqueue(ctx context.Context, typ string, payload any, runAfter time.Time) (string, error)
+	Claim(ctx context.Context, typ, worker string, max int, lease time.Duration) ([]Task, error)
+	Complete(ctx context.Context, t Task) error
+	Fail(ctx context.Context, t Task, cause error) (bool, error)
+	Stats(ctx context.Context, typ string) (Stats, error)
+	Dead(ctx context.Context, typ string) ([]Task, error)
+	Retry(ctx context.Context, typ, id string) error
+	// Lead tries to take (or renew) the scheduler lease for the worker.
+	Lead(ctx context.Context, worker string, ttl time.Duration) (bool, error)
+	// Due reports whether the periodic task `name` has not run within
+	// `every`, and records now as its last run when it is due.
+	Due(ctx context.Context, name string, every time.Duration) (bool, error)
+}
+
+// DefaultBackoff is the retry delay before attempt n (1-based).
+func DefaultBackoff(n int) time.Duration {
+	d := time.Duration(1<<uint(min(n, 10))) * 30 * time.Second
+	if d > 6*time.Hour {
+		d = 6 * time.Hour
+	}
+	return d
+}
+
+// DefaultMaxAttempts before a task is dead-lettered.
+const DefaultMaxAttempts = 8
+
+// Rados is the queue on a RADOS index pool.
+type Rados struct {
 	io  rados.IOContext
 	Now func() time.Time
 	// MaxAttempts before a task is dead-lettered.
@@ -46,18 +78,42 @@ type Store struct {
 	Backoff func(attempt int) time.Duration
 }
 
-// New returns a store on the index pool context.
-func New(indexPool rados.IOContext) *Store {
-	return &Store{
-		io: indexPool, Now: time.Now, MaxAttempts: 8,
-		Backoff: func(n int) time.Duration {
-			d := time.Duration(1<<uint(min(n, 10))) * 30 * time.Second
-			if d > 6*time.Hour {
-				d = 6 * time.Hour
-			}
-			return d
-		},
+// New returns the RADOS queue on the index pool context.
+func New(indexPool rados.IOContext) *Rados {
+	return &Rados{io: indexPool, Now: time.Now, MaxAttempts: DefaultMaxAttempts, Backoff: DefaultBackoff}
+}
+
+// SetNow installs the clock.
+func (s *Rados) SetNow(now func() time.Time) { s.Now = now }
+
+const schedulerOID = "scheduler"
+
+// Lead takes the scheduler lock object for ttl (renewable by the holder).
+func (s *Rados) Lead(ctx context.Context, worker string, ttl time.Duration) (bool, error) {
+	err := s.io.Lock(ctx, schedulerOID, "leader", worker, ttl)
+	if errors.Is(err, rados.ErrLocked) {
+		return false, nil
 	}
+	return err == nil, err
+}
+
+// Due keeps last-run timestamps in the scheduler object's omap so a new
+// leader continues where the old one stopped.
+func (s *Rados) Due(ctx context.Context, name string, every time.Duration) (bool, error) {
+	now := s.Now()
+	m, err := s.io.OmapGet(ctx, schedulerOID, []string{name})
+	if err != nil && !errors.Is(err, rados.ErrNotFound) {
+		return false, err
+	}
+	if v, ok := m[name]; ok {
+		var last time.Time
+		if last.UnmarshalText(v) == nil && now.Sub(last) < every {
+			return false, nil
+		}
+	}
+	b, _ := now.UTC().MarshalText()
+	_, err = s.io.Write(ctx, schedulerOID, rados.NewWriteTx().OmapSet(map[string][]byte{name: b}))
+	return err == nil, err
 }
 
 func queueOID(typ string) string { return "queue/" + typ }
@@ -71,7 +127,7 @@ func leaseKey(expiry time.Time, id string) string {
 func deadKey(id string) string { return "dead/" + id }
 
 // Enqueue adds a task. A zero RunAfter means now. Returns the task id.
-func (s *Store) Enqueue(ctx context.Context, typ string, payload any, runAfter time.Time) (string, error) {
+func (s *Rados) Enqueue(ctx context.Context, typ string, payload any, runAfter time.Time) (string, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
@@ -88,7 +144,7 @@ func (s *Store) Enqueue(ctx context.Context, typ string, payload any, runAfter t
 
 // Claim takes up to max due tasks for the worker, leasing them for lease.
 // Expired leases of crashed workers are reclaimed first.
-func (s *Store) Claim(ctx context.Context, typ, worker string, max int, lease time.Duration) ([]Task, error) {
+func (s *Rados) Claim(ctx context.Context, typ, worker string, max int, lease time.Duration) ([]Task, error) {
 	oid := queueOID(typ)
 	if err := s.io.Lock(ctx, oid, "claim", worker, 30*time.Second); err != nil {
 		if errors.Is(err, rados.ErrLocked) {
@@ -166,14 +222,14 @@ func (s *Store) Claim(ctx context.Context, typ, worker string, max int, lease ti
 }
 
 // Complete removes a claimed task.
-func (s *Store) Complete(ctx context.Context, t Task) error {
+func (s *Rados) Complete(ctx context.Context, t Task) error {
 	_, err := s.io.Write(ctx, queueOID(t.Type), rados.NewWriteTx().OmapRemove(t.LeaseKey))
 	return err
 }
 
 // Fail records the error and re-queues with backoff, or dead-letters the
 // task after MaxAttempts. Returns true if dead-lettered.
-func (s *Store) Fail(ctx context.Context, t Task, cause error) (bool, error) {
+func (s *Rados) Fail(ctx context.Context, t Task, cause error) (bool, error) {
 	t.LastError = cause.Error()
 	now := s.Now().UTC()
 	tx := rados.NewWriteTx().OmapRemove(t.LeaseKey)
@@ -198,7 +254,7 @@ type Stats struct {
 }
 
 // Stats counts entries per state.
-func (s *Store) Stats(ctx context.Context, typ string) (Stats, error) {
+func (s *Rados) Stats(ctx context.Context, typ string) (Stats, error) {
 	var st Stats
 	for _, p := range []struct {
 		prefix string
@@ -217,7 +273,7 @@ func (s *Store) Stats(ctx context.Context, typ string) (Stats, error) {
 }
 
 // Dead lists dead-lettered tasks.
-func (s *Store) Dead(ctx context.Context, typ string) ([]Task, error) {
+func (s *Rados) Dead(ctx context.Context, typ string) ([]Task, error) {
 	kv, _, err := s.io.OmapList(ctx, queueOID(typ), "dead/", "", 0)
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
@@ -236,7 +292,7 @@ func (s *Store) Dead(ctx context.Context, typ string) ([]Task, error) {
 }
 
 // Retry moves a dead task back to pending with attempts reset.
-func (s *Store) Retry(ctx context.Context, typ, id string) error {
+func (s *Rados) Retry(ctx context.Context, typ, id string) error {
 	m, err := s.io.OmapGet(ctx, queueOID(typ), []string{deadKey(id)})
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {

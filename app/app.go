@@ -69,8 +69,8 @@ type Stores struct {
 	Messages    *message.Store
 	Attachments *attach.Store
 	Audit       *audit.Store
-	Sessions    *session.Store
-	Queue       *queue.Store
+	Sessions    session.Store
+	Queue       queue.Store
 }
 
 // Services bundles every service.
@@ -292,16 +292,12 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 	if a.Cfg.HasMode("worker") {
-		idxp, err := a.Client.Pool(a.Cfg.Ceph.Pools.Index)
-		if err != nil {
-			return err
-		}
 		w := worker.New(worker.Config{
 			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention, ExportDir: a.Cfg.Export.Directory,
 		}, worker.Stores{
 			Identity: a.Stores.Identity, Index: a.Stores.Index, Messages: a.Stores.Messages,
 			Attachments: a.Stores.Attachments, Audit: a.Stores.Audit, Queue: a.Stores.Queue,
-		}, a.Services.Auditor, idxp, a.Log)
+		}, a.Services.Auditor, a.Log)
 		w.Export = a.Services.Export
 		wctx, wcancel := context.WithCancel(ctx)
 		a.addCloser(func(context.Context) error { wcancel(); return nil })

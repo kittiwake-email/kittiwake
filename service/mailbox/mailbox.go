@@ -52,7 +52,7 @@ type Service struct {
 	idx   *index.Store
 	msgs  *message.Store
 	atts  *attach.Store
-	queue *queue.Store
+	queue queue.Store
 	audit *auditor.Auditor
 	log   *slog.Logger
 	cfg   Config
@@ -60,7 +60,7 @@ type Service struct {
 }
 
 // New returns the service. queue may be nil.
-func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attach.Store, q *queue.Store, aud *auditor.Auditor, log *slog.Logger, cfg Config) *Service {
+func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attach.Store, q queue.Store, aud *auditor.Auditor, log *slog.Logger, cfg Config) *Service {
 	if cfg.TrashRetention <= 0 {
 		cfg.TrashRetention = 30 * 24 * time.Hour
 	}

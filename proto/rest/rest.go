@@ -61,14 +61,14 @@ type Server struct {
 	auth   *auth.Service
 	admin  *admin.Service
 	audit  *audit.Store
-	queue  *queue.Store
+	queue  queue.Store
 	log    *slog.Logger
 	mu     sync.Mutex
 	routes []string
 }
 
 // New returns a server.
-func New(cfg Config, authSvc *auth.Service, adminSvc *admin.Service, auditStore *audit.Store, queueStore *queue.Store, log *slog.Logger) *Server {
+func New(cfg Config, authSvc *auth.Service, adminSvc *admin.Service, auditStore *audit.Store, queueStore queue.Store, log *slog.Logger) *Server {
 	if cfg.Realm == "" {
 		cfg.Realm = "dovetail"
 	}

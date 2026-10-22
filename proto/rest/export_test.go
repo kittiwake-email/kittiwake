@@ -62,7 +62,7 @@ func TestExportEndpoints(t *testing.T) {
 		t.Fatal("no task id")
 	}
 	// Run the worker task.
-	w := worker.New(worker.Config{ExportDir: dir, PollInterval: time.Millisecond}, worker.Stores{Identity: f.ids, Index: idx, Messages: msgs, Attachments: atts, Audit: auditStore, Queue: q}, aud, idxp, log)
+	w := worker.New(worker.Config{ExportDir: dir, PollInterval: time.Millisecond}, worker.Stores{Identity: f.ids, Index: idx, Messages: msgs, Attachments: atts, Audit: auditStore, Queue: q}, aud, log)
 	w.Export = exp
 	w.RunOnce(actor.With(ctx, actor.System("cli")))
 	r = f.do("GET", "/v1/admin/exports?mailbox="+f.mb.ID.String(), f.bearer(f.adminTk), nil, "")

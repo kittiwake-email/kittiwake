@@ -20,7 +20,6 @@ import (
 
 	"dovetail/mail"
 	"dovetail/metrics"
-	"dovetail/rados"
 	"dovetail/service/actor"
 	"dovetail/service/admin"
 	"dovetail/service/auditor"
@@ -102,9 +101,8 @@ type Worker struct {
 	msgs  *message.Store
 	atts  *attach.Store
 	audit *audit.Store
-	queue *queue.Store
+	queue queue.Store
 	aud   *auditor.Auditor
-	lock  rados.IOContext // index pool, for the scheduler lock object
 	log   *slog.Logger
 	Now   func() time.Time
 	// Export is optional; without it export-mailbox tasks fail.
@@ -118,11 +116,11 @@ type Stores struct {
 	Messages    *message.Store
 	Attachments *attach.Store
 	Audit       *audit.Store
-	Queue       *queue.Store
+	Queue       queue.Store
 }
 
-// New returns a worker. indexPool is used for the scheduler lock.
-func New(cfg Config, st Stores, aud *auditor.Auditor, indexPool rados.IOContext, log *slog.Logger) *Worker {
+// New returns a worker.
+func New(cfg Config, st Stores, aud *auditor.Auditor, log *slog.Logger) *Worker {
 	if cfg.PostHoldGrace <= 0 {
 		cfg.PostHoldGrace = 7 * 24 * time.Hour
 	}
@@ -157,7 +155,7 @@ func New(cfg Config, st Stores, aud *auditor.Auditor, indexPool rados.IOContext,
 	return &Worker{
 		ID: fmt.Sprintf("%s-%d-%s", host, os.Getpid(), uuid.NewString()[:8]), cfg: cfg,
 		ids: st.Identity, idx: st.Index, msgs: st.Messages, atts: st.Attachments, audit: st.Audit, queue: st.Queue,
-		aud: aud, lock: indexPool, log: log, Now: time.Now,
+		aud: aud, log: log, Now: time.Now,
 	}
 }
 
@@ -533,30 +531,16 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 
 // ---- scheduler ----
 
-const schedulerOID = "scheduler"
-
-// schedule, when this worker holds the scheduler lock, enqueues periodic
-// tasks whose interval has elapsed. Timestamps live in the scheduler
-// object's omap so a new leader continues where the old one stopped.
+// schedule, when this worker holds the scheduler lease, enqueues periodic
+// tasks whose interval has elapsed. Last-run times live in the queue
+// store so a new leader continues where the old one stopped.
 func (w *Worker) schedule(ctx context.Context) {
-	if err := w.lock.Lock(ctx, schedulerOID, "leader", w.ID, 2*w.cfg.PollInterval+time.Minute); err != nil {
+	if lead, err := w.queue.Lead(ctx, w.ID, 2*w.cfg.PollInterval+time.Minute); err != nil || !lead {
 		return // somebody else leads
 	}
-	now := w.Now()
 	due := func(name string, every time.Duration) bool {
-		m, err := w.lock.OmapGet(ctx, schedulerOID, []string{name})
-		if err != nil && !errors.Is(err, rados.ErrNotFound) {
-			return false
-		}
-		if v, ok := m[name]; ok {
-			var last time.Time
-			if last.UnmarshalText(v) == nil && now.Sub(last) < every {
-				return false
-			}
-		}
-		b, _ := now.UTC().MarshalText()
-		_, _ = w.lock.Write(ctx, schedulerOID, rados.NewWriteTx().OmapSet(map[string][]byte{name: b}))
-		return true
+		ok, err := w.queue.Due(ctx, name, every)
+		return err == nil && ok
 	}
 	if due("purge", w.cfg.PurgeInterval) {
 		n := 0
@@ -574,13 +558,4 @@ func (w *Worker) schedule(ctx context.Context) {
 			w.log.Info("scheduled", slog.String("task", typ))
 		}
 	}
-}
-
-// SchedulerLockHolder reports who holds the scheduler lock (for status).
-func SchedulerLockHolder(ctx context.Context, indexPool rados.IOContext) (string, error) {
-	m, err := indexPool.OmapGet(ctx, schedulerOID, []string{"purge"})
-	if err != nil {
-		return "", err
-	}
-	return string(m["purge"]), nil
 }

@@ -29,7 +29,7 @@ type fixture struct {
 	idx  *index.Store
 	msgs *message.Store
 	atts *attach.Store
-	q    *queue.Store
+	q    queue.Store
 	aud  *audit.Store
 	mb   identity.Mailbox
 }

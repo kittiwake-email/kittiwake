@@ -44,13 +44,13 @@ const (
 type Service struct {
 	ids   *identity.Store
 	idx   *index.Store
-	queue *queue.Store
+	queue queue.Store
 	audit *auditor.Auditor
 	Now   func() time.Time
 }
 
 // New returns the service. queue may be nil (tasks are then refused).
-func New(ids *identity.Store, idx *index.Store, q *queue.Store, aud *auditor.Auditor) *Service {
+func New(ids *identity.Store, idx *index.Store, q queue.Store, aud *auditor.Auditor) *Service {
 	return &Service{ids: ids, idx: idx, queue: q, audit: aud, Now: time.Now}
 }
 
