@@ -391,6 +391,11 @@ func (s *Service) EmptyMailbox(ctx context.Context, id uuid.UUID) (messages, fol
 			return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
 		}
 	}
+	// Counters are rebuilt from the indexes so the mailbox is left consistent
+	// even if a sync was writing to it meanwhile.
+	if _, err := s.idx.Recalculate(ctx, id); err != nil && !errors.Is(err, index.ErrNotFound) {
+		return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
+	}
 	if s.queue != nil {
 		_, _ = s.queue.Enqueue(ctx, TaskPurgeTrash, map[string]any{"mailbox": id}, time.Time{})
 	}
