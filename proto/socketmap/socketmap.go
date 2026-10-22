@@ -112,17 +112,17 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 		if err != nil {
 			return "NOTFOUND "
 		}
-		v, err := s.ids.GetDomain(ctx, d)
+		v, err := s.ids.GetDomainCached(ctx, d)
 		if err != nil {
 			if errors.Is(err, identity.ErrNotFound) {
 				return "NOTFOUND "
 			}
 			return "TEMP " + err.Error()
 		}
-		if !v.Value.Enabled {
+		if !v.Enabled {
 			return "NOTFOUND "
 		}
-		return "OK " + v.Value.Name
+		return "OK " + v.Name
 	case "mailboxes":
 		// Exists for Postfix = will be accepted or queued at LMTP time. A
 		// disabled (hard) mailbox is reported unknown so the MTA rejects at
@@ -153,14 +153,14 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 		if err != nil {
 			return "NOTFOUND "
 		}
-		v, err := s.ids.GetAlias(ctx, addr)
+		v, err := s.ids.GetAliasCached(ctx, addr)
 		if err != nil {
 			if errors.Is(err, identity.ErrNotFound) {
 				return "NOTFOUND "
 			}
 			return "TEMP " + err.Error()
 		}
-		if !v.Value.Enabled {
+		if !v.Enabled {
 			return "NOTFOUND "
 		}
 		// Postfix virtual_alias_maps expects addresses. Mailbox destinations
@@ -168,7 +168,7 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 		// then delivers it over LMTP, where Dovetail fans it out).
 		var out []string
 		self := false
-		for _, d := range v.Value.Destinations {
+		for _, d := range v.Destinations {
 			if d.Address != "" {
 				out = append(out, d.Address)
 			} else {

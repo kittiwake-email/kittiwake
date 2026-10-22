@@ -33,7 +33,8 @@ for one delivered message is three sequential round trips on the critical path: 
 transaction (UID, modseq, counters and the change-log entry in one write), the message
 object written concurrently with the thread-map entries, and the folder index entry. Reads
 that would repeat per message (domain, account, alias, mailbox, root for the quota check)
-are cached per process for a couple of seconds. Audit records are batched into one omap
+are cached per process for a few seconds (the `cache` section; see "Caches" below). Audit
+records are batched into one omap
 write per object per second. Notifications and search events are off the critical path, and
 search events are not written at all until a search backend consumes them. Protocol
 adapters apply what they just wrote themselves instead of reading it back.
@@ -710,13 +711,36 @@ two RADOS reads. A password costs two reads plus an argon2id verification, which
 default parameters is tens of milliseconds of CPU (measured 54 ms per basic-auth request on
 the four-core lab box against 2.5 ms for a session token), so clients that send basic auth
 on every request would otherwise burn a core per ~20 requests per second. Successful
-verifications are therefore cached per process for `auth.cache_ttl` (default 5 s, 0
-disables): the cache key is a hash of the credential, only positive results are cached, a
-cache hit skips the per-request `login` audit record, and a password change, password
-removal or TOTP change invalidates the account's entries in the process that made it. A
-revoked token or changed password therefore keeps working for at most the TTL in other
-processes. Wrong passwords are never cached and always cost the hash: brute-force throttling
-stays at the proxy.
+verifications are therefore cached per process for `cache.credentials` (default 5 s): the
+cache key is a hash of the credential, only positive results are cached, a cache hit skips
+the per-request `login` audit record, and a password change, password removal or TOTP change
+invalidates the account's entries in the process that made it. Wrong passwords are never
+cached and always cost the hash: brute-force throttling stays at the proxy.
+
+## Caches
+
+Every daemon keeps three small per-process read caches, configured under `cache:` as a
+TTL each (default 5 s, `0s` disables one). They exist to collapse the repeated reads of one
+client's command stream or one MTA's recipient lookups, not to hold data, so keep them
+short. A change made through the same process invalidates its own entry and is visible at
+once; a change made by another process (the admin daemon suspending a mailbox, a password
+rotated through JMAP on another node) is visible within the TTL. Nothing is cached across
+processes or nodes: no Redis, no memcached.
+
+- `cache.credentials`: verified passwords and API tokens (above).
+- `cache.identity`: domains, mailboxes (state, hold, quota limits), accounts and aliases.
+  These are read by the mailbox service on **every** IMAP, POP3 and JMAP command (state and
+  hold check), by LMTP for every recipient (domain, account or alias, mailbox) and by the
+  Postfix socketmap for every `domains`, `mailboxes` and `aliases` query. Not-found results
+  are cached too, so an MTA probing unknown recipients costs one read per TTL. The cache
+  lives in the identity store itself, so every write through the store drops the entry.
+- `cache.root`: the mailbox root (folder list, counters, modseq, quota usage) where a copy
+  up to the TTL old is acceptable: the LMTP quota check, IMAP folder-name resolution (a
+  miss re-reads), and JMAP state strings in method responses. A process's own root writes
+  refresh the copy, so the `newState` after a JMAP set is exact; push notifications from
+  other processes always re-read.
+
+Admin reads and all optimistic-concurrency updates bypass the caches.
 
 ## LMTP delivery
 
@@ -830,7 +854,7 @@ The daemon takes a single YAML file as configuration:
 - Audit retention period and per-protocol audit detail level
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
 - Session settings: access token lifetime, refresh token lifetime, key rotation interval
-- Authentication cache TTL (verified passwords and API tokens reused per process)
+- Cache TTLs: verified credentials, identity objects, mailbox root (see "Caches")
 - Spam header name and value for Junk routing
 - Default quota limits, over-quota LMTP reply policy (suspended mailboxes always answer 4xx,
   disabled ones 5xx)

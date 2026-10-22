@@ -204,8 +204,21 @@ func (s *Server) session(ctx context.Context) map[string]any {
 	}
 }
 
-// state returns the mailbox modseq as a state string ("0" on error).
+// state returns the mailbox modseq as a state string ("0" on error). It
+// uses the root as this process last saw it: our own writes refresh that
+// copy, so a method's newState is exact, and another process's writes are
+// announced by push (freshState) rather than discovered here.
 func (s *Server) state(ctx context.Context, mb uuid.UUID) string {
+	root, err := s.mb.RootCached(ctx, mb)
+	if err != nil {
+		return "0"
+	}
+	return strconv.FormatUint(root.ModSeq, 10)
+}
+
+// freshState reads the root (one RADOS read); used when a change
+// notification from another process arrived.
+func (s *Server) freshState(ctx context.Context, mb uuid.UUID) string {
 	root, err := s.mb.Root(ctx, mb)
 	if err != nil {
 		return "0"

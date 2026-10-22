@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"dovetail/internal/ttlcache"
 	"dovetail/rados"
 )
 
@@ -41,6 +42,9 @@ type Store struct {
 	aliases   rados.IOContext
 	tokens    rados.IOContext
 	Now       func() time.Time
+	// CacheTTL enables the *Cached getters (see cache.go). 0 disables.
+	CacheTTL time.Duration
+	cache    ttlcache.Cache[any]
 }
 
 // New returns a store on the given meta pool context.
@@ -176,6 +180,7 @@ func (s *Store) CreateDomain(ctx context.Context, d Domain) (Domain, error) {
 	if _, err := s.domains.Write(ctx, allDomainsObject, rados.NewWriteTx().OmapSet(map[string][]byte{name: nil})); err != nil {
 		return Domain{}, mapErr(err)
 	}
+	s.cache.Delete(domainKey(name))
 	return d, nil
 }
 
@@ -211,6 +216,7 @@ func (s *Store) UpdateDomain(ctx context.Context, name string, fn func(*Domain) 
 			}
 			return Domain{}, err
 		}
+		s.cache.Delete(domainKey(name))
 		return d, nil
 	}
 	return Domain{}, ErrConflict
@@ -235,6 +241,7 @@ func (s *Store) DeleteDomain(ctx context.Context, name string) error {
 	if _, err := s.domains.Write(ctx, allDomainsObject, rados.NewWriteTx().OmapRemove(name)); err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return mapErr(err)
 	}
+	s.cache.Delete(domainKey(name))
 	return mapErr(s.domains.Delete(ctx, name))
 }
 
@@ -270,6 +277,7 @@ func (s *Store) CreateMailbox(ctx context.Context, m Mailbox) (Mailbox, error) {
 	if _, err := createJSON(ctx, s.mailboxes, m.ID.String(), m); err != nil {
 		return Mailbox{}, err
 	}
+	s.cache.Delete(mailboxKey(m.ID))
 	return m, nil
 }
 
@@ -306,6 +314,7 @@ func (s *Store) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*Mailbo
 			}
 			return Mailbox{}, err
 		}
+		s.cache.Delete(mailboxKey(id))
 		return m, nil
 	}
 	return Mailbox{}, ErrConflict
@@ -329,6 +338,7 @@ func (s *Store) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	if len(accts) > 0 {
 		return fmt.Errorf("%w: mailbox %s has accounts", ErrInUse, id)
 	}
+	s.cache.Delete(mailboxKey(id))
 	return mapErr(s.mailboxes.Delete(ctx, id.String()))
 }
 
@@ -412,6 +422,7 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if _, err := s.mailboxes.Write(ctx, a.MailboxID.String(), rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"account/" + a.ID.String(): []byte(username)})); err != nil {
 		return Account{}, mapErr(err)
 	}
+	s.cache.Delete(accountKey(username))
 	return a, nil
 }
 
@@ -478,6 +489,7 @@ func (s *Store) UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*Accoun
 			}
 			return Account{}, err
 		}
+		s.cache.Delete(accountKey(a.Username))
 		return a, nil
 	}
 	return Account{}, ErrConflict
@@ -507,6 +519,7 @@ func (s *Store) RelinkAccount(ctx context.Context, id, mailboxID uuid.UUID) (Acc
 	if _, err := s.mailboxes.Write(ctx, mailboxID.String(), rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"account/" + id.String(): []byte(a.Username)})); err != nil {
 		return Account{}, mapErr(err)
 	}
+	s.cache.Delete(accountKey(a.Username))
 	return a, nil
 }
 
@@ -540,6 +553,7 @@ func (s *Store) DeleteAccount(ctx context.Context, id uuid.UUID) error {
 	if err := s.names.Delete(ctx, a.Username); err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return mapErr(err)
 	}
+	s.cache.Delete(accountKey(a.Username))
 	return mapErr(s.accounts.Delete(ctx, id.String()))
 }
 
@@ -611,6 +625,7 @@ func (s *Store) CreateAlias(ctx context.Context, al Alias) (Alias, error) {
 	if err := s.setMailboxAliasListings(ctx, address, nil, al.Destinations); err != nil {
 		return Alias{}, err
 	}
+	s.cache.Delete(aliasKey(address))
 	return al, nil
 }
 
@@ -708,6 +723,7 @@ func (s *Store) UpdateAlias(ctx context.Context, address string, fn func(*Alias)
 		if err := s.setMailboxAliasListings(ctx, address, cur.Value.Destinations, al.Destinations); err != nil {
 			return Alias{}, err
 		}
+		s.cache.Delete(aliasKey(address))
 		return al, nil
 	}
 	return Alias{}, ErrConflict
@@ -729,6 +745,7 @@ func (s *Store) DeleteAlias(ctx context.Context, address string) error {
 	if err := s.setMailboxAliasListings(ctx, address, cur.Value.Destinations, nil); err != nil {
 		return err
 	}
+	s.cache.Delete(aliasKey(address))
 	return mapErr(s.aliases.Delete(ctx, address))
 }
 

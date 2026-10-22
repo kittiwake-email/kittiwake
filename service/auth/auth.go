@@ -655,7 +655,7 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 		s.audit.Log(auditCtx, auditor.Event{Action: "login-failed", Detail: detail, Result: audit.ResultDenied})
 		return actor.Actor{}, err
 	}
-	v, err := s.ids.GetAccountByUsername(ctx, username)
+	acct, err := s.ids.GetAccountByUsernameCached(ctx, username)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) || errors.Is(err, identity.ErrInvalid) {
 			_, _ = cryptoauth.VerifyPassword(dummyHash, password)
@@ -663,7 +663,6 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 		}
 		return actor.Actor{}, err
 	}
-	acct := v.Value
 	pw, ok := s.matchPassword(&acct, password)
 	if !ok {
 		return fail("wrong password", ErrInvalidCredentials)

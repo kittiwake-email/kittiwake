@@ -164,14 +164,14 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 	if !(a.MailboxID == req.MailboxID && a.HasRole(identity.RoleSend)) {
 		return fail("role send required", ErrForbidden)
 	}
-	mv, err := s.ids.GetMailbox(ctx, req.MailboxID)
+	m, err := s.ids.GetMailboxCached(ctx, req.MailboxID)
 	if err != nil {
 		return Result{}, err
 	}
-	if !mv.Value.Active() {
-		return fail("mailbox "+mv.Value.State, ErrForbidden)
+	if !m.Active() {
+		return fail("mailbox "+m.State, ErrForbidden)
 	}
-	if mv.Value.Hold != nil && !mv.Value.Hold.AllowSend {
+	if m.Hold != nil && !m.Hold.AllowSend {
 		return fail("on hold", ErrHold)
 	}
 	if int64(len(req.Raw)) > s.cfg.MaxMessageSize {

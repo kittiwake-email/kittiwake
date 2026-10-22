@@ -156,7 +156,7 @@ func (s *session) root() (index.Root, error) {
 // APPENDs costs no root reads for name resolution.
 func (s *session) folder(name string) (index.Root, *index.Folder, error) {
 	n := normalizeName(name)
-	if root, err := s.srv.mb.RootCached(s.ctx, s.mb, 5*time.Second); err == nil {
+	if root, err := s.srv.mb.RootCached(s.ctx, s.mb); err == nil {
 		if f := root.FolderByName(n); f != nil {
 			return root, f, nil
 		}

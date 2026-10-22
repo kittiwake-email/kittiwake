@@ -154,7 +154,7 @@ func (sel *selected) sync(w *imapserver.UpdateWriter, allowExpunge bool) error {
 // the last thing that happened to the mailbox, as far as this process has
 // seen, is our own append.
 func (sel *selected) freshEnough() bool {
-	root, err := sel.s.srv.mb.RootCached(sel.s.ctx, sel.s.mb, 2*time.Second)
+	root, err := sel.s.srv.mb.RootCached(sel.s.ctx, sel.s.mb)
 	return err == nil && root.ModSeq == sel.modseq
 }
 

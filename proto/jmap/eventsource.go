@@ -62,7 +62,7 @@ func (s *Server) serveEventSource(w http.ResponseWriter, r *http.Request) {
 		pingC = t.C
 	}
 	emit := func() bool {
-		state := s.state(ctx, act.MailboxID)
+		state := s.freshState(ctx, act.MailboxID)
 		changed := map[string]any{}
 		for _, t := range []string{"Email", "Mailbox", "Thread"} {
 			if len(types) == 0 || types[t] {

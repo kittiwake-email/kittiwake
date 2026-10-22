@@ -25,7 +25,7 @@ type Config struct {
 	Mail    Mail    `yaml:"mail"`
 	Quota   Quota   `yaml:"quota"`
 	Session Session `yaml:"session"`
-	Auth    Auth    `yaml:"auth"`
+	Cache   Cache   `yaml:"cache"`
 	Audit   Audit   `yaml:"audit"`
 	Export  Export  `yaml:"export"`
 	Log     Log     `yaml:"log"`
@@ -121,13 +121,24 @@ type Session struct {
 	Issuer string `yaml:"issuer"`
 }
 
-// Auth configures credential verification.
-type Auth struct {
-	// CacheTTL: how long a successful password or API-token verification is
-	// reused per process without touching RADOS or hashing again. 0 disables.
-	// A revoked token or changed password keeps working for at most this long
-	// in processes that already verified it.
-	CacheTTL time.Duration `yaml:"cache_ttl"`
+// Cache configures the per-process read caches. Every entry is how long a
+// value read from RADOS is reused before it is read again; 0 disables that
+// cache. A change made by another process shows up within the TTL; a change
+// made by the same process shows up at once. Keep these short (seconds):
+// they exist to collapse the repeated reads of one client's command stream
+// or one MTA's recipient lookups, not to hold data.
+type Cache struct {
+	// Credentials: verified passwords and API tokens. Without it every
+	// basic-auth request costs an argon2id verification.
+	Credentials time.Duration `yaml:"credentials"`
+	// Identity: domains, mailboxes (state, hold, quota limits), accounts and
+	// aliases, read on every IMAP/POP3/JMAP command, every LMTP recipient
+	// and every Postfix socketmap query.
+	Identity time.Duration `yaml:"identity"`
+	// Root: the mailbox root (folder list, counters, modseq, quota usage)
+	// where a slightly old copy is fine: quota checks, folder-name
+	// resolution, JMAP state strings.
+	Root time.Duration `yaml:"root"`
 }
 
 // Audit configures audit retention and detail.
@@ -208,7 +219,7 @@ func Default() Config {
 			KeyRotationInterval:  90 * 24 * time.Hour,
 			Issuer:               "dovetail",
 		},
-		Auth:  Auth{CacheTTL: 5 * time.Second},
+		Cache: Cache{Credentials: 5 * time.Second, Identity: 5 * time.Second, Root: 5 * time.Second},
 		Audit: Audit{Retention: 365 * 24 * time.Hour},
 		Log:   Log{Level: "info", Format: "json"},
 	}
@@ -273,8 +284,8 @@ func (c *Config) Validate() error {
 	if c.Mail.MaxAliasDepth <= 0 {
 		return errors.New("config: mail.max_alias_depth must be positive")
 	}
-	if c.Auth.CacheTTL < 0 {
-		return errors.New("config: auth.cache_ttl must not be negative")
+	if c.Cache.Credentials < 0 || c.Cache.Identity < 0 || c.Cache.Root < 0 {
+		return errors.New("config: cache TTLs must not be negative")
 	}
 	if c.Session.AccessTokenLifetime <= 0 || c.Session.RefreshTokenLifetime <= 0 {
 		return errors.New("config: session lifetimes must be positive")

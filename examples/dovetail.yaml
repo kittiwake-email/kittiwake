@@ -59,9 +59,11 @@ session:
   key_rotation_interval: 2160h
   issuer: https://mail.example.org   # also the JMAP base URL
 
-auth:
-  cache_ttl: 5s                # reuse a verified password/API token per process this long (0s disables)
-                               # (basic auth costs an argon2id verification per request otherwise)
+cache:                         # per-process read caches; 0s disables one. Changes made by another
+                               # process show within the TTL, own changes at once.
+  credentials: 5s              # verified passwords / API tokens (basic auth = argon2id per request otherwise)
+  identity: 5s                 # domains, mailboxes (state, hold, quota), accounts, aliases
+  root: 5s                     # mailbox root (folders, counters, quota usage) where slightly stale is fine
 
 audit:
   retention: 8760h             # 365 days

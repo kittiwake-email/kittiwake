@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,10 +26,15 @@ func NewMemoryClient() *MemoryClient {
 }
 
 type memPool struct {
-	mu   sync.Mutex
-	objs map[string]*memObject // key: namespace + "\x00" + oid
-	seq  uint64
+	mu    sync.Mutex
+	objs  map[string]*memObject // key: namespace + "\x00" + oid
+	seq   uint64
+	reads atomic.Int64 // read operations (Get, Stat, GetXattrs, OmapGet, OmapList); tests count I/O with it
 }
+
+// Reads returns the number of read operations the pool has served. Tests
+// use it to assert that a cache keeps a hot path off RADOS.
+func (io *memIOContext) Reads() int { return int(io.pool.reads.Load()) }
 
 type memObject struct {
 	data     []byte
@@ -125,6 +131,7 @@ func (io *memIOContext) Get(ctx context.Context, oid string) ([]byte, uint64, er
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
+	io.pool.reads.Add(1)
 	io.pool.mu.Lock()
 	defer io.pool.mu.Unlock()
 	o, ok := io.get(oid)
@@ -138,6 +145,7 @@ func (io *memIOContext) Stat(ctx context.Context, oid string) (Stat, error) {
 	if err := ctx.Err(); err != nil {
 		return Stat{}, err
 	}
+	io.pool.reads.Add(1)
 	io.pool.mu.Lock()
 	defer io.pool.mu.Unlock()
 	o, ok := io.get(oid)
@@ -151,6 +159,7 @@ func (io *memIOContext) GetXattrs(ctx context.Context, oid string) (map[string][
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	io.pool.reads.Add(1)
 	io.pool.mu.Lock()
 	defer io.pool.mu.Unlock()
 	o, ok := io.get(oid)
@@ -168,6 +177,7 @@ func (io *memIOContext) OmapGet(ctx context.Context, oid string, keys []string) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	io.pool.reads.Add(1)
 	io.pool.mu.Lock()
 	defer io.pool.mu.Unlock()
 	o, ok := io.get(oid)
@@ -187,6 +197,7 @@ func (io *memIOContext) OmapList(ctx context.Context, oid, prefix, after string,
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
+	io.pool.reads.Add(1)
 	io.pool.mu.Lock()
 	defer io.pool.mu.Unlock()
 	o, ok := io.get(oid)

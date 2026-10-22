@@ -42,6 +42,8 @@ var (
 type Config struct {
 	TrashRetention time.Duration
 	DefaultQuota   identity.QuotaLimits
+	// RootTTL: how old the root returned by RootCached may be.
+	RootTTL time.Duration
 }
 
 // Service is the mailbox service.
@@ -74,14 +76,15 @@ func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attac
 // the mailbox state allows it. write=true also enforces legal hold.
 func (s *Service) authorize(ctx context.Context, mb uuid.UUID, role string, write bool) (identity.Mailbox, error) {
 	a := actor.From(ctx)
-	v, err := s.ids.GetMailbox(ctx, mb)
+	// Cached: one client's command stream re-reads the same mailbox for
+	// every command; a suspend or hold applies within the identity cache TTL.
+	m, err := s.ids.GetMailboxCached(ctx, mb)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			return identity.Mailbox{}, ErrNotFound
 		}
 		return identity.Mailbox{}, err
 	}
-	m := v.Value
 	switch {
 	case a.IsAdmin():
 		// Support access: allowed, audited with the admin as actor.
@@ -123,13 +126,14 @@ func (s *Service) Root(ctx context.Context, mb uuid.UUID) (index.Root, error) {
 }
 
 // RootCached returns the root as last seen by this process when younger
-// than maxAge (folder-name resolution, where staleness is harmless because
-// a miss falls back to a fresh read).
-func (s *Service) RootCached(ctx context.Context, mb uuid.UUID, maxAge time.Duration) (index.Root, error) {
+// than Config.RootTTL (folder-name resolution and state strings, where a
+// slightly old copy is harmless: this process's own writes refresh it, and
+// a name miss falls back to a fresh read).
+func (s *Service) RootCached(ctx context.Context, mb uuid.UUID) (index.Root, error) {
 	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
 		return index.Root{}, s.deny(ctx, mb, "list", "", err)
 	}
-	return s.idx.GetRootCached(ctx, mb, maxAge)
+	return s.idx.GetRootCached(ctx, mb, s.cfg.RootTTL)
 }
 
 // ListDesc lists records newest first, starting below beforeUID (0 = the

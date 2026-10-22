@@ -162,21 +162,22 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 		Identity: identity.New(meta), Index: index.New(idxp), Messages: message.New(msgp), Attachments: attach.New(attp),
 		Audit: audit.New(idxp), Sessions: session.New(idxp), Queue: queue.New(idxp),
 	}
+	st.Identity.CacheTTL = cfg.Cache.Identity
 	aud := auditor.New(st.Audit, log, cfg.Audit.Detail)
 	dq := identity.QuotaLimits{SoftBytes: cfg.Quota.SoftBytes, HardBytes: cfg.Quota.HardBytes, SoftMessages: cfg.Quota.SoftMessages, HardMessages: cfg.Quota.HardMessages}
 	sv := Services{
 		Auditor: aud,
 		Auth: authsvc.New(st.Identity, st.Sessions, aud, authsvc.Config{
 			AccessTokenLifetime: cfg.Session.AccessTokenLifetime, RefreshTokenLifetime: cfg.Session.RefreshTokenLifetime, Issuer: cfg.Session.Issuer,
-			CacheTTL: cfg.Auth.CacheTTL,
+			CacheTTL: cfg.Cache.Credentials,
 		}),
 		Delivery: delivery.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, delivery.Config{
 			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, KeepRaw: cfg.Mail.KeepRaw,
 			SpamHeader: cfg.Mail.SpamHeader, SpamValue: cfg.Mail.SpamValue, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
 			DefaultQuota: dq, OverQuotaTempFail: cfg.Mail.OverQuotaTempFail,
-			LookupTTL: 2 * time.Second, // identity reads are cached per process; admin changes show within this
+			RootTTL: cfg.Cache.Root,
 		}),
-		Mailbox: mailbox.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, mailbox.Config{TrashRetention: cfg.Mail.TrashRetention, DefaultQuota: dq}),
+		Mailbox: mailbox.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, mailbox.Config{TrashRetention: cfg.Mail.TrashRetention, DefaultQuota: dq, RootTTL: cfg.Cache.Root}),
 		Admin:   admin.New(st.Identity, st.Index, st.Queue, aud),
 	}
 	smtpPass, err := cfg.SMTP.Password.Resolve()

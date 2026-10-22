@@ -15,7 +15,7 @@ func TestParseDefaults(t *testing.T) {
 	if !cfg.HasMode("lmtp") || cfg.HasMode("imap") {
 		t.Fatal("modes")
 	}
-	if cfg.Ceph.Pools.Meta != "dovetail.meta" || cfg.Mail.TrashRetention != 30*24*time.Hour || cfg.Auth.CacheTTL != 5*time.Second {
+	if cfg.Ceph.Pools.Meta != "dovetail.meta" || cfg.Mail.TrashRetention != 30*24*time.Hour || cfg.Cache.Credentials != 5*time.Second || cfg.Cache.Identity != 5*time.Second || cfg.Cache.Root != 5*time.Second {
 		t.Fatal("defaults not applied")
 	}
 }
@@ -54,12 +54,12 @@ log: {level: debug, format: text}
 	if _, err := Parse([]byte("log: {level: loud}\n")); err == nil {
 		t.Fatal("expected level error")
 	}
-	cfg, err = Parse([]byte("auth: {cache_ttl: 0s}\n"))
-	if err != nil || cfg.Auth.CacheTTL != 0 {
-		t.Fatalf("cache_ttl 0 should disable: %v %v", cfg.Auth.CacheTTL, err)
+	cfg, err = Parse([]byte("cache: {credentials: 0s, identity: 1s}\n"))
+	if err != nil || cfg.Cache.Credentials != 0 || cfg.Cache.Identity != time.Second || cfg.Cache.Root != 5*time.Second {
+		t.Fatalf("cache overrides: %+v %v", cfg.Cache, err)
 	}
-	if _, err := Parse([]byte("auth: {cache_ttl: -1s}\n")); err == nil {
-		t.Fatal("expected negative cache_ttl error")
+	if _, err := Parse([]byte("cache: {root: -1s}\n")); err == nil {
+		t.Fatal("expected negative cache TTL error")
 	}
 }
 

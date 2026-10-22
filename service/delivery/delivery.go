@@ -55,11 +55,9 @@ type Config struct {
 	// SearchEvents publishes index/remove events to the task queue; off
 	// unless a search backend consumes them (one write per message).
 	SearchEvents bool
-	// LookupTTL caches domain/account/alias/mailbox lookups per process so
-	// a stream of deliveries to the same recipient costs no identity reads.
-	LookupTTL time.Duration
-	// QuotaStaleness: how old a cached root may be for the quota check.
-	QuotaStaleness time.Duration
+	// RootTTL: how old a cached mailbox root may be for the quota check
+	// (identity lookups are cached by the identity store, see its CacheTTL).
+	RootTTL time.Duration
 }
 
 // Task types this service enqueues.
@@ -85,102 +83,26 @@ type Service struct {
 	log   *slog.Logger
 	cfg   Config
 	Now   func() time.Time
-
-	lookups lookupCache
 }
 
-// lookupCache is a small TTL cache for identity objects keyed by kind+key.
-type lookupCache struct {
-	mu    sync.Mutex
-	items map[string]cacheItem
-}
-
-type cacheItem struct {
-	v   any
-	err error
-	at  time.Time
-}
-
-const maxCachedLookups = 50000
-
-func (c *lookupCache) get(key string, now time.Time, ttl time.Duration, load func() (any, error)) (any, error) {
-	if ttl > 0 {
-		c.mu.Lock()
-		if it, ok := c.items[key]; ok && now.Sub(it.at) < ttl {
-			c.mu.Unlock()
-			return it.v, it.err
-		}
-		c.mu.Unlock()
-	}
-	v, err := load()
-	if ttl > 0 && (err == nil || errors.Is(err, identity.ErrNotFound)) {
-		c.mu.Lock()
-		if c.items == nil {
-			c.items = map[string]cacheItem{}
-		}
-		if len(c.items) >= maxCachedLookups {
-			for k := range c.items { // drop arbitrary entries
-				delete(c.items, k)
-				if len(c.items) < maxCachedLookups/2 {
-					break
-				}
-			}
-		}
-		c.items[key] = cacheItem{v: v, err: err, at: now}
-		c.mu.Unlock()
-	}
-	return v, err
-}
-
-// Invalidate drops cached identity lookups (tests, admin changes).
-func (s *Service) Invalidate() {
-	s.lookups.mu.Lock()
-	s.lookups.items = nil
-	s.lookups.mu.Unlock()
-}
+// Invalidate drops cached identity lookups in this process (tests, admin
+// changes made through another store instance).
+func (s *Service) Invalidate() { s.ids.InvalidateCache() }
 
 func (s *Service) getDomain(ctx context.Context, name string) (identity.Domain, error) {
-	v, err := s.lookups.get("d:"+name, s.Now(), s.cfg.LookupTTL, func() (any, error) {
-		d, err := s.ids.GetDomain(ctx, name)
-		return d.Value, err
-	})
-	if err != nil {
-		return identity.Domain{}, err
-	}
-	return v.(identity.Domain), nil
+	return s.ids.GetDomainCached(ctx, name)
 }
 
 func (s *Service) getAccount(ctx context.Context, username string) (identity.Account, error) {
-	v, err := s.lookups.get("a:"+username, s.Now(), s.cfg.LookupTTL, func() (any, error) {
-		a, err := s.ids.GetAccountByUsername(ctx, username)
-		return a.Value, err
-	})
-	if err != nil {
-		return identity.Account{}, err
-	}
-	return v.(identity.Account), nil
+	return s.ids.GetAccountByUsernameCached(ctx, username)
 }
 
 func (s *Service) getAlias(ctx context.Context, key string) (identity.Alias, error) {
-	v, err := s.lookups.get("l:"+key, s.Now(), s.cfg.LookupTTL, func() (any, error) {
-		a, err := s.ids.GetAlias(ctx, key)
-		return a.Value, err
-	})
-	if err != nil {
-		return identity.Alias{}, err
-	}
-	return v.(identity.Alias), nil
+	return s.ids.GetAliasCached(ctx, key)
 }
 
 func (s *Service) getMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbox, error) {
-	v, err := s.lookups.get("m:"+id.String(), s.Now(), s.cfg.LookupTTL, func() (any, error) {
-		m, err := s.ids.GetMailbox(ctx, id)
-		return m.Value, err
-	})
-	if err != nil {
-		return identity.Mailbox{}, err
-	}
-	return v.(identity.Mailbox), nil
+	return s.ids.GetMailboxCached(ctx, id)
 }
 
 // New returns the service. queue may be nil (events dropped).
@@ -191,8 +113,8 @@ func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attac
 	if cfg.MaxMessageSize <= 0 {
 		cfg.MaxMessageSize = 50 << 20
 	}
-	if cfg.QuotaStaleness <= 0 {
-		cfg.QuotaStaleness = 5 * time.Second
+	if cfg.RootTTL <= 0 {
+		cfg.RootTTL = 5 * time.Second
 	}
 	if log == nil {
 		log = slog.Default()
@@ -331,7 +253,7 @@ func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (iden
 	}
 	limits := s.effectiveQuota(m.Quota)
 	if limits.HardBytes > 0 || limits.HardMessages > 0 {
-		root, err := s.idx.GetRootCached(ctx, mb, s.cfg.QuotaStaleness)
+		root, err := s.idx.GetRootCached(ctx, mb, s.cfg.RootTTL)
 		if err != nil && !errors.Is(err, index.ErrNotFound) {
 			return m, err
 		}
@@ -453,7 +375,7 @@ func (s *Service) deliver(ctx context.Context, req Request) ([]Delivered, error)
 		if err := s.idx.EnsureExists(ctx, t.MailboxID); err != nil {
 			return out, err
 		}
-		root, err := s.idx.GetRootCached(ctx, t.MailboxID, s.cfg.QuotaStaleness)
+		root, err := s.idx.GetRootCached(ctx, t.MailboxID, s.cfg.RootTTL)
 		if err != nil {
 			return out, err
 		}
