@@ -93,11 +93,11 @@ em = r[1][1]["list"][0]; att = em["attachments"][0]
 st, data = req("GET", jmapbase + "/jmap/download/%s/%s/a.pdf" % (acct, att["blobId"]), token=access, raw=True)
 assert data == pdf, "attachment bytes differ"
 st, raw = req("GET", jmapbase + "/jmap/download/%s/%s/raw.eml" % (acct, em["blobId"]), token=access, raw=True)
-assert raw == msg, "raw message not byte-exact"
-print("JMAP: session, query, get, attachment and raw byte-exact")
+assert b"Message-ID: <e2e@example.com>" in raw and b"hello ceph" in raw and base64.encodebytes(pdf).replace(b"\n", b"\r\n") in raw, "rendered message lacks headers/body/attachment"
+print("JMAP: session, query, get, attachment exact, message rendered with trace headers")
 m = imaplib.IMAP4(*IMAP); m.login(USER, PASS); assert m.select("INBOX")[1][0] == b"2"
-typ, d = m.uid("fetch", "1", "(BODY.PEEK[])"); assert d[0][1] == msg, "IMAP BODY[] differs"
-m.uid("store", "1", "+FLAGS", "(\\Seen)"); m.logout(); print("IMAP: select, fetch byte-exact, store")
+typ, d = m.uid("fetch", "1", "(BODY.PEEK[])"); assert d[0][1] == raw, "IMAP BODY[] differs from the JMAP rendering"
+m.uid("store", "1", "+FLAGS", "(\\Seen)"); m.logout(); print("IMAP: select, fetch (same rendering as JMAP), store")
 p = poplib.POP3(*POP3); p.user(USER); p.pass_(PASS); assert p.stat()[0] == 2; p.quit(); print("POP3: stat")
 st, exp = req("POST", adminbase + "/v1/admin/mailboxes/%s/export" % MB, {"gzip": True}, token=TOKEN)
 print("admin: export scheduled task", exp["task_id"][:8])

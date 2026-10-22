@@ -160,6 +160,16 @@ func confOmap(t *testing.T, io IOContext) {
 	if total != 2500 {
 		t.Fatalf("paged total %d", total)
 	}
+	// Unbounded listing must return everything, past the OSD's 1024-entry cap.
+	all, more, err := a.OmapList(ctx, "many", "p/", "", 0)
+	if err != nil || more || len(all) != 2500 {
+		t.Fatalf("unbounded list: %d more=%v err=%v", len(all), more, err)
+	}
+	// A bound above the cap is honoured exactly.
+	part, more, err := a.OmapList(ctx, "many", "p/", "", 1500)
+	if err != nil || !more || len(part) != 1500 || part[1499].Key != keyf("p/%06d", 1499) {
+		t.Fatalf("bounded list: %d more=%v err=%v", len(part), more, err)
+	}
 }
 
 func keyf(format string, i int) string { return sprintf(format, i) }

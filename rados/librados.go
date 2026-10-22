@@ -230,34 +230,51 @@ func (io *libradosIOContext) OmapList(ctx context.Context, oid, prefix, after st
 		return nil, false, err
 	}
 	defer io.release(h)
-	limit := uint64(max)
-	if max <= 0 {
-		limit = 1 << 20
-	}
-	op := ceph.CreateReadOp()
-	defer op.Release()
-	op.AssertExists()
-	step := op.GetOmapValues(after, prefix, limit+1)
-	if err := op.Operate(h, oid, ceph.OperationNoFlag); err != nil {
-		return nil, false, mapErr(err)
-	}
+	// An OSD returns at most osd_max_omap_entries_per_request (default
+	// 1024) entries per call, so page through until max is reached or the
+	// object is exhausted.
+	const chunk = 1024
 	var out []KV
+	cursor := after
 	for {
-		kv, err := step.Next()
+		want := uint64(chunk)
+		if max > 0 && max-len(out)+1 < chunk {
+			want = uint64(max - len(out) + 1)
+		}
+		op := ceph.CreateReadOp()
+		op.AssertExists()
+		step := op.GetOmapValues(cursor, prefix, want)
+		err := op.Operate(h, oid, ceph.OperationNoFlag)
 		if err != nil {
+			op.Release()
 			return nil, false, mapErr(err)
 		}
-		if kv == nil {
-			break
+		n := 0
+		for {
+			kv, err := step.Next()
+			if err != nil {
+				op.Release()
+				return nil, false, mapErr(err)
+			}
+			if kv == nil {
+				break
+			}
+			n++
+			cursor = kv.Key
+			out = append(out, KV{Key: kv.Key, Value: kv.Value})
+			if max > 0 && len(out) > max {
+				break
+			}
 		}
-		out = append(out, KV{Key: kv.Key, Value: kv.Value})
+		more := step.More()
+		op.Release()
+		if max > 0 && len(out) > max {
+			return out[:max], true, nil
+		}
+		if n == 0 || !more {
+			return out, false, nil
+		}
 	}
-	more := false
-	if max > 0 && len(out) > max {
-		out = out[:max]
-		more = true
-	}
-	return out, more, nil
 }
 
 func (io *libradosIOContext) Write(ctx context.Context, oid string, tx *WriteTx) (uint64, error) {
