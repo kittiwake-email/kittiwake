@@ -113,24 +113,28 @@ func (r *Root) FolderByRole(role string) *Folder {
 	return nil
 }
 
-// Record is one message entry in a folder index (the omap value).
+// Record is one message entry in a folder index (the omap value). It is
+// kept small on purpose: one folder may hold hundreds of thousands of these
+// and listings read them all. Everything else about a message lives in its
+// document object. JSON tags are short to save omap bytes.
 type Record struct {
-	UID            uint32    `json:"uid"`
-	MessageID      uuid.UUID `json:"message_id"` // object name is <mailbox>/<message_id>
-	ThreadID       string    `json:"thread_id"`
-	Flags          []string  `json:"flags,omitempty"`
-	Size           int64     `json:"size"`
-	InternalDate   time.Time `json:"internal_date"`
-	ModSeq         uint64    `json:"modseq"`
-	Subject        string    `json:"subject,omitempty"`
-	From           string    `json:"from,omitempty"` // display form "Name <addr>"
-	FromEmail      string    `json:"from_email,omitempty"`
-	Date           time.Time `json:"date"`
-	MsgIDHeader    string    `json:"msgid,omitempty"`
-	InReplyTo      []string  `json:"in_reply_to,omitempty"`
-	References     []string  `json:"references,omitempty"`
-	HasAttachments bool      `json:"has_attachments"`
-	Preview        string    `json:"preview,omitempty"`
+	UID            uint32    `json:"u"`
+	MessageID      uuid.UUID `json:"m"` // object name is <mailbox>/<m>
+	ThreadID       string    `json:"t"`
+	Flags          []string  `json:"f,omitempty"`
+	Size           int64     `json:"s"`
+	InternalDate   time.Time `json:"d"`
+	ModSeq         uint64    `json:"q"`
+	Date           time.Time `json:"e"` // sent date (Date header)
+	Subject        string    `json:"j,omitempty"`
+	From           string    `json:"fr,omitempty"` // display form "Name <addr>"
+	FromEmail      string    `json:"fe,omitempty"`
+	HasAttachments bool      `json:"a,omitempty"`
+
+	// Threading input for Append; not stored in the index (the document has it).
+	MsgIDHeader string   `json:"-"`
+	InReplyTo   []string `json:"-"`
+	References  []string `json:"-"`
 }
 
 // HasFlag reports whether the record carries the flag (case-insensitive for

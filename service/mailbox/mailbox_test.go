@@ -221,8 +221,8 @@ func TestQuery(t *testing.T) {
 	f := newFixture(t)
 	ctx := f.user
 	a := f.deliver(t, "Invoice March", "billing@acme.example")
-	_, arec, _ := f.svc.Get(ctx, f.mb.ID, a.MessageID)
-	f.deliverReply(t, "Re: Invoice March", "wido@example.org", arec.MsgIDHeader)
+	adoc, _ := f.svc.Document(ctx, f.mb.ID, a.MessageID)
+	f.deliverReply(t, "Re: Invoice March", "wido@example.org", adoc.MessageID)
 	f.deliver(t, "Lunch?", "friend@x.org")
 	root, _ := f.svc.Root(ctx, f.mb.ID)
 	inbox := root.FolderByRole(index.RoleInbox).ID

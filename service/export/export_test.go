@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"dovetail/mail"
 	"encoding/json"
 	"errors"
 	"io"
@@ -138,8 +139,8 @@ func TestExportAndReimport(t *testing.T) {
 			inboxMsg = m
 		}
 	}
-	if string(files[inboxMsg.Path]) != withAtt {
-		t.Fatal("exported message not byte-exact")
+	if string(files[inboxMsg.Path]) != rendered(t, withAtt) {
+		t.Fatal("exported message is not the rendered form")
 	}
 	if !strings.HasSuffix(inboxMsg.Path, ":2,FSa") || !strings.Contains(inboxMsg.Path, "/maildir/cur/") {
 		t.Fatalf("filename flags: %s", inboxMsg.Path)
@@ -227,4 +228,19 @@ func TestImportPlainMaildir(t *testing.T) {
 	if _, err := f.svc.ImportMaildir(f.cli, f.mb.ID, filepath.Join(dir, "nope")); err == nil {
 		t.Fatal("missing dir")
 	}
+}
+
+// rendered returns what Dovetail serves for a raw message: the document
+// rendered back to RFC 5322 (the original bytes are not kept).
+func rendered(t *testing.T, raw string) string {
+	t.Helper()
+	p, err := mail.Parse([]byte(raw), mail.Options{InlineMax: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := mail.Render(p.Doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }

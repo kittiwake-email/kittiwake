@@ -12,6 +12,24 @@ License: none for now, internal use only.
 
 # Features
 
+## Scalability is the governing principle
+
+Dovetail is designed for a million mailboxes, each of which may hold 150k messages and
+10+ GB spanning decades. Every design decision is weighed against that: the number of RADOS
+objects per message, the number of omap keys per object (Ceph warns above 200k and one
+object means one OSD serialising all of it), round trips per delivery, and whether any
+request has to read a whole folder. Concretely:
+
+- One RADOS object per message (plus deduplicated attachments); no raw copy of the message
+- Per-mailbox maps are sharded; folder indexes are sharded by UID range; no map grows with
+  the number of messages on a single object
+- Folder listings are newest-first by construction, so the first page of any folder is one
+  omap read, and nothing loads a whole folder into memory for a page
+- Each component (LMTP, IMAP, POP3, JMAP, admin, worker) runs as its own process and scales
+  independently; all state is in RADOS
+
+Measure on the lab cluster (see `TESTENV.md`) before and after storage changes.
+
 ## Stateless and scalable, everything in Ceph RADOS
 
 The daemons that run this platform are stateless, allowing them to scale out. **All persistent
@@ -96,7 +114,9 @@ mock of RADOS; real integration tests against a live Ceph cluster come later.
 ## Observability
 
 Structured logging and metrics everywhere. Every component exposes Prometheus metrics and logs
-structured (JSON) output. Each process serves `/metrics`, `/healthz` (process up) and `/readyz`
+structured (JSON) output. Every log line and audit record about a message carries its
+`Message-ID` header (delivery, submission, purge, raw fetch), next to Dovetail's own message
+uuid, so a message can be followed from the MTA logs through the platform. Each process serves `/metrics`, `/healthz` (process up) and `/readyz`
 (Ceph reachable) on a dedicated management listener.
 
 ## Containers
@@ -228,37 +248,42 @@ Everything is stored in Ceph RADOS objects: not S3/RGW, pure RADOS via librados.
 - **meta** – identity data (domains, mailboxes, accounts, aliases, tokens), split into RADOS
   namespaces like RGW's metadata pool
 
-## Message parsing
+## Message document
 
-A raw e-mail message is parsed into a JSON document which is stored as a RADOS object:
+A raw e-mail message is parsed into a JSON document which is the one RADOS object per
+message (`<mailbox-uuid>/<message-uuid>` in the messages pool):
 
 - A schema version field, so the format can evolve
 - Headers as a JSON array (parsed, decoded to UTF-8)
-- The original, unparsed headers (including `Received:` lines) kept verbatim for traceability
+- The **original, unparsed header block kept verbatim**, including every `Received:` line,
+  `Message-ID`, DKIM signatures and all other trace headers, so forensics can follow where a
+  message came from
 - Body as HTML and plain text (both derived if only one exists), converted to UTF-8
-- The full MIME structure (part tree with content types, dispositions, Content-IDs, sizes)
-- References to attachment objects
+- The full MIME structure (part tree with content types, dispositions, Content-IDs, sizes),
+  with the decoded content of small non-body parts inline and references to attachment
+  objects for the rest
+- The xattrs `mailbox`, `created` and `loc` (the folder/UID the index placed it at)
 
 **What is an attachment:** every MIME part that is not the primary text/plain or text/html
-body is treated as an attachment (including inline images referenced by Content-ID and any
-message/rfc822 part). Parts smaller than a configurable threshold (default 4 KiB) stay inline
-in the skeleton rather than becoming tiny RADOS objects.
+body (including inline images referenced by Content-ID and any message/rfc822 part) is an
+attachment. Parts smaller than a configurable threshold (default 4 KiB) stay inline in the
+document rather than becoming tiny RADOS objects.
 
-## Raw message
+## No raw copy: messages are rendered
 
-The original raw message is also kept so that IMAP clients can fetch the exact bytes and so
-that the message can be reproduced for forensics. Because attachments make up the bulk of mail
-volume, storing both the raw message and the extracted attachments would roughly double
-storage.
+The original bytes of a message are **not stored**. IMAP `BODY[]`, POP3 `RETR`, JMAP blob
+downloads and Maildir exports serve a message **rendered from the document**: the verbatim
+original headers, followed by the MIME tree re-encoded deterministically (UTF-8 bodies,
+base64 attachments, the original boundaries). The rendering is stable, and its length is
+the size the index records and the protocols report. Forensic needs are met by the verbatim
+header block (`Received:` trace, `Message-ID`, DKIM) plus the Message-ID in every log and
+audit line about the message. What is lost is byte-exactness of the body: client-side DKIM
+verification will fail (the MTA verified on arrival), which is accepted.
 
-**Raw skeleton.** The raw message is stored with each attachment's encoded body cut out and
-replaced by a reference to the attachment object. All MIME framing, boundaries and the
-original `Content-Transfer-Encoding` stay in place, so the exact bytes can be rebuilt by
-re-encoding the attachment and splicing it back in. At delivery time the platform rebuilds the
-message immediately and compares it with the original; if the bytes of a part do not match
-after re-encoding, that part stays inline in the skeleton (per-part fallback), so the raw
-bytes are always exact and only the mismatching part loses dedup. A config switch can force
-full raw storage.
+The exception is **signed mail**: `multipart/signed` (PGP/MIME, S/MIME) only verifies on the
+exact bytes, so for those the original is kept next to the document
+(`<mailbox-uuid>/<message-uuid>.raw`). `mail.keep_raw` selects `never`, `signed` (default)
+or `always`.
 
 ## Attachments
 
@@ -274,25 +299,25 @@ never race on a counter. A worker deletes an attachment only when its reference 
 and the object has not been touched for a grace period. Creation uses RADOS exclusive-create
 so two simultaneous first uploads of the same attachment resolve cleanly.
 
-## Delivery ordering and crash safety
+## Crash safety
 
-Delivery writes in this order: attachments, message JSON, raw skeleton, then the folder index
-entry and change log (the commit point), then the attachment references. A crash before the
-index write leaves orphan objects but never a dangling index entry. Each message object
-carries its mailbox UUID and creation time in xattrs so an orphan-sweep worker task can find
-and remove objects that never reached an index. LMTP only acknowledges after the index write
-succeeds.
+Each message object carries its mailbox UUID, creation time and location in xattrs so an
+orphan-sweep worker task can find and remove objects that never reached an index. LMTP only
+acknowledges after the index write succeeds. See "Mailbox index" for the write order.
 
 ## Object naming
 
 Mail data:
 
-- Message JSON: `<mailbox-uuid>/<message-uuid>` in the messages pool
-- Raw skeleton or full raw: `<mailbox-uuid>/<message-uuid>.raw` in the messages pool
+- Message document: `<mailbox-uuid>/<message-uuid>` in the messages pool (xattr `loc` =
+  `<folder-id>/<uid>`); kept original bytes, only for signed mail:
+  `<mailbox-uuid>/<message-uuid>.raw`
 - Attachment: `<sha256-hex>` in the attachments pool
-- Mailbox root: `<mailbox-uuid>` in the index pool
-- Folder index: `<mailbox-uuid>/<folder-id>` in the index pool
-- Change log: `<mailbox-uuid>/changes` in the index pool, omap keyed by modseq
+- Mailbox root: `<mailbox-uuid>` in the index pool (folders, counters, modseq; **no omap**)
+- Folder index shards: `<mailbox-uuid>/<folder-id>` for UIDs below 65536, then
+  `<mailbox-uuid>/<folder-id>.<n>` per further block of 65536 UIDs
+- Thread and Message-ID maps: `<mailbox-uuid>/t.<xx>`, 256 shards by hash of the key
+- Change log: `<mailbox-uuid>/changes` in the index pool, omap keyed by modseq (bounded)
 - Retention set (expunged and trashed messages waiting for purge): `<mailbox-uuid>/retention`
   in the index pool, omap keyed by purge-at timestamp
 - Audit: `<mailbox-uuid>/audit/<YYYY-MM-DD>` and `audit/admin/<YYYY-MM-DD>` in the index pool
@@ -300,68 +325,34 @@ Mail data:
   state: `totp/<account-id>`
 - Task queues: `queue/<task-type>` in the index pool
 
-Identity data (meta pool, by RADOS namespace):
-
-- `domains` namespace: `<domain-name>` (JSON: enabled, settings, catch-all). Its omap lists
-  the accounts and aliases in the domain. The object `_all` in this namespace lists every
-  domain in its omap.
-- `mailboxes` namespace: `<mailbox-uuid>` (JSON: quota limits, enabled, hold record,
-  created). Its omap lists the accounts linked to it.
-- `accounts` namespace: `<account-uuid>` (JSON: username, mailbox id, roles, passwords with
-  scheme-prefixed hashes and kind, TOTP secret, enabled). Its omap lists the account's API
-  tokens.
-- `names` namespace: `<username-lowercase>` → account uuid (pointer object, exclusive-create
-  guarantees unique usernames)
-- `aliases` namespace: `<address-lowercase>` (JSON: destinations). A catch-all is the alias
-  `@<domain>`.
-- `tokens` namespace: `<sha256-of-token>` (JSON: account id, roles, expiry, comment, created,
-  last used)
-
-## Identity store semantics
-
-- **Lookups by key are single object reads:** username → `names/<username>` → account;
-  recipient address → `aliases/<address>` or account by name; token → `tokens/<hash>`. No
-  index object is needed for the hot path (login, LMTP resolution, token check).
-- **Uniqueness** of usernames, alias addresses, domains and token hashes comes from RADOS
-  exclusive create: two concurrent creates cannot both succeed.
-- **Listings** (accounts in a domain, aliases in a domain, tokens of an account, accounts of
-  a mailbox, all domains) are omap entries on the parent object, paginated with omap cursors.
-- **Multi-object writes** (create an account = account object + name pointer + domain listing
-  + mailbox listing) are ordered primary-object-first and are idempotent. A crash in between
-  leaves a listing out of date, never a dangling primary. A reconciliation worker task walks
-  the namespaces and repairs listings, like RGW's metadata reconciliation.
-- **Updates** use optimistic concurrency: every object carries a version xattr and updates
-  are conditional on it (`cmpxattr`), so two admins editing the same account do not clobber
-  each other.
-- **Queries** beyond key lookup and prefix listing (e.g. "accounts whose name contains
-  *wido*") are not supported by RADOS; the admin API offers prefix search over listings, and
-  a future search backend can index identity data as well.
-- **Export/import:** `dovetail admin export` dumps all identity data as JSON and
-  `dovetail admin import` loads it, for migration, inspection and disaster recovery.
-- The identity store is behind a Go interface. RADOS is the only implementation; a read-only
-  SQL backend could be added later for legacy provisioning systems, but is not planned.
+Per message this is **one object plus its deduplicated attachments**, one omap entry in its
+folder shard and one in its thread shard. Nothing else grows with the message count.
 
 ## Mailbox index
 
 RADOS has no listing or query capability, so each mailbox needs an index: folders, message
 UIDs, flags (seen, answered, deleted, …), sizes and dates. The index lives in RADOS using omap
 (the sorted key-value map every RADOS object carries, with atomic compare-and-set and prefix
-listing).
+listing), laid out so that no object's omap grows beyond a bounded size:
 
-**Design:**
-
-- One **mailbox root object** per mailbox UUID in the index pool. It holds the collection
+- One **mailbox root object** per mailbox UUID. Its data is a small JSON with the collection
   list (folders now, calendars and address books later), per-folder UIDVALIDITY and UIDNEXT
-  counters, the mailbox-wide `modseq` counter and quota usage totals. Counters are advanced
-  with atomic RADOS write transactions so concurrent LMTP and API processes never hand out
-  the same UID or modseq.
-- One **folder index object** per folder. Omap key is the zero-padded UID; value is a compact
-  record with the message object name, flags, size, internal date (UTC), modseq of last
-  change, threading headers and a few list-view headers (subject, from, date) so listing a
-  folder needs no message fetches.
+  counters, the mailbox-wide `modseq` counter and quota usage totals, advanced with atomic
+  RADOS write transactions so concurrent processes never hand out the same UID or modseq. It
+  carries no per-message omap entries.
+- **Folder index shards.** Each folder's records live in omap objects of at most 65536 UIDs.
+  Keys are the inverted UID, so plain ascending omap iteration yields the newest message
+  first: the first page of a folder is a single read of a single object, however large the
+  folder. Values are compact (message uuid, thread id, flags, size, dates, modseq, subject,
+  from, has-attachments; ~150 bytes). A full-folder walk (IMAP SELECT, expunge, recalc)
+  reads shards of at most 65536 entries each.
+- **Message lookup by id** (JMAP ids are message uuids) reads the `loc` xattr of the message
+  object; moves update it. No per-message map on the root.
+- **Thread and Message-ID maps** are sharded over 256 objects per mailbox by key hash:
+  `m/<message-id>` → thread id (for threading new deliveries) and `t/<thread-id>/<uuid>` →
+  location (JMAP `Thread/get`).
 - Flags are the IMAP system flags plus arbitrary keywords; the folder's keyword list lives in
-  the folder index object's xattrs. IMAP SUBSCRIBE state is per mailbox (shared by all
-  accounts on it), as are flags.
+  the root. IMAP SUBSCRIBE state is per mailbox (shared by all accounts on it), as are flags.
 - Rebuilding a folder index (admin maintenance) assigns a new UIDVALIDITY so clients resync.
 - The index pool is small and hot and can be placed on fast storage with its own replication
   settings.
@@ -372,6 +363,12 @@ mailbox root object keeps the `modseq` counter, each folder index record stores 
 its last change, and a bounded change log (`<mailbox-uuid>/changes`, omap keyed by modseq)
 records created/updated/destroyed ids. Clients with a state older than the log's horizon get
 `cannotCalculateChanges` and resync.
+
+**Delivery writes**, in order: attachments (idempotent, deduplicated), the root transaction
+that allocates UID and modseq and updates counters, the message object at its final
+location, the folder index entry (the commit point), the thread map entries, the change log.
+A crash before the index entry leaves an orphan object for the sweep but never a dangling
+entry.
 
 Limitations accepted for now: no cross-mailbox queries, and search is limited to header
 matching over the index until the full-text search component exists.

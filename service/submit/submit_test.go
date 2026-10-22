@@ -110,7 +110,7 @@ func TestSendHappyPath(t *testing.T) {
 	if root.FolderByRole(index.RoleSent).Total != 1 {
 		t.Fatal("no sent copy")
 	}
-	_, rec, _ := f.idx.GetByMessageID(context.Background(), f.mb.ID, res.SentCopy.MessageID)
+	rec, _ := f.idx.GetRecord(context.Background(), f.mb.ID, res.SentCopy.FolderID, res.SentCopy.UID)
 	if !rec.HasFlag(index.FlagSeen) {
 		t.Fatal("sent copy not seen")
 	}

@@ -1,6 +1,8 @@
 // Package mail parses raw RFC 5322 messages into Dovetail's JSON document,
-// extracts attachments for cluster-wide deduplication and builds a "raw
-// skeleton" from which the original bytes can be rebuilt byte-exactly.
+// extracts attachments for cluster-wide deduplication and renders a message
+// back from the document (Render). The original bytes are not kept: the
+// document holds the verbatim headers (Received trace, Message-ID, DKIM) and
+// every part's content, and Render produces a deterministic equivalent.
 //
 // See README.md: "Message parsing", "Raw message", "Attachments".
 package mail
@@ -12,9 +14,6 @@ type Options struct {
 	// InlineMax: parts with encoded body <= this many bytes stay inline
 	// (not externalized). Default 4096 if 0.
 	InlineMax int64
-	// ForceFullRaw: never externalize; the skeleton is the raw bytes as one
-	// literal frame.
-	ForceFullRaw bool
 }
 
 // DefaultInlineMax is the InlineMax used when Options.InlineMax is 0.
@@ -45,14 +44,16 @@ type Part struct {
 	Size        int64             `json:"size"`
 	EncodedSize int64             `json:"encoded_size"`
 	IsBody      bool              `json:"is_body"`
-	Attachment  string            `json:"attachment,omitempty"`
+	Attachment  string            `json:"attachment,omitempty"` // sha256 of the content when externalized to the attachment store
+	Data        []byte            `json:"data,omitempty"`       // decoded content of a small non-body leaf kept inline (base64 in JSON)
 	Children    []*Part           `json:"children,omitempty"`
 }
 
 // Document is the parsed JSON representation of a message.
 type Document struct {
 	Version        int       `json:"version"`
-	Size           int64     `json:"size"`
+	Size           int64     `json:"size"`          // size of the rendered message (served by IMAP/JMAP)
+	OriginalSize   int64     `json:"original_size"` // size of the bytes received
 	RawHeaders     string    `json:"raw_headers"`
 	Headers        []Header  `json:"headers"`
 	Subject        string    `json:"subject"`
@@ -86,8 +87,9 @@ type Attachment struct {
 
 // Parsed is the result of Parse.
 type Parsed struct {
-	Doc          *Document
-	Attachments  []Attachment
-	Skeleton     []byte
-	Externalized bool
+	Doc         *Document
+	Attachments []Attachment // every externalized part, deduplicated by Hash within the message
+	// Signed reports a multipart/signed (PGP/MIME, S/MIME) message whose
+	// bytes must be kept verbatim for the signature to verify.
+	Signed bool
 }

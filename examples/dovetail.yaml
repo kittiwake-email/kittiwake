@@ -38,8 +38,8 @@ smtp:
 
 mail:
   max_message_size: 52428800   # 50 MiB
-  inline_attachment_max: 4096  # parts up to this size stay inline in the raw skeleton
-  force_full_raw: false
+  inline_attachment_max: 4096  # parts up to this size stay inline in the message document
+  keep_raw: signed             # never | signed | always: keep original bytes (signed = PGP/MIME, S/MIME)
   trash_retention: 720h        # 30 days
   post_hold_grace: 168h        # 7 days after a hold is released before purges resume
   spam_header: X-Spam-Flag

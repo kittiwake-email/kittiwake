@@ -2,6 +2,7 @@ package imap
 
 import (
 	"context"
+	"dovetail/mail"
 	"io"
 	"log/slog"
 	"net"
@@ -262,15 +263,15 @@ func TestSelectFetchStoreSearch(t *testing.T) {
 		t.Fatalf("fetch: %v", err)
 	}
 	m := msgs[0]
-	if m.UID != 2 || m.RFC822Size != int64(len(multipart)) || m.Envelope.Subject != "Résumé" || m.Envelope.From[0].Mailbox != "bob" || m.Envelope.MessageID != "mp1@x" {
+	if m.UID != 2 || m.RFC822Size != int64(len(rendered(t, multipart))) || m.Envelope.Subject != "Résumé" || m.Envelope.From[0].Mailbox != "bob" || m.Envelope.MessageID != "mp1@x" {
 		t.Fatalf("items: uid=%d size=%d env=%+v", m.UID, m.RFC822Size, m.Envelope)
 	}
 	mp, ok := m.BodyStructure.(*imap.BodyStructureMultiPart)
 	if !ok || len(mp.Children) != 2 || mp.Children[1].MediaType() != "application/pdf" {
 		t.Fatalf("bodystructure: %+v", m.BodyStructure)
 	}
-	if string(m.FindBodySection(&imap.FetchItemBodySection{Peek: true})) != multipart {
-		t.Fatal("BODY[] not byte-exact")
+	if string(m.FindBodySection(&imap.FetchItemBodySection{Peek: true})) != rendered(t, multipart) {
+		t.Fatal("BODY[] is not the rendered form")
 	}
 	hdr := string(m.FindBodySection(&imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"Subject"}, Peek: true}))
 	if !strings.HasPrefix(hdr, "Subject: =?utf-8?q?R=C3=A9sum=C3=A9?=") {
@@ -399,7 +400,7 @@ func TestCopyMoveExpungeAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	msgs, _ = c2.Fetch(imap.UIDSetNum(1), &imap.FetchOptions{Flags: true, InternalDate: true, BodySection: []*imap.FetchItemBodySection{{Peek: true}}}).Collect()
-	if len(msgs) != 1 || !hasFlag(msgs[0].Flags, imap.FlagDraft) || msgs[0].InternalDate.Year() != 2020 || string(msgs[0].FindBodySection(&imap.FetchItemBodySection{Peek: true})) != draft {
+	if len(msgs) != 1 || !hasFlag(msgs[0].Flags, imap.FlagDraft) || msgs[0].InternalDate.Year() != 2020 || string(msgs[0].FindBodySection(&imap.FetchItemBodySection{Peek: true})) != rendered(t, draft) {
 		t.Fatalf("appended message: %+v", msgs[0])
 	}
 	// UID EXPUNGE only the given UIDs.
@@ -494,4 +495,19 @@ func TestLegalHold(t *testing.T) {
 	if err := c2.Login(user, pass).Wait(); err == nil || !strings.Contains(strings.ToLower(err.Error()), "sealed") {
 		t.Fatalf("sealed login: %v", err)
 	}
+}
+
+// rendered returns what Dovetail serves for a raw message: the document
+// rendered back to RFC 5322 (the original bytes are not kept).
+func rendered(t *testing.T, raw string) string {
+	t.Helper()
+	p, err := mail.Parse([]byte(raw), mail.Options{InlineMax: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := mail.Render(p.Doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }

@@ -706,10 +706,8 @@ func (sel *selected) matchText(f *fetched, pattern string, includeHeader bool) b
 		return true
 	}
 	p := strings.ToLower(pattern)
-	if strings.Contains(strings.ToLower(f.rec.Subject), p) || strings.Contains(strings.ToLower(f.rec.Preview), p) {
-		if includeHeader || strings.Contains(strings.ToLower(f.rec.Preview), p) {
-			return true
-		}
+	if includeHeader && strings.Contains(strings.ToLower(f.rec.Subject), p) {
+		return true
 	}
 	raw, err := sel.rawFor(f)
 	if err != nil {

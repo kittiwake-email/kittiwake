@@ -253,12 +253,15 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 	defer cancel()
 	if err := s.relay.Send(rctx, from, to, outgoing); err != nil {
 		metrics.Deliveries.WithLabelValues("submit-relay-error").Inc()
-		s.audit.Log(ctx, auditor.Event{Mailbox: req.MailboxID, Action: "send", Detail: "relay: " + err.Error(), Result: audit.ResultError})
+		s.audit.Log(ctx, auditor.Event{Mailbox: req.MailboxID, Action: "send", Detail: fmt.Sprintf("message-id=%s relay: %v", strings.Trim(msg.Header.Get("Message-ID"), "<> "), err), Result: audit.ResultError})
 		return Result{}, fmt.Errorf("%w: %v", ErrRelay, err)
 	}
 	res := Result{EnvelopeFrom: from, Recipients: to, SentAt: now}
 	metrics.Deliveries.WithLabelValues("submitted").Inc()
-	s.audit.Log(ctx, auditor.Event{Mailbox: req.MailboxID, Action: "send", Target: from, Detail: "to=" + strings.Join(to, ",")})
+	msgID := strings.Trim(msg.Header.Get("Message-ID"), "<> ")
+	s.audit.Log(ctx, auditor.Event{Mailbox: req.MailboxID, Action: "send", Target: from, Detail: fmt.Sprintf("message-id=%s to=%s", msgID, strings.Join(to, ","))})
+	s.log.InfoContext(ctx, "submitted", slog.String("message_id", msgID), slog.String("from", from), slog.String("to", strings.Join(to, ",")),
+		slog.String("mailbox", req.MailboxID.String()), slog.String("account", a.Username), slog.Int("bytes", len(outgoing)))
 
 	if req.SaveToSent == nil || *req.SaveToSent {
 		root, err := s.idx.EnsureRoot(ctx, req.MailboxID)

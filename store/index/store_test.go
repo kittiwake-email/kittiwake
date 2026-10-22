@@ -126,15 +126,15 @@ func TestAppendListFlagsMoveRemove(t *testing.T) {
 	inbox := r.FolderByRole(RoleInbox).ID
 	trash := r.FolderByRole(RoleTrash).ID
 
-	a, err := s.Append(ctx, mb, inbox, rec(100, "a@x"))
+	a, err := s.Append(ctx, mb, inbox, rec(100, "a@x"), nil)
 	if err != nil || a.UID != 1 || a.ThreadID != a.MessageID.String() {
 		t.Fatalf("%+v %v", a, err)
 	}
-	b, _ := s.Append(ctx, mb, inbox, rec(200, "b@x", "a@x"))
+	b, _ := s.Append(ctx, mb, inbox, rec(200, "b@x", "a@x"), nil)
 	if b.UID != 2 || b.ThreadID != a.ThreadID {
 		t.Fatalf("threading: %+v", b)
 	}
-	c, _ := s.Append(ctx, mb, inbox, Record{MessageID: uuid.New(), Size: 50, Flags: []string{"\\seen", "$label1", "\\SEEN"}})
+	c, _ := s.Append(ctx, mb, inbox, Record{MessageID: uuid.New(), Size: 50, Flags: []string{"\\seen", "$label1", "\\SEEN"}}, nil)
 	if c.UID != 3 {
 		t.Fatal("uid")
 	}
@@ -155,13 +155,13 @@ func TestAppendListFlagsMoveRemove(t *testing.T) {
 	if more || len(recs) != 1 || recs[0].UID != 3 {
 		t.Fatalf("list page 2: %v", recs)
 	}
-	// Locate / thread.
-	loc, got, err := s.GetByMessageID(ctx, mb, b.MessageID)
-	if err != nil || loc.FolderID != inbox || loc.UID != 2 || got.Size != 200 {
-		t.Fatalf("locate: %v %v %v", loc, got, err)
+	// Record / thread.
+	got, err := s.GetRecord(ctx, mb, inbox, 2)
+	if err != nil || got.MessageID != b.MessageID || got.Size != 200 {
+		t.Fatalf("record: %v %v", got, err)
 	}
 	members, _ := s.ThreadMembers(ctx, mb, a.ThreadID)
-	if len(members) != 2 {
+	if len(members) != 2 || members[0].UID != 1 || members[1].UID != 2 {
 		t.Fatalf("thread members: %v", members)
 	}
 	// Flags.
@@ -174,16 +174,16 @@ func TestAppendListFlagsMoveRemove(t *testing.T) {
 		t.Fatalf("unseen after seen: %d", r.FolderByID(inbox).Unseen)
 	}
 	// Move.
-	moved, err := s.Move(ctx, mb, inbox, 2, trash)
+	moved, err := s.Move(ctx, mb, inbox, 2, trash, nil)
 	if err != nil || moved.UID != 1 || moved.MessageID != b.MessageID {
 		t.Fatalf("move: %+v %v", moved, err)
 	}
 	if _, err := s.GetRecord(ctx, mb, inbox, 2); !errors.Is(err, ErrNotFound) {
 		t.Fatal("source not removed")
 	}
-	loc, _ = s.Locate(ctx, mb, b.MessageID)
-	if loc.FolderID != trash || loc.UID != 1 {
-		t.Fatalf("locate after move: %v", loc)
+	members, _ = s.ThreadMembers(ctx, mb, a.ThreadID)
+	if len(members) != 2 || members[1].FolderID != trash || members[1].UID != 1 {
+		t.Fatalf("thread location after move: %v", members)
 	}
 	r, _ = s.GetRoot(ctx, mb)
 	if r.FolderByID(inbox).Total != 2 || r.FolderByID(trash).Total != 1 || r.FolderByID(trash).Unseen != 1 || r.Usage.Messages != 3 {
@@ -194,9 +194,6 @@ func TestAppendListFlagsMoveRemove(t *testing.T) {
 	entry, err := s.Remove(ctx, mb, trash, 1, "expunge", purgeAt)
 	if err != nil || entry.MessageID != b.MessageID {
 		t.Fatal(err)
-	}
-	if _, err := s.Locate(ctx, mb, b.MessageID); !errors.Is(err, ErrNotFound) {
-		t.Fatal("still locatable")
 	}
 	r, _ = s.GetRoot(ctx, mb)
 	if r.Usage.Messages != 2 || r.Usage.Bytes != 150 || r.FolderByID(trash).Total != 0 {
@@ -245,6 +242,15 @@ func TestAppendListFlagsMoveRemove(t *testing.T) {
 	if err != nil || after.Usage != before.Usage || after.FolderByID(inbox).Unseen != before.FolderByID(inbox).Unseen {
 		t.Fatalf("recalc: %+v vs %+v %v", after.Usage, before.Usage, err)
 	}
+	// Newest-first listing.
+	desc, more, err := s.ListFolderDesc(ctx, mb, inbox, 0, 1)
+	if err != nil || !more || len(desc) != 1 || desc[0].UID != 3 {
+		t.Fatalf("desc first page: %v %v %v", desc, more, err)
+	}
+	desc, more, _ = s.ListFolderDesc(ctx, mb, inbox, desc[0].UID, 10)
+	if more || len(desc) != 1 || desc[0].UID != 1 {
+		t.Fatalf("desc second page: %v %v", desc, more)
+	}
 	// Empty folder can be deleted after creating one.
 	nf, _ := s.CreateFolder(ctx, mb, "Tmp", "")
 	if err := s.DeleteFolder(ctx, mb, nf.ID); err != nil {
@@ -255,13 +261,96 @@ func TestAppendListFlagsMoveRemove(t *testing.T) {
 	}
 }
 
+func TestShardsAndAppendHook(t *testing.T) {
+	s, mb := newStore(t)
+	ctx := context.Background()
+	r, _ := s.GetRoot(ctx, mb)
+	inbox := r.FolderByRole(RoleInbox).ID
+	// Push UIDNext past the first shard boundary cheaply by appending with a
+	// hook that records what it was given.
+	var gotUID uint32
+	var gotMod uint64
+	rr, err := s.Append(ctx, mb, inbox, rec(1, ""), func(uid uint32, modseq uint64) error { gotUID, gotMod = uid, modseq; return nil })
+	if err != nil || gotUID != rr.UID || gotMod != rr.ModSeq {
+		t.Fatalf("hook: %d/%d vs %d/%d %v", gotUID, gotMod, rr.UID, rr.ModSeq, err)
+	}
+	// A failing hook indexes nothing but consumes the UID.
+	_, err = s.Append(ctx, mb, inbox, rec(1, ""), func(uint32, uint64) error { return errors.New("disk on fire") })
+	if err == nil {
+		t.Fatal("hook error not propagated")
+	}
+	if recs, _, _ := s.ListFolder(ctx, mb, inbox, 0, 10); len(recs) != 1 {
+		t.Fatalf("record indexed despite hook failure: %d", len(recs))
+	}
+	r, _ = s.GetRoot(ctx, mb)
+	if r.FolderByID(inbox).UIDNext != 3 {
+		t.Fatalf("uid not consumed: %d", r.FolderByID(inbox).UIDNext)
+	}
+	// Records straddling a shard boundary: fake UIDNext to 65535 and append 3.
+	_, _ = s.updateRoot(ctx, mb, func(r *Root) error { r.FolderByID(inbox).UIDNext = 65535; return nil })
+	var uids []uint32
+	for i := 0; i < 3; i++ {
+		rr, err := s.Append(ctx, mb, inbox, rec(1, ""), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uids = append(uids, rr.UID)
+	}
+	if uids[0] != 65535 || uids[2] != 65537 {
+		t.Fatalf("uids %v", uids)
+	}
+	if folderOID(mb, inbox, 65535) == folderOID(mb, inbox, 65536) {
+		t.Fatal("expected different shard objects across the boundary")
+	}
+	asc, _, _ := s.ListFolder(ctx, mb, inbox, 0, 0)
+	if len(asc) != 4 || asc[0].UID != 1 || asc[3].UID != 65537 {
+		t.Fatalf("asc across shards: %v", uidsOf(asc))
+	}
+	asc, more, _ := s.ListFolder(ctx, mb, inbox, 65535, 1)
+	if !more || len(asc) != 1 || asc[0].UID != 65536 {
+		t.Fatalf("asc after boundary: %v %v", uidsOf(asc), more)
+	}
+	desc, _, _ := s.ListFolderDesc(ctx, mb, inbox, 0, 0)
+	if len(desc) != 4 || desc[0].UID != 65537 || desc[3].UID != 1 {
+		t.Fatalf("desc across shards: %v", uidsOf(desc))
+	}
+	desc, more, _ = s.ListFolderDesc(ctx, mb, inbox, 65536, 10)
+	if more || len(desc) != 2 || desc[0].UID != 65535 || desc[1].UID != 1 {
+		t.Fatalf("desc before boundary: %v %v", uidsOf(desc), more)
+	}
+	for _, u := range uids {
+		if _, err := s.GetRecord(ctx, mb, inbox, u); err != nil {
+			t.Fatalf("get %d: %v", u, err)
+		}
+	}
+	moved, err := s.Move(ctx, mb, inbox, 65536, r.FolderByRole(RoleTrash).ID, nil)
+	if err != nil || moved.UID != 1 {
+		t.Fatal(err)
+	}
+	after, _ := s.Recalculate(ctx, mb)
+	if after.FolderByID(inbox).Total != 3 || after.Usage.Messages != 4 {
+		t.Fatalf("recalc across shards: %+v", after.Usage)
+	}
+	if err := s.DeleteAll(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func uidsOf(recs []Record) []uint32 {
+	out := make([]uint32, len(recs))
+	for i, r := range recs {
+		out[i] = r.UID
+	}
+	return out
+}
+
 func TestChangeLogTrimAndHorizon(t *testing.T) {
 	s, mb := newStore(t)
 	ctx := context.Background()
 	r, _ := s.GetRoot(ctx, mb)
 	inbox := r.FolderByRole(RoleInbox).ID
 	for i := 0; i < 50; i++ {
-		if _, err := s.Append(ctx, mb, inbox, rec(1, fmt.Sprintf("m%d@x", i))); err != nil {
+		if _, err := s.Append(ctx, mb, inbox, rec(1, fmt.Sprintf("m%d@x", i)), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -322,7 +411,7 @@ func TestConcurrentAppendsUniqueUIDs(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			rr, err := s.Append(ctx, mb, inbox, rec(1, ""))
+			rr, err := s.Append(ctx, mb, inbox, rec(1, ""), nil)
 			if err != nil {
 				errs <- err
 				return

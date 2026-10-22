@@ -363,12 +363,22 @@ func (s *Service) ExportMailbox(ctx context.Context, mb uuid.UUID, w io.Writer, 
 	return sum, nil
 }
 
+// rawOf returns the kept original bytes or renders the message.
 func (s *Service) rawOf(ctx context.Context, mb, msg uuid.UUID) ([]byte, error) {
-	skel, err := s.msgs.GetRaw(ctx, mb, msg)
+	if kept, err := s.msgs.GetRaw(ctx, mb, msg); err == nil {
+		return kept, nil
+	} else if !errors.Is(err, message.ErrNotFound) {
+		return nil, err
+	}
+	data, err := s.msgs.GetDoc(ctx, mb, msg)
 	if err != nil {
 		return nil, err
 	}
-	return mail.Reconstruct(skel, func(h string) ([]byte, error) { return s.atts.Get(ctx, h) })
+	var doc mail.Document
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, h) })
 }
 
 // ---- import ----

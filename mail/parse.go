@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"mime/quotedprintable"
 	"strconv"
 	"strings"
 )
@@ -40,7 +39,6 @@ func Parse(raw []byte, opts Options) (*Parsed, error) {
 
 	doc := &Document{
 		Version:    1,
-		Size:       int64(len(raw)),
 		RawHeaders: string(raw[:hdrEnd]),
 		Root:       root.part,
 	}
@@ -104,10 +102,9 @@ func Parse(raw []byte, opts Options) (*Parsed, error) {
 	}
 	doc.Preview = preview(doc.TextBody, 200)
 
-	// Attachments and skeleton.
-	res := &Parsed{Doc: doc}
-	sb := newSkeletonBuilder()
-	prev := 0
+	// Attachments: every non-body leaf is externalized when larger than
+	// InlineMax (decoded size), else its decoded content stays in the part.
+	res := &Parsed{Doc: doc, Signed: root.part.Type == "multipart" && root.part.Subtype == "signed"}
 	seen := map[string]bool{}
 	for _, n := range leaves { // leaves are in document order
 		p := n.part
@@ -117,17 +114,17 @@ func Parse(raw []byte, opts Options) (*Parsed, error) {
 		if !(p.ContentID != "" && strings.Contains(doc.HTMLBody, "cid:"+p.ContentID)) {
 			doc.HasAttachments = true
 		}
-		if opts.ForceFullRaw || p.EncodedSize <= opts.InlineMax {
-			continue
+		data := n.decoded
+		if !n.decodeOK {
+			data = raw[n.bodyStart:n.bodyEnd]
+			p.Encoding = "binary"
 		}
-		encoded := raw[n.bodyStart:n.bodyEnd]
-		data, params, ok := externalize(encoded, n)
-		if !ok {
+		if int64(len(data)) <= opts.InlineMax {
+			p.Data = data
 			continue
 		}
 		sum := sha256.Sum256(data)
 		hash := hex.EncodeToString(sum[:])
-		params.Hash = hash
 		p.Attachment = hash
 		if !seen[hash] {
 			seen[hash] = true
@@ -141,50 +138,22 @@ func Parse(raw []byte, opts Options) (*Parsed, error) {
 				PartPath:    p.Path,
 			})
 		}
-		sb.literal(raw[prev:n.bodyStart])
-		sb.ref(params)
-		prev = n.bodyEnd
-		res.Externalized = true
 	}
-	sb.literal(raw[prev:])
-	res.Skeleton = sb.bytes()
+	// Size is what we will serve: the rendered form.
+	doc.OriginalSize = int64(len(raw))
+	rendered, err := Render(doc, func(h string) ([]byte, error) {
+		for _, a := range res.Attachments {
+			if a.Hash == h {
+				return a.Data, nil
+			}
+		}
+		return nil, errors.New("mail: attachment missing during parse")
+	})
+	if err != nil {
+		return nil, err
+	}
+	doc.Size = int64(len(rendered))
 	return res, nil
-}
-
-// externalize decides whether a leaf's encoded body can be replaced by a
-// reference, returning the decoded data and re-encoding parameters.
-func externalize(encoded []byte, n *node) ([]byte, refParams, bool) {
-	switch n.part.Encoding {
-	case "base64":
-		if !n.decodeOK {
-			return nil, refParams{}, false
-		}
-		params := base64Params(encoded)
-		if !bytes.Equal(encodeBase64(n.decoded, params), encoded) {
-			return nil, refParams{}, false
-		}
-		return n.decoded, params, true
-	case "quoted-printable":
-		if !n.decodeOK {
-			return nil, refParams{}, false
-		}
-		var b bytes.Buffer
-		w := quotedprintable.NewWriter(&b)
-		if _, err := w.Write(n.decoded); err != nil {
-			return nil, refParams{}, false
-		}
-		if err := w.Close(); err != nil {
-			return nil, refParams{}, false
-		}
-		if !bytes.Equal(b.Bytes(), encoded) {
-			return nil, refParams{}, false
-		}
-		return n.decoded, refParams{Encoding: "quoted-printable"}, true
-	case "7bit", "8bit", "binary":
-		return encoded, refParams{Encoding: n.part.Encoding}, true
-	default:
-		return encoded, refParams{Encoding: "binary"}, true
-	}
 }
 
 func collectLeaves(n *node, out *[]*node) {

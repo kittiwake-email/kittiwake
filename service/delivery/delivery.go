@@ -44,7 +44,7 @@ var (
 type Config struct {
 	MaxMessageSize    int64
 	InlineMax         int64
-	ForceFullRaw      bool
+	KeepRaw           string // never | signed | always
 	SpamHeader        string
 	SpamValue         string
 	MaxAliasDepth     int
@@ -274,10 +274,12 @@ type Request struct {
 // Delivered describes one stored copy.
 type Delivered struct {
 	MailboxID uuid.UUID
-	MessageID uuid.UUID
+	MessageID uuid.UUID // Dovetail's message uuid
 	FolderID  string
 	UID       uint32
 	Via       string
+	// MessageIDHeader is the message's Message-ID header, for logs.
+	MessageIDHeader string
 }
 
 // Deliver stores an inbound message in every mailbox the recipient resolves
@@ -323,7 +325,7 @@ func (s *Service) deliver(ctx context.Context, req Request) ([]Delivered, error)
 			return nil, err
 		}
 	}
-	parsed, err := mail.Parse(req.Raw, mail.Options{InlineMax: s.cfg.InlineMax, ForceFullRaw: s.cfg.ForceFullRaw})
+	parsed, err := mail.Parse(req.Raw, mail.Options{InlineMax: s.cfg.InlineMax})
 	if err != nil {
 		return nil, fmt.Errorf("delivery: parse: %w", err)
 	}
@@ -346,15 +348,20 @@ func (s *Service) deliver(ctx context.Context, req Request) ([]Delivered, error)
 		if folder == nil {
 			return out, ErrNoFolder
 		}
-		d, err := s.store(actx, t.MailboxID, folder.ID, parsed, nil, s.Now().UTC())
+		d, err := s.store(actx, t.MailboxID, folder.ID, parsed, req.Raw, nil, s.Now().UTC())
 		if err != nil {
-			s.audit.Log(actx, auditor.Event{Mailbox: t.MailboxID, Action: "deliver", Target: req.Recipient, Detail: "from=" + req.Sender + " error=" + err.Error(), Result: audit.ResultError})
+			s.audit.Log(actx, auditor.Event{Mailbox: t.MailboxID, Action: "deliver", Target: req.Recipient,
+				Detail: fmt.Sprintf("from=%s message-id=%s error=%s", req.Sender, parsed.Doc.MessageID, err), Result: audit.ResultError})
 			return out, err
 		}
 		d.Via = t.Via
+		d.MessageIDHeader = parsed.Doc.MessageID
 		out = append(out, d)
 		s.audit.Log(actx, auditor.Event{Mailbox: t.MailboxID, Action: "deliver", Target: fmt.Sprintf("%s/%d", d.FolderID, d.UID),
-			Detail: fmt.Sprintf("rcpt=%s via=%s from=%s msg=%s spam=%v", req.Recipient, t.Via, req.Sender, d.MessageID, spam)})
+			Detail: fmt.Sprintf("rcpt=%s via=%s from=%s message-id=%s msg=%s spam=%v", req.Recipient, t.Via, req.Sender, parsed.Doc.MessageID, d.MessageID, spam)})
+		s.log.InfoContext(ctx, "delivered", slog.String("message_id", parsed.Doc.MessageID), slog.String("rcpt", req.Recipient),
+			slog.String("via", t.Via), slog.String("from", req.Sender), slog.String("mailbox", t.MailboxID.String()),
+			slog.String("msg", d.MessageID.String()), slog.String("folder", d.FolderID), slog.Uint64("uid", uint64(d.UID)), slog.Bool("spam", spam))
 	}
 	return out, nil
 }
@@ -385,7 +392,7 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 	if m.Hold != nil {
 		return Delivered{}, ErrHold // user mutations are refused on hold
 	}
-	parsed, err := mail.Parse(raw, mail.Options{InlineMax: s.cfg.InlineMax, ForceFullRaw: s.cfg.ForceFullRaw})
+	parsed, err := mail.Parse(raw, mail.Options{InlineMax: s.cfg.InlineMax})
 	if err != nil {
 		return Delivered{}, fmt.Errorf("delivery: parse: %w", err)
 	}
@@ -395,47 +402,54 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 	if internalDate.IsZero() {
 		internalDate = s.Now().UTC()
 	}
-	d, err := s.store(ctx, mb, folderID, parsed, flags, internalDate)
+	d, err := s.store(ctx, mb, folderID, parsed, raw, flags, internalDate)
 	if err != nil {
-		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "append", Target: folderID, Detail: err.Error(), Result: audit.ResultError})
+		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "append", Target: folderID, Detail: fmt.Sprintf("message-id=%s error=%s", parsed.Doc.MessageID, err), Result: audit.ResultError})
 		return Delivered{}, err
 	}
-	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "append", Target: fmt.Sprintf("%s/%d", d.FolderID, d.UID), Detail: "msg=" + d.MessageID.String()})
+	d.MessageIDHeader = parsed.Doc.MessageID
+	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "append", Target: fmt.Sprintf("%s/%d", d.FolderID, d.UID), Detail: fmt.Sprintf("message-id=%s msg=%s", parsed.Doc.MessageID, d.MessageID)})
 	return d, nil
 }
 
-// store writes attachments, message objects, the index entry and refs, in
-// the crash-safe order from the README.
-func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, parsed *mail.Parsed, flags []string, internalDate time.Time) (Delivered, error) {
+// store writes attachments, then lets the index allocate the UID, writes the
+// single message object at its final location, and lets the index commit
+// the entry. A crash before the index write leaves an orphan object (swept
+// later) but never a dangling index entry.
+func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, parsed *mail.Parsed, raw []byte, flags []string, internalDate time.Time) (Delivered, error) {
 	msgID := uuid.New()
-	// 1. Attachments (content), without references yet.
+	// 1. Attachments (content + reference), idempotent and deduplicated.
 	for _, a := range parsed.Attachments {
 		if err := s.atts.Put(ctx, a.Hash, a.Data, a.ContentType, mb, msgID); err != nil {
 			return Delivered{}, fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
 		}
 	}
-	// 2+3. Message JSON and raw skeleton.
 	docJSON, err := json.Marshal(parsed.Doc)
 	if err != nil {
 		return Delivered{}, err
 	}
-	if err := s.msgs.Put(ctx, mb, msgID, docJSON, parsed.Skeleton); err != nil {
-		return Delivered{}, fmt.Errorf("delivery: message objects: %w", err)
-	}
-	// 4. Index entry (commit point).
+	keepRaw := s.cfg.KeepRaw == "always" || (s.cfg.KeepRaw == "signed" && parsed.Signed)
+	// 2. Index allocation → message object at its location → index commit.
 	rec := recordFor(msgID, parsed.Doc, flags, internalDate)
-	rec, err = s.idx.Append(ctx, mb, folderID, rec)
+	rec, err = s.idx.Append(ctx, mb, folderID, rec, func(uid uint32, _ uint64) error {
+		loc := index.Location{FolderID: folderID, UID: uid}.String()
+		if err := s.msgs.Put(ctx, mb, msgID, docJSON, loc); err != nil {
+			return fmt.Errorf("delivery: message object: %w", err)
+		}
+		if keepRaw {
+			if err := s.msgs.PutRaw(ctx, mb, msgID, raw); err != nil {
+				return fmt.Errorf("delivery: raw object: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		if errors.Is(err, index.ErrNotFound) {
 			err = ErrNoFolder
 		}
-		// Leave the objects for the orphan sweep; do not try to be clever here.
 		return Delivered{}, err
 	}
-	// 5. Attachment references are already recorded by Put (idempotent omap
-	// keys), so nothing to do; a crash before here leaves refs that the GC
-	// treats as live until the orphan sweep removes the message.
-	// Events and notifications.
+	// Events and notifications (best effort).
 	if s.queue != nil {
 		if _, err := s.queue.Enqueue(ctx, TaskSearchIndex, SearchIndexTask{Mailbox: mb, Message: msgID, Op: "index"}, time.Time{}); err != nil {
 			s.log.WarnContext(ctx, "enqueue search-index failed", slog.String("error", err.Error()))
@@ -453,7 +467,7 @@ func recordFor(msgID uuid.UUID, doc *mail.Document, flags []string, internalDate
 	rec := index.Record{
 		MessageID: msgID, Flags: flags, Size: doc.Size, InternalDate: internalDate,
 		Subject: doc.Subject, Date: doc.Date, MsgIDHeader: doc.MessageID, InReplyTo: doc.InReplyTo, References: doc.References,
-		HasAttachments: doc.HasAttachments, Preview: doc.Preview,
+		HasAttachments: doc.HasAttachments,
 	}
 	if len(doc.From) > 0 {
 		f := doc.From[0]
@@ -467,8 +481,11 @@ func recordFor(msgID uuid.UUID, doc *mail.Document, flags []string, internalDate
 	if rec.Date.IsZero() {
 		rec.Date = internalDate
 	}
-	if len(rec.Preview) > 160 {
-		rec.Preview = rec.Preview[:160]
+	if len(rec.Subject) > 200 {
+		rec.Subject = rec.Subject[:200]
+	}
+	if len(rec.From) > 120 {
+		rec.From = rec.From[:120]
 	}
 	return rec
 }

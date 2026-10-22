@@ -210,14 +210,35 @@ func (s *Service) List(ctx context.Context, mb uuid.UUID, folderID string, after
 	return recs, more, nil
 }
 
+// locate resolves a message uuid to its index location via the message
+// object's xattr (no per-message omap entry needed).
+func (s *Service) locate(ctx context.Context, mb uuid.UUID, msg uuid.UUID) (index.Location, error) {
+	loc, err := s.msgs.Location(ctx, mb, msg)
+	if err != nil {
+		if errors.Is(err, message.ErrNotFound) {
+			return index.Location{}, ErrNotFound
+		}
+		return index.Location{}, err
+	}
+	l, err := index.ParseLocation(loc)
+	if err != nil {
+		return index.Location{}, ErrNotFound
+	}
+	return l, nil
+}
+
 // Get returns a record by message id.
 func (s *Service) Get(ctx context.Context, mb uuid.UUID, msg uuid.UUID) (index.Location, index.Record, error) {
 	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
 		return index.Location{}, index.Record{}, s.deny(ctx, mb, "fetch", msg.String(), err)
 	}
-	loc, rec, err := s.idx.GetByMessageID(ctx, mb, msg)
+	loc, err := s.locate(ctx, mb, msg)
 	if err != nil {
-		return index.Location{}, index.Record{}, mapIndexErr(err)
+		return index.Location{}, index.Record{}, err
+	}
+	rec, err := s.idx.GetRecord(ctx, mb, loc.FolderID, loc.UID)
+	if err != nil || rec.MessageID != msg {
+		return index.Location{}, index.Record{}, ErrNotFound
 	}
 	return loc, rec, nil
 }
@@ -235,9 +256,6 @@ func (s *Service) GetByUID(ctx context.Context, mb uuid.UUID, folderID string, u
 func (s *Service) Document(ctx context.Context, mb uuid.UUID, msg uuid.UUID) (*mail.Document, error) {
 	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
 		return nil, s.deny(ctx, mb, "fetch", msg.String(), err)
-	}
-	if _, err := s.idx.Locate(ctx, mb, msg); err != nil {
-		return nil, mapIndexErr(err)
 	}
 	data, err := s.msgs.GetDoc(ctx, mb, msg)
 	if err != nil {
@@ -259,25 +277,34 @@ func (s *Service) Raw(ctx context.Context, mb uuid.UUID, msg uuid.UUID) ([]byte,
 	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
 		return nil, s.deny(ctx, mb, "fetch-raw", msg.String(), err)
 	}
-	if _, err := s.idx.Locate(ctx, mb, msg); err != nil {
-		return nil, mapIndexErr(err)
-	}
 	return s.raw(ctx, mb, msg)
 }
 
+// raw returns the kept original bytes when present, else renders the
+// message from its document (deterministic; Document.Size is its length).
 func (s *Service) raw(ctx context.Context, mb uuid.UUID, msg uuid.UUID) ([]byte, error) {
-	skel, err := s.msgs.GetRaw(ctx, mb, msg)
+	if kept, err := s.msgs.GetRaw(ctx, mb, msg); err == nil {
+		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-raw", Target: msg.String()})
+		return kept, nil
+	} else if !errors.Is(err, message.ErrNotFound) {
+		return nil, err
+	}
+	data, err := s.msgs.GetDoc(ctx, mb, msg)
 	if err != nil {
 		if errors.Is(err, message.ErrNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	out, err := mail.Reconstruct(skel, func(h string) ([]byte, error) { return s.atts.Get(ctx, h) })
-	if err != nil {
-		return nil, fmt.Errorf("mailbox: reconstruct %s: %w", msg, err)
+	var doc mail.Document
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("mailbox: decode document %s: %w", msg, err)
 	}
-	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-raw", Target: msg.String()})
+	out, err := mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, h) })
+	if err != nil {
+		return nil, fmt.Errorf("mailbox: render %s: %w", msg, err)
+	}
+	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-raw", Target: msg.String(), Detail: "message-id=" + doc.MessageID})
 	return out, nil
 }
 
@@ -337,9 +364,9 @@ func (s *Service) SetFlags(ctx context.Context, mb uuid.UUID, msg uuid.UUID, op 
 	if _, err := s.authorize(ctx, mb, identity.RoleWrite, true); err != nil {
 		return index.Record{}, s.deny(ctx, mb, "flag-change", msg.String(), err)
 	}
-	loc, err := s.idx.Locate(ctx, mb, msg)
+	loc, err := s.locate(ctx, mb, msg)
 	if err != nil {
-		return index.Record{}, mapIndexErr(err)
+		return index.Record{}, err
 	}
 	return s.setFlagsAt(ctx, mb, loc.FolderID, loc.UID, op)
 }
@@ -411,9 +438,9 @@ func (s *Service) Move(ctx context.Context, mb uuid.UUID, msg uuid.UUID, toFolde
 	if _, err := s.authorize(ctx, mb, identity.RoleWrite, true); err != nil {
 		return index.Record{}, s.deny(ctx, mb, "move", msg.String(), err)
 	}
-	loc, err := s.idx.Locate(ctx, mb, msg)
+	loc, err := s.locate(ctx, mb, msg)
 	if err != nil {
-		return index.Record{}, mapIndexErr(err)
+		return index.Record{}, err
 	}
 	return s.moveAt(ctx, mb, loc.FolderID, loc.UID, toFolder)
 }
@@ -427,7 +454,13 @@ func (s *Service) MoveByUID(ctx context.Context, mb uuid.UUID, folderID string, 
 }
 
 func (s *Service) moveAt(ctx context.Context, mb uuid.UUID, folderID string, uid uint32, toFolder string) (index.Record, error) {
-	rec, err := s.idx.Move(ctx, mb, folderID, uid, toFolder)
+	rec, err := s.idx.Move(ctx, mb, folderID, uid, toFolder, func(loc index.Location) error {
+		cur, err := s.idx.GetRecord(ctx, mb, folderID, uid)
+		if err != nil {
+			return err
+		}
+		return s.msgs.SetLocation(ctx, mb, cur.MessageID, loc.String())
+	})
 	if err != nil {
 		return index.Record{}, mapIndexErr(err)
 	}
@@ -442,9 +475,9 @@ func (s *Service) Destroy(ctx context.Context, mb uuid.UUID, msg uuid.UUID) erro
 	if _, err := s.authorize(ctx, mb, identity.RoleWrite, true); err != nil {
 		return s.deny(ctx, mb, "destroy", msg.String(), err)
 	}
-	loc, err := s.idx.Locate(ctx, mb, msg)
+	loc, err := s.locate(ctx, mb, msg)
 	if err != nil {
-		return mapIndexErr(err)
+		return err
 	}
 	return s.remove(ctx, mb, loc.FolderID, loc.UID, "destroy")
 }
@@ -573,6 +606,25 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 		rec index.Record
 		fid string
 	}
+	// Fast path: the default listing (one folder, newest first, no filter
+	// beyond the folder, no thread collapsing) reads only the page it
+	// needs from the newest-first index instead of the whole folder.
+	if q.Filter.InFolder != "" && !q.Asc && (q.Sort == "" || q.Sort == SortReceivedAt) && !q.CollapseThreads && q.Position >= 0 && q.Limit > 0 && q.Filter == (Filter{InFolder: q.Filter.InFolder}) {
+		f := folders[0]
+		recs, _, err := s.idx.ListFolderDesc(ctx, mb, f.ID, 0, q.Position+q.Limit)
+		if err != nil {
+			return QueryResult{}, mapIndexErr(err)
+		}
+		res := QueryResult{Total: int(f.Total), ModSeq: root.ModSeq}
+		if q.Position < len(recs) {
+			for _, r := range recs[q.Position:] {
+				res.Records = append(res.Records, r)
+				res.Folders = append(res.Folders, f.ID)
+			}
+		}
+		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "search", Target: f.ID})
+		return res, nil
+	}
 	var items []item
 	for _, f := range folders {
 		var after uint32
@@ -648,7 +700,7 @@ func matches(f Filter, r index.Record) bool {
 	has := func(hay, needle string) bool {
 		return needle == "" || strings.Contains(strings.ToLower(hay), strings.ToLower(needle))
 	}
-	if f.Text != "" && !(has(r.Subject, f.Text) || has(r.From, f.Text) || has(r.Preview, f.Text)) {
+	if f.Text != "" && !(has(r.Subject, f.Text) || has(r.From, f.Text)) {
 		return false
 	}
 	if !has(r.Subject, f.Subject) || !has(r.From, f.From) {

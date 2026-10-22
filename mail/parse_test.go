@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func crlf(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+func lf2crlf(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
 
 func b64Lines(data []byte, n int, eol string, trailing bool) string {
 	enc := base64.StdEncoding.EncodeToString(data)
@@ -48,14 +48,70 @@ func fetcher(atts []Attachment) func(string) ([]byte, error) {
 	}
 }
 
+// roundTrip checks the render contract: deterministic, Size-consistent,
+// and re-parsing the rendered message yields the same bodies, headers,
+// attachments and structure (the bytes themselves are not kept).
 func roundTrip(t *testing.T, raw []byte, p *Parsed) {
 	t.Helper()
-	out, err := Reconstruct(p.Skeleton, fetcher(p.Attachments))
+	out, err := Render(p.Doc, fetcher(p.Attachments))
 	if err != nil {
-		t.Fatalf("reconstruct: %v", err)
+		t.Fatalf("render: %v", err)
 	}
-	if !bytes.Equal(out, raw) {
-		t.Fatalf("reconstruct mismatch:\n got %q\nwant %q", out, raw)
+	if int64(len(out)) != p.Doc.Size {
+		t.Fatalf("Size %d != rendered %d", p.Doc.Size, len(out))
+	}
+	again, err := Render(p.Doc, fetcher(p.Attachments))
+	if err != nil || !bytes.Equal(out, again) {
+		t.Fatalf("render not deterministic: %v", err)
+	}
+	q, err := Parse(out, Options{InlineMax: 1}) // externalize everything to compare content by hash
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if q.Doc.TextBody != p.Doc.TextBody || q.Doc.HTMLBody != p.Doc.HTMLBody {
+		t.Fatalf("bodies changed by render:\n got %q / %q\nwant %q / %q", q.Doc.TextBody, q.Doc.HTMLBody, p.Doc.TextBody, p.Doc.HTMLBody)
+	}
+	if q.Doc.Subject != p.Doc.Subject || q.Doc.MessageID != p.Doc.MessageID || len(q.Doc.From) != len(p.Doc.From) {
+		t.Fatalf("headers changed by render: %+v vs %+v", q.Doc, p.Doc)
+	}
+	// Every non-body leaf content survives: compare the multiset of hashes.
+	want := map[string]int{}
+	var walk func(p *Part, atts []Attachment)
+	walk = func(pt *Part, atts []Attachment) {
+		if pt.Type != "multipart" && !pt.IsBody {
+			data := pt.Data
+			if pt.Attachment != "" {
+				data, _ = fetcher(atts)(pt.Attachment)
+			}
+			want[sha(data)]++
+		}
+		for _, c := range pt.Children {
+			walk(c, atts)
+		}
+	}
+	walk(p.Doc.Root, p.Attachments)
+	got := map[string]int{}
+	var walk2 func(pt *Part)
+	walk2 = func(pt *Part) {
+		if pt.Type != "multipart" && !pt.IsBody {
+			data := pt.Data
+			if pt.Attachment != "" {
+				data, _ = fetcher(q.Attachments)(pt.Attachment)
+			}
+			got[sha(data)]++
+		}
+		for _, c := range pt.Children {
+			walk2(c)
+		}
+	}
+	walk2(q.Doc.Root)
+	if fmt.Sprint(want) != fmt.Sprint(got) {
+		t.Fatalf("part contents changed by render: %v vs %v", want, got)
+	}
+	// Rendering the re-parsed document is stable.
+	out2, err := Render(q.Doc, fetcher(q.Attachments))
+	if err != nil || !bytes.Equal(out, out2) {
+		t.Fatalf("render not idempotent: %v", err)
 	}
 }
 
@@ -67,7 +123,7 @@ func bigData(seed int64, n int) []byte {
 }
 
 func TestSimpleText(t *testing.T) {
-	raw := []byte(crlf(`From: "Wido den Hollander" <wido@example.org>
+	raw := []byte(lf2crlf(`From: "Wido den Hollander" <wido@example.org>
 To: Someone <someone@example.net>, other@example.net
 Subject: =?UTF-8?B?SGVsbG8g8J+Ygw==?= world
 Date: Tue, 21 Oct 2026 12:00:00 +0200
@@ -120,17 +176,14 @@ this is the body.
 	if !strings.HasSuffix(d.RawHeaders, "charset=utf-8\r\n\r\n") {
 		t.Errorf("raw headers %q", d.RawHeaders)
 	}
-	if !d.Root.IsBody || d.Root.Type != "text" || d.Root.Subtype != "plain" || d.HasAttachments || len(p.Attachments) != 0 || p.Externalized {
+	if !d.Root.IsBody || d.Root.Type != "text" || d.Root.Subtype != "plain" || d.HasAttachments || len(p.Attachments) != 0 {
 		t.Errorf("root %+v", d.Root)
-	}
-	if p.Skeleton[5] != frameLiteral || len(p.Skeleton) != 5+5+len(raw) {
-		t.Errorf("skeleton should be a single literal")
 	}
 	roundTrip(t, raw, p)
 }
 
 func TestAlternative(t *testing.T) {
-	raw := []byte(crlf(`From: a@example.org
+	raw := []byte(lf2crlf(`From: a@example.org
 Subject: alt
 Content-Type: multipart/alternative; boundary="b1"
 
@@ -171,7 +224,7 @@ epilogue
 }
 
 func TestHTMLOnlyDerivesText(t *testing.T) {
-	raw := []byte(crlf(`Content-Type: text/html; charset=utf-8
+	raw := []byte(lf2crlf(`Content-Type: text/html; charset=utf-8
 
 <html><head><style>p{}</style></head><body><h1>Title</h1><p>One &amp; two</p><script>x()</script><div>Three<br>Four</div></body></html>
 `))
@@ -188,7 +241,7 @@ func TestHTMLOnlyDerivesText(t *testing.T) {
 func TestMixedWithAttachments(t *testing.T) {
 	pdf := bigData(1, 10000)
 	icon := bigData(2, 100)
-	raw := []byte(crlf(`From: a@example.org
+	raw := []byte(lf2crlf(`From: a@example.org
 Subject: files
 Content-Type: multipart/mixed; boundary="outer"
 
@@ -201,13 +254,13 @@ Content-Type: application/pdf; name="doc.pdf"
 Content-Disposition: attachment; filename="doc.pdf"
 Content-Transfer-Encoding: base64
 
-`) + b64Lines(pdf, 76, "\r\n", false) + crlf(`
+`) + b64Lines(pdf, 76, "\r\n", false) + lf2crlf(`
 --outer
 Content-Type: image/png
 Content-Disposition: inline; filename="icon.png"
 Content-Transfer-Encoding: base64
 
-`) + b64Lines(icon, 76, "\r\n", false) + crlf(`
+`) + b64Lines(icon, 76, "\r\n", false) + lf2crlf(`
 --outer--
 `))
 	p, err := Parse(raw, Options{})
@@ -231,18 +284,11 @@ Content-Transfer-Encoding: base64
 	if c[2].Attachment != "" || c[2].Size != 100 || c[2].Filename != "icon.png" {
 		t.Errorf("icon part %+v", c[2])
 	}
-	refs, _ := SkeletonRefs(p.Skeleton)
+	refs := AttachmentHashes(p.Doc)
 	if len(refs) != 1 || refs[0] != sha(pdf) {
 		t.Errorf("refs %v", refs)
 	}
-	if !p.Externalized {
-		t.Error("not externalized")
-	}
 	roundTrip(t, raw, p)
-	// The skeleton must be much smaller than the raw message.
-	if len(p.Skeleton) > len(raw)/2 {
-		t.Errorf("skeleton too large: %d vs %d", len(p.Skeleton), len(raw))
-	}
 }
 
 func TestBase64Variants(t *testing.T) {
@@ -274,8 +320,8 @@ func TestBase64Variants(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if p.Externalized != c.externalized {
-				t.Errorf("externalized=%v want %v", p.Externalized, c.externalized)
+			if (len(p.Attachments) > 0) != c.externalized {
+				t.Errorf("externalized=%v want %v", len(p.Attachments) > 0, c.externalized)
 			}
 			if c.externalized && (len(p.Attachments) != 1 || p.Attachments[0].Hash != sha(data)) {
 				t.Errorf("attachments %+v", len(p.Attachments))
@@ -285,7 +331,7 @@ func TestBase64Variants(t *testing.T) {
 	}
 }
 
-func TestIrregularBase64FallsBack(t *testing.T) {
+func TestIrregularBase64IsNormalized(t *testing.T) {
 	data := bigData(4, 6000)
 	enc := base64.StdEncoding.EncodeToString(data)
 	// Irregular line lengths: 76, 50, 76, ...
@@ -304,34 +350,21 @@ func TestIrregularBase64FallsBack(t *testing.T) {
 		b.WriteString("\r\n")
 		i = j
 	}
-	raw := []byte(crlf(`Content-Type: multipart/mixed; boundary=x
-
---x
-Content-Type: text/plain
-
-hi
---x
-Content-Type: application/octet-stream
-Content-Transfer-Encoding: base64
-
-`) + b.String() + crlf(`--x--
-`))
-	p, err := Parse(raw, Options{})
-	if err != nil {
-		t.Fatal(err)
+	raw := []byte("Content-Type: multipart/mixed; boundary=f\r\n\r\n--f\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n" + b.String() + "--f--\r\n")
+	p, _ := Parse(raw, Options{})
+	if len(p.Attachments) != 1 || p.Attachments[0].Hash != sha(data) {
+		t.Fatalf("irregular base64 must still be externalized: %d", len(p.Attachments))
 	}
-	if p.Externalized || len(p.Attachments) != 0 || p.Doc.Root.Children[1].Attachment != "" {
-		t.Errorf("irregular base64 should fall back: ext=%v atts=%d", p.Externalized, len(p.Attachments))
-	}
-	if p.Doc.Root.Children[1].Size != int64(len(data)) || !p.Doc.HasAttachments {
-		t.Errorf("part %+v", p.Doc.Root.Children[1])
+	out, _ := Render(p.Doc, fetcher(p.Attachments))
+	if !bytes.Contains(out, []byte(enc[:76]+"\r\n"+enc[76:152])) {
+		t.Error("render should re-encode with regular 76-column lines")
 	}
 	roundTrip(t, raw, p)
 }
 
 func TestRelatedInlineImage(t *testing.T) {
 	img := bigData(5, 5000)
-	raw := []byte(crlf(`Content-Type: multipart/related; boundary=r
+	raw := []byte(lf2crlf(`Content-Type: multipart/related; boundary=r
 
 --r
 Content-Type: text/html; charset=utf-8
@@ -342,7 +375,7 @@ Content-Type: image/png
 Content-ID: <img1@example.org>
 Content-Transfer-Encoding: base64
 
-`) + b64Lines(img, 76, "\r\n", false) + crlf(`
+`) + b64Lines(img, 76, "\r\n", false) + lf2crlf(`
 --r--
 `))
 	p, _ := Parse(raw, Options{})
@@ -367,7 +400,7 @@ Content-Transfer-Encoding: base64
 }
 
 func TestRFC822Attachment(t *testing.T) {
-	inner := crlf(`From: inner@example.org
+	inner := lf2crlf(`From: inner@example.org
 Subject: inner
 Content-Type: multipart/mixed; boundary=in
 
@@ -381,7 +414,7 @@ Content-Transfer-Encoding: base64
 
 ` + b64Lines(bigData(6, 5000), 76, "\n", false) + `
 --in--`)
-	raw := []byte(crlf(`From: outer@example.org
+	raw := []byte(lf2crlf(`From: outer@example.org
 Content-Type: multipart/mixed; boundary=out
 
 --out
@@ -392,7 +425,7 @@ fwd
 Content-Type: message/rfc822
 Content-Disposition: attachment; filename="fwd.eml"
 
-`) + inner + crlf(`
+`) + inner + lf2crlf(`
 --out--
 `))
 	p, _ := Parse(raw, Options{})
@@ -453,16 +486,16 @@ func TestCharsets(t *testing.T) {
 
 func TestDuplicateAttachments(t *testing.T) {
 	data := bigData(7, 5000)
-	part := crlf(`Content-Type: application/octet-stream
+	part := lf2crlf(`Content-Type: application/octet-stream
 Content-Transfer-Encoding: base64
 
 `) + b64Lines(data, 76, "\r\n", false)
-	raw := []byte(crlf(`Content-Type: multipart/mixed; boundary=d
+	raw := []byte(lf2crlf(`Content-Type: multipart/mixed; boundary=d
 
 --d
-`) + part + crlf(`
+`) + part + lf2crlf(`
 --d
-`) + part + crlf(`
+`) + part + lf2crlf(`
 --d--
 `))
 	p, _ := Parse(raw, Options{})
@@ -473,29 +506,9 @@ Content-Transfer-Encoding: base64
 	if c[0].Attachment != sha(data) || c[1].Attachment != sha(data) {
 		t.Errorf("parts %+v %+v", c[0], c[1])
 	}
-	refs, _ := SkeletonRefs(p.Skeleton)
+	refs := AttachmentHashes(p.Doc)
 	if len(refs) != 1 {
 		t.Errorf("refs %v", refs)
-	}
-	roundTrip(t, raw, p)
-}
-
-func TestForceFullRaw(t *testing.T) {
-	raw := []byte(crlf(`Content-Type: multipart/mixed; boundary=f
-
---f
-Content-Type: application/octet-stream
-Content-Transfer-Encoding: base64
-
-`) + b64Lines(bigData(8, 9000), 76, "\r\n", false) + crlf(`
---f--
-`))
-	p, _ := Parse(raw, Options{ForceFullRaw: true})
-	if p.Externalized || len(p.Attachments) != 0 || p.Doc.Root.Children[0].Attachment != "" {
-		t.Error("ForceFullRaw externalized something")
-	}
-	if !p.Doc.HasAttachments || p.Doc.Root.Children[0].Size != 9000 {
-		t.Errorf("doc still parsed: %+v", p.Doc.Root.Children[0])
 	}
 	roundTrip(t, raw, p)
 }
@@ -505,12 +518,12 @@ func TestInlineMax(t *testing.T) {
 	raw := []byte("Content-Type: multipart/mixed; boundary=f\r\n\r\n--f\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
 		b64Lines(data, 76, "\r\n", false) + "\r\n--f--\r\n")
 	p, _ := Parse(raw, Options{InlineMax: 100})
-	if !p.Externalized {
+	if len(p.Attachments) != 1 || p.Doc.Root.Children[0].Data != nil {
 		t.Error("should externalize above InlineMax 100")
 	}
 	p, _ = Parse(raw, Options{InlineMax: 1 << 20})
-	if p.Externalized {
-		t.Error("should stay inline below InlineMax")
+	if len(p.Attachments) != 0 || !bytes.Equal(p.Doc.Root.Children[0].Data, data) {
+		t.Error("should stay inline (Data) below InlineMax")
 	}
 	roundTrip(t, raw, p)
 }
@@ -573,25 +586,65 @@ func TestHostileInputs(t *testing.T) {
 	}
 }
 
-func TestSkeletonErrors(t *testing.T) {
-	bad := [][]byte{nil, []byte("nope"), []byte("DVSK1\x00"), []byte("DVSK1\x00\x00\x00\x00\x09ab"), []byte("DVSK1\x07\x00\x00\x00\x00"), []byte("DVSK1\x01\x00\x00\x00\x03{{{")}
-	for _, b := range bad {
-		if _, err := Reconstruct(b, func(string) ([]byte, error) { return nil, nil }); err == nil {
-			t.Errorf("expected error for %q", b)
-		}
-		if _, err := SkeletonRefs(b); err == nil && len(b) > 5 && b[5] == 1 {
-			t.Errorf("expected refs error for %q", b)
-		}
+func TestRenderErrors(t *testing.T) {
+	if _, err := Render(nil, nil); err == nil {
+		t.Error("nil document")
 	}
-	// Missing attachment surfaces fetch error.
+	if _, err := Render(&Document{}, nil); err == nil {
+		t.Error("document without root")
+	}
 	raw := []byte("Content-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n" + b64Lines(bigData(10, 5000), 76, "\r\n", false) + "\r\n")
 	p, _ := Parse(raw, Options{})
-	if !p.Externalized {
+	if len(p.Attachments) != 1 {
 		t.Fatal("expected externalized root attachment")
 	}
-	if _, err := Reconstruct(p.Skeleton, func(string) ([]byte, error) { return nil, fmt.Errorf("gone") }); err == nil {
+	if _, err := Render(p.Doc, func(string) ([]byte, error) { return nil, fmt.Errorf("gone") }); err == nil {
 		t.Error("expected fetch error")
 	}
+	if _, err := Render(p.Doc, nil); err == nil {
+		t.Error("expected error without fetcher")
+	}
+}
+
+func TestSignedDetection(t *testing.T) {
+	raw := []byte("Content-Type: multipart/signed; boundary=s; protocol=\"application/pgp-signature\"\r\n\r\n--s\r\nContent-Type: text/plain\r\n\r\nsigned text\r\n--s\r\nContent-Type: application/pgp-signature\r\n\r\n-----BEGIN PGP SIGNATURE-----\r\nabc\r\n-----END PGP SIGNATURE-----\r\n--s--\r\n")
+	p, _ := Parse(raw, Options{})
+	if !p.Signed {
+		t.Error("multipart/signed not detected")
+	}
+	q, _ := Parse([]byte("Subject: x\r\n\r\nplain\r\n"), Options{})
+	if q.Signed {
+		t.Error("plain message flagged signed")
+	}
+}
+
+func TestRenderKeepsTraceHeaders(t *testing.T) {
+	raw := []byte(lf2crlf(`Received: from a.example (a.example [2001:db8::1]) by mx.example with ESMTPS id X; Tue, 21 Oct 2026 10:00:00 +0000
+Received: from b.example by a.example; Tue, 21 Oct 2026 09:59:00 +0000
+DKIM-Signature: v=1; a=rsa-sha256; d=example.com; s=sel; h=from:subject; bh=abc; b=def
+Message-ID: <trace@example.com>
+From: a@example.com
+Subject: cafe
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: 8bit
+
+body with ` + "\xe9" + `
+`))
+	p, _ := Parse(raw, Options{})
+	out, err := Render(p.Doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"Received: from a.example", "Received: from b.example", "DKIM-Signature:", "Message-ID: <trace@example.com>", "Content-Type: text/plain; charset=utf-8", "MIME-Version: 1.0"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rendered message lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Count(s, "Content-Type:") != 1 || strings.Contains(s, "iso-8859-1") {
+		t.Errorf("original Content-Type not replaced:\n%s", s)
+	}
+	roundTrip(t, raw, p)
 }
 
 // ---- generated corpus round-trip ----
@@ -675,18 +728,11 @@ func TestGeneratedRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("msg %d: %v", i, err)
 			}
-			if p.Externalized {
+			if len(p.Attachments) > 0 {
 				ext++
 			}
-			out, err := Reconstruct(p.Skeleton, fetcher(p.Attachments))
-			if err != nil {
-				t.Fatalf("msg %d: reconstruct: %v", i, err)
-			}
-			if !bytes.Equal(out, raw) {
-				t.Fatalf("msg %d (inline=%d): round trip mismatch", i, inline)
-			}
-			// Every externalized part's hash must be fetchable and listed.
-			refs, _ := SkeletonRefs(p.Skeleton)
+			roundTrip(t, raw, p)
+			refs := AttachmentHashes(p.Doc)
 			if len(refs) != len(p.Attachments) {
 				t.Fatalf("msg %d: refs %d vs attachments %d", i, len(refs), len(p.Attachments))
 			}

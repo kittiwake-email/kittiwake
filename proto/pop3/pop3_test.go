@@ -3,6 +3,7 @@ package pop3
 import (
 	"bufio"
 	"context"
+	"dovetail/mail"
 	"encoding/base64"
 	"io"
 	"log/slog"
@@ -205,7 +206,7 @@ func TestListingsRetrTop(t *testing.T) {
 	c := f.dial(t)
 	defer c.close()
 	c.login("wido@example.org", "correct horse")
-	want := len(msg1) + len(msg2)
+	want := len(rendered(t, msg1)) + len(rendered(t, msg2))
 	if l := c.cmd("STAT"); l != "+OK 2 "+itoa(want) {
 		t.Fatalf("STAT: %s", l)
 	}
@@ -213,10 +214,10 @@ func TestListingsRetrTop(t *testing.T) {
 		t.Fatal(l)
 	}
 	lines := c.multi()
-	if len(lines) != 2 || lines[0] != "1 "+itoa(len(msg1)) || lines[1] != "2 "+itoa(len(msg2)) {
+	if len(lines) != 2 || lines[0] != "1 "+itoa(len(rendered(t, msg1))) || lines[1] != "2 "+itoa(len(rendered(t, msg2))) {
 		t.Fatalf("LIST: %v", lines)
 	}
-	if l := c.cmd("LIST 2"); l != "+OK 2 "+itoa(len(msg2)) {
+	if l := c.cmd("LIST 2"); l != "+OK 2 "+itoa(len(rendered(t, msg2))) {
 		t.Fatalf("LIST 2: %s", l)
 	}
 	if l := c.cmd("LIST 3"); !strings.HasPrefix(l, "-ERR") {
@@ -228,25 +229,27 @@ func TestListingsRetrTop(t *testing.T) {
 		t.Fatalf("UIDL: %v", uidls)
 	}
 	// RETR byte-exact after un-stuffing.
-	if l := c.cmd("RETR 1"); l != "+OK "+itoa(len(msg1))+" octets" {
+	if l := c.cmd("RETR 1"); l != "+OK "+itoa(len(rendered(t, msg1)))+" octets" {
 		t.Fatalf("RETR: %s", l)
 	}
 	got := strings.Join(c.multi(), "\r\n") + "\r\n"
-	if got != msg1 {
+	if got != rendered(t, msg1) {
 		t.Fatalf("RETR mismatch:\n%q\n%q", got, msg1)
 	}
 	c.cmd("RETR 2")
-	if got := strings.Join(c.multi(), "\r\n") + "\r\n"; got != msg2 {
+	if got := strings.Join(c.multi(), "\r\n") + "\r\n"; got != rendered(t, msg2) {
 		t.Fatal("RETR 2 mismatch")
 	}
 	// TOP 1 0 is headers only; TOP 1 1 adds one body line.
 	c.cmd("TOP 1 0")
 	top := c.multi()
-	if len(top) != 4 || top[3] != "" || top[0] != "From: a@example.com" {
+	// Rendered messages carry MIME-Version, Content-Type and
+	// Content-Transfer-Encoding after the original headers.
+	if len(top) != 7 || top[6] != "" || top[0] != "From: a@example.com" {
 		t.Fatalf("TOP 1 0: %v", top)
 	}
 	c.cmd("TOP 1 1")
-	if top = c.multi(); len(top) != 5 || top[4] != "line1" {
+	if top = c.multi(); len(top) != 8 || top[7] != "line1" {
 		t.Fatalf("TOP 1 1: %v", top)
 	}
 	if l := c.cmd("TOP 1"); !strings.HasPrefix(l, "-ERR") {
@@ -276,11 +279,11 @@ func TestDeleteRsetQuit(t *testing.T) {
 	if l := c.cmd("RETR 1"); !strings.HasPrefix(l, "-ERR") {
 		t.Fatal("RETR deleted")
 	}
-	if l := c.cmd("STAT"); l != "+OK 1 "+itoa(len(msg2)) {
+	if l := c.cmd("STAT"); l != "+OK 1 "+itoa(len(rendered(t, msg2))) {
 		t.Fatalf("STAT after DELE: %s", l)
 	}
 	c.cmd("RSET")
-	if l := c.cmd("STAT"); l != "+OK 2 "+itoa(len(msg1)+len(msg2)) {
+	if l := c.cmd("STAT"); l != "+OK 2 "+itoa(len(rendered(t, msg1))+len(rendered(t, msg2))) {
 		t.Fatalf("STAT after RSET: %s", l)
 	}
 	c.cmd("DELE 1")
@@ -294,7 +297,7 @@ func TestDeleteRsetQuit(t *testing.T) {
 		t.Fatalf("after delete: %s", l)
 	}
 	c2.cmd("RETR 1")
-	if got := strings.Join(c2.multi(), "\r\n") + "\r\n"; got != msg2 {
+	if got := strings.Join(c2.multi(), "\r\n") + "\r\n"; got != rendered(t, msg2) {
 		t.Fatal("remaining message is not msg2")
 	}
 	ents, _, _, _ := f.idx.ListRetention(ctx, f.mb.ID, time.Time{}, 10)
@@ -353,3 +356,18 @@ func TestTooManyFailures(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// rendered returns what Dovetail serves for a raw message: the document
+// rendered back to RFC 5322 (the original bytes are not kept).
+func rendered(t *testing.T, raw string) string {
+	t.Helper()
+	p, err := mail.Parse([]byte(raw), mail.Options{InlineMax: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := mail.Render(p.Doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}

@@ -109,19 +109,26 @@ These are settled. Do not design around them.
 - **Postfix integration:** `postfix` mode serves a Sendmail-style socketmap (`domains`,
   `mailboxes`, `aliases` maps) for `virtual_mailbox_domains/maps` and `virtual_alias_maps`.
   Postfix config and helpers live in `contrib/postfix/`.
-- **Message format:** parsed JSON (schema version, headers array, verbatim original headers,
-  HTML and plain-text body, full MIME tree, attachment references) plus a **raw skeleton**:
-  the original bytes with each attachment's encoded body replaced by a reference.
-  Reconstruction must be byte-exact; verify at delivery and fall back to full raw if not.
-  Every non-primary-body MIME part is an attachment; parts under a threshold stay inline.
+- **Scalability is the governing principle** (1M mailboxes, 150k-message mailboxes): count
+  objects and omap keys per message, shard every per-mailbox map, never read a whole folder
+  for a page. Measure on the lab box before/after storage changes.
+- **Message format:** ONE object per message: the parsed JSON (schema version, headers
+  array, verbatim original header block incl. Received/Message-ID/DKIM, UTF-8 bodies, full
+  MIME tree with small parts' content inline and attachment hashes), xattrs mailbox/created/
+  `loc`. **No raw copy**: `mail.Render` rebuilds a deterministic RFC 5322 message (its length
+  is Document.Size = what IMAP/JMAP report). Only `multipart/signed` keeps the original
+  bytes (`.raw`, config `mail.keep_raw`). Every non-primary-body MIME part is an attachment;
+  parts under a threshold stay inline as Part.Data.
 - **Attachments** are cluster-wide deduplicated by content hash with reference counting
   (omap keys per referencing message on the hash-named object); only a worker deletes orphans.
 - **Delivery order:** attachments, message JSON, raw, index entry + change log (commit
   point), refs. LMTP acks only after the index write.
-- **Mailbox index lives in RADOS omap:** one root object per mailbox (typed collections,
-  UIDVALIDITY/UIDNEXT per folder, mailbox-wide `modseq`, quota usage; atomic transactions)
-  and one index object per folder (omap key = zero-padded UID, value = compact record with
-  object name, flags+keywords, size, date, modseq, threading headers, list-view headers).
+- **Mailbox index lives in RADOS omap:** root object = small JSON only (folders, counters,
+  modseq, usage; NO omap). Folder records in shards of 65536 UIDs (`<mb>/<fid>`, `<mb>/<fid>.<n>`),
+  keys = inverted UID so ascending iteration is newest-first (`ListFolderDesc` is the cheap
+  path; `ListFolder` ascending reads whole shards). Compact Record with short JSON tags.
+  Message id → location via the message object's `loc` xattr (`message.Store.Location`).
+  Thread/Message-ID maps sharded over `<mb>/t.<xx>` (256). Keep omaps bounded.
 - **Change tracking:** every mutation bumps `modseq` and appends to the bounded change log
   `<mailbox>/changes`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.
 - **Workers** consume a RADOS-based task queue (queue object per task type, omap entries,
@@ -187,7 +194,8 @@ These are settled. Do not design around them.
   into the mailbox root or quota/audit code.
 - **No TLS in the daemon** (HAProxy terminates it). **IPv6-first.** Single YAML config file.
 - **Observability:** structured JSON logging and Prometheus metrics in every component;
-  `/metrics`, `/healthz`, `/readyz` on a management listener.
+  `/metrics`, `/healthz`, `/readyz` on a management listener. Log/audit lines about a message
+  carry `message_id` (the Message-ID header) next to Dovetail's `msg` uuid.
 
 ## Roadmap
 

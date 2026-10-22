@@ -350,15 +350,18 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
 	return nil
 }
 
-// deleteMessage removes attachment references and both message objects.
+// deleteMessage removes attachment references and the message objects.
 func (w *Worker) deleteMessage(ctx context.Context, mb, msg uuid.UUID) error {
-	skel, err := w.msgs.GetRaw(ctx, mb, msg)
+	data, err := w.msgs.GetDoc(ctx, mb, msg)
 	if err == nil {
-		refs, _ := mail.SkeletonRefs(skel)
-		for _, h := range refs {
-			if err := w.atts.RemoveRef(ctx, h, mb, msg); err != nil {
-				return err
+		var doc mail.Document
+		if json.Unmarshal(data, &doc) == nil {
+			for _, h := range mail.AttachmentHashes(&doc) {
+				if err := w.atts.RemoveRef(ctx, h, mb, msg); err != nil {
+					return err
+				}
 			}
+			w.log.Info("purged message", slog.String("message_id", doc.MessageID), slog.String("mailbox", mb.String()), slog.String("msg", msg.String()))
 		}
 	} else if !errors.Is(err, message.ErrNotFound) {
 		return err
@@ -503,10 +506,12 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		if i.Created.After(cutoff) {
 			return nil
 		}
-		if _, err := w.idx.Locate(ctx, i.Mailbox, i.Message); err == nil {
-			return nil
-		} else if !errors.Is(err, index.ErrNotFound) {
-			return err
+		if loc, err := index.ParseLocation(i.Location); err == nil {
+			if rec, err := w.idx.GetRecord(ctx, i.Mailbox, loc.FolderID, loc.UID); err == nil && rec.MessageID == i.Message {
+				return nil
+			} else if err != nil && !errors.Is(err, index.ErrNotFound) {
+				return err
+			}
 		}
 		if inRetention(i.Mailbox, i.Message) {
 			return nil

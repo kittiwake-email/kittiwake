@@ -82,8 +82,10 @@ func (f *fixture) deliver(t *testing.T) (delivery.Delivered, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	skel, _ := f.st.Messages.GetRaw(context.Background(), f.mb.ID, out[0].MessageID)
-	refs, _ := mail.SkeletonRefs(skel)
+	data, _ := f.st.Messages.GetDoc(context.Background(), f.mb.ID, out[0].MessageID)
+	var doc mail.Document
+	_ = json.Unmarshal(data, &doc)
+	refs := mail.AttachmentHashes(&doc)
 	if len(refs) != 1 {
 		t.Fatalf("expected one attachment ref, got %v", refs)
 	}
@@ -224,7 +226,7 @@ func TestOrphanSweepAndAuditPurge(t *testing.T) {
 	live, _ := f.deliver(t)
 	// An orphan: objects without index entry.
 	orphan := uuid.New()
-	_ = f.st.Messages.Put(ctx, f.mb.ID, orphan, []byte("{}"), []byte("DVSK1"))
+	_ = f.st.Messages.Put(ctx, f.mb.ID, orphan, []byte("{}"), "f1/999")
 	_, _ = f.st.Queue.Enqueue(ctx, TaskOrphanSweep, struct{}{}, time.Time{})
 	f.drain(t)
 	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, orphan); err != nil {

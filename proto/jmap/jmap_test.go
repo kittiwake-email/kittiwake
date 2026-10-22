@@ -3,6 +3,7 @@ package jmap
 import (
 	"bytes"
 	"context"
+	"dovetail/mail"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -504,7 +505,7 @@ func TestEmailQueryGetAndBlobs(t *testing.T) {
 		t.Fatalf("attachment download: %d %q %v", resp.StatusCode, body, resp.Header)
 	}
 	resp, body = f.get("/jmap/download/"+f.mb.ID.String()+"/m-"+d3.MessageID.String()+"/msg.eml?accept=text/plain", nil)
-	if resp.StatusCode != 200 || string(body) != mixedMsg() || resp.Header.Get("Content-Type") != "text/plain" {
+	if resp.StatusCode != 200 || string(body) != rendered(t, mixedMsg()) || resp.Header.Get("Content-Type") != "text/plain" {
 		t.Fatalf("raw download: %d", resp.StatusCode)
 	}
 	resp, body = f.get("/jmap/download/"+f.mb.ID.String()+"/"+hb["blobId"].(string)+"/part.html", nil)
@@ -808,4 +809,19 @@ func TestJSONPointer(t *testing.T) {
 	if _, err := jsonPointer(v, "ids"); err == nil {
 		t.Fatal("no leading slash")
 	}
+}
+
+// rendered returns what Dovetail serves for a raw message: the document
+// rendered back to RFC 5322 (the original bytes are not kept).
+func rendered(t *testing.T, raw string) string {
+	t.Helper()
+	p, err := mail.Parse([]byte(raw), mail.Options{InlineMax: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := mail.Render(p.Doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }

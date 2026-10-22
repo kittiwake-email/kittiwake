@@ -165,14 +165,10 @@ func (ss *session) read(r io.Reader) ([]byte, error) {
 func (ss *session) deliver(rcpt string, raw []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	out, err := ss.srv.del.Deliver(ctx, delivery.Request{Recipient: rcpt, Sender: ss.from, Raw: raw, ClientIP: ss.clientIP})
-	if err != nil {
-		ss.srv.log.WarnContext(ctx, "delivery failed", slog.String("rcpt", rcpt), slog.String("from", ss.from), slog.String("error", err.Error()))
+	// The delivery service logs each stored copy with its Message-ID.
+	if _, err := ss.srv.del.Deliver(ctx, delivery.Request{Recipient: rcpt, Sender: ss.from, Raw: raw, ClientIP: ss.clientIP}); err != nil {
+		ss.srv.log.WarnContext(ctx, "delivery failed", slog.String("rcpt", rcpt), slog.String("from", ss.from), slog.String("client_ip", ss.clientIP), slog.String("error", err.Error()))
 		return ss.smtpErr(err)
-	}
-	for _, d := range out {
-		ss.srv.log.InfoContext(ctx, "delivered", slog.String("rcpt", rcpt), slog.String("via", d.Via),
-			slog.String("mailbox", d.MailboxID.String()), slog.String("message", d.MessageID.String()), slog.String("folder", d.FolderID), slog.Uint64("uid", uint64(d.UID)))
 	}
 	return nil
 }

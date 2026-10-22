@@ -170,7 +170,7 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 			AccessTokenLifetime: cfg.Session.AccessTokenLifetime, RefreshTokenLifetime: cfg.Session.RefreshTokenLifetime, Issuer: cfg.Session.Issuer,
 		}),
 		Delivery: delivery.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, delivery.Config{
-			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, ForceFullRaw: cfg.Mail.ForceFullRaw,
+			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, KeepRaw: cfg.Mail.KeepRaw,
 			SpamHeader: cfg.Mail.SpamHeader, SpamValue: cfg.Mail.SpamValue, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
 			DefaultQuota: dq, OverQuotaTempFail: cfg.Mail.OverQuotaTempFail, DisabledTempFail: cfg.Mail.DisabledTempFail,
 		}),

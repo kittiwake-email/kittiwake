@@ -87,13 +87,16 @@ type SMTP struct {
 
 // Mail holds message handling policy.
 type Mail struct {
-	MaxMessageSize      int64         `yaml:"max_message_size"`
-	InlineAttachmentMax int64         `yaml:"inline_attachment_max"`
-	ForceFullRaw        bool          `yaml:"force_full_raw"`
-	TrashRetention      time.Duration `yaml:"trash_retention"`
-	PostHoldGrace       time.Duration `yaml:"post_hold_grace"`
-	SpamHeader          string        `yaml:"spam_header"`
-	SpamValue           string        `yaml:"spam_value"`
+	MaxMessageSize      int64 `yaml:"max_message_size"`
+	InlineAttachmentMax int64 `yaml:"inline_attachment_max"`
+	// KeepRaw: when to keep the original bytes next to the parsed document:
+	// "never", "signed" (multipart/signed, so PGP/MIME and S/MIME verify) or
+	// "always". Messages are otherwise rendered from the document.
+	KeepRaw        string        `yaml:"keep_raw"`
+	TrashRetention time.Duration `yaml:"trash_retention"`
+	PostHoldGrace  time.Duration `yaml:"post_hold_grace"`
+	SpamHeader     string        `yaml:"spam_header"`
+	SpamValue      string        `yaml:"spam_value"`
 	// OverQuotaTempFail / DisabledTempFail make LMTP answer 4xx instead of 5xx.
 	OverQuotaTempFail bool `yaml:"over_quota_tempfail"`
 	DisabledTempFail  bool `yaml:"disabled_tempfail"`
@@ -183,6 +186,7 @@ func Default() Config {
 		Mail: Mail{
 			MaxMessageSize:      50 << 20,
 			InlineAttachmentMax: 4 << 10,
+			KeepRaw:             "signed",
 			TrashRetention:      30 * 24 * time.Hour,
 			PostHoldGrace:       7 * 24 * time.Hour,
 			SpamHeader:          "X-Spam-Flag",
@@ -250,6 +254,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Mail.MaxMessageSize <= 0 {
 		return errors.New("config: mail.max_message_size must be positive")
+	}
+	switch c.Mail.KeepRaw {
+	case "never", "signed", "always":
+	default:
+		return fmt.Errorf("config: mail.keep_raw %q must be never, signed or always", c.Mail.KeepRaw)
 	}
 	if c.Mail.MaxAliasDepth <= 0 {
 		return errors.New("config: mail.max_alias_depth must be positive")
