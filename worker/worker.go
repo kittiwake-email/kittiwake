@@ -39,6 +39,7 @@ import (
 const (
 	TaskPurgeTrash    = admin.TaskPurgeTrash
 	TaskRemoveMailbox = admin.TaskRemoveMailbox
+	TaskUploadSweep   = "upload-sweep"
 	TaskRecalcQuota   = admin.TaskRecalcQuota
 	TaskSearchIndex   = delivery.TaskSearchIndex
 	TaskAttachmentGC  = "attachment-gc"
@@ -48,7 +49,7 @@ const (
 )
 
 // AllTypes lists every queue the worker drains.
-var AllTypes = []string{TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota, TaskSearchIndex, TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep, TaskExportMailbox}
+var AllTypes = []string{TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota, TaskSearchIndex, TaskAttachmentGC, TaskPurgeAudit, TaskOrphanSweep, TaskUploadSweep, TaskExportMailbox}
 
 // ExportTask is the payload of an export-mailbox task.
 type ExportTask struct {
@@ -324,6 +325,12 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 		return w.attachmentGC(ctx)
 	case TaskPurgeAudit:
 		return w.purgeAudit(ctx)
+	case TaskUploadSweep:
+		n, err := w.msgs.SweepUploads(ctx)
+		if n > 0 {
+			w.log.Info("upload sweep", slog.Int("expired", n))
+		}
+		return err
 	case TaskOrphanSweep:
 		if n, err := w.ids.PurgeNodes(ctx, w.Now().Add(-24*time.Hour)); err == nil && n > 0 {
 			w.log.Info("purged dead node registrations", slog.Int("rows", n))
@@ -531,6 +538,9 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 	} else if !errors.Is(err, index.ErrNotFound) {
 		return err
 	}
+	if _, err := w.msgs.DeleteUploads(ctx, mb); err != nil {
+		return err
+	}
 	// Anything left in the messages pool for this mailbox (orphans).
 	var leftover []message.Info
 	if err := w.msgs.List(ctx, func(i message.Info) error {
@@ -682,5 +692,8 @@ func (w *Worker) schedule(ctx context.Context) {
 			_, _ = w.queue.Enqueue(ctx, typ, struct{}{}, time.Time{})
 			w.log.Info("scheduled", slog.String("task", typ))
 		}
+	}
+	if due(TaskUploadSweep, w.cfg.PurgeInterval) {
+		_, _ = w.queue.Enqueue(ctx, TaskUploadSweep, struct{}{}, time.Time{})
 	}
 }

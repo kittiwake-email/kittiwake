@@ -37,6 +37,7 @@ type fixture struct {
 	aud   *auditor.Auditor
 	del   *delivery.Service
 	mbsvc *mailbox.Service
+	msgs  *message.Store
 	mb    identity.Mailbox
 	acct  identity.Account
 	act   actor.Actor
@@ -63,9 +64,9 @@ func newFixture(t *testing.T) *fixture {
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
 	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{})
 	acct, _ := ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{"read", "write", "send"}, Enabled: true})
-	f := &fixture{t: t, ids: ids, idx: idx, aud: aud, del: del, mbsvc: mbsvc, mb: mb, acct: acct}
+	f := &fixture{t: t, ids: ids, idx: idx, aud: aud, del: del, mbsvc: mbsvc, msgs: msgs, mb: mb, acct: acct}
 	f.act = actor.Actor{AccountID: acct.ID, Username: acct.Username, MailboxID: mb.ID, Roles: acct.Roles, Protocol: "jmap", ClientIP: "::1"}
-	f.srv = New(Config{BaseURL: "https://mail.example.org", HoldCheck: func(ctx context.Context, id uuid.UUID) bool {
+	f.srv = New(Config{BaseURL: "https://mail.example.org", Uploads: msgs, HoldCheck: func(ctx context.Context, id uuid.UUID) bool {
 		v, err := ids.GetMailbox(ctx, id)
 		return err == nil && v.Value.Hold != nil
 	}}, mbsvc, del, log)
@@ -711,6 +712,41 @@ func TestImportViaUpload(t *testing.T) {
 	resp, _ = f.post("/jmap/upload/"+uuid.NewString(), "text/plain", []byte("x"), nil)
 	if resp.StatusCode != 404 {
 		t.Fatalf("upload other account: %d", resp.StatusCode)
+	}
+}
+
+// Uploads live in RADOS, not in the process: a blob uploaded through one
+// JMAP node is usable from another node behind the same load balancer,
+// and it expires after the upload TTL.
+func TestUploadSharedAcrossNodes(t *testing.T) {
+	f := newFixture(t)
+	raw := msg("from another node", "me@example.org", "node@x", "")
+	resp, body := f.post("/jmap/upload/"+f.mb.ID.String(), "message/rfc822", []byte(raw), nil)
+	if resp.StatusCode != 201 {
+		t.Fatalf("upload: %d %s", resp.StatusCode, body)
+	}
+	var up map[string]any
+	_ = json.Unmarshal(body, &up)
+	blobID := up["blobId"].(string)
+	// A second server over the same stores stands in for another node.
+	f.srv = New(Config{BaseURL: "https://mail.example.org", Uploads: f.msgs}, f.mbsvc, f.del, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	drafts := f.folderByRole(index.RoleDrafts)
+	r := f.do(call{"Email/import", f.acctArgs(map[string]any{"emails": map[string]any{
+		"i": map[string]any{"blobId": blobID, "mailboxIds": map[string]any{drafts: true}},
+	}}), "i"})
+	if created := first(r, t, "Email/import")["created"].(map[string]any); len(created) != 1 {
+		t.Fatalf("import on the other node: %v", r)
+	}
+	// Expired: gone for import and download.
+	f.msgs.Now = func() time.Time { return time.Now().Add(message.UploadTTL + time.Minute) }
+	r = f.do(call{"Email/import", f.acctArgs(map[string]any{"emails": map[string]any{
+		"i": map[string]any{"blobId": blobID, "mailboxIds": map[string]any{drafts: true}},
+	}}), "i"})
+	if nc := first(r, t, "Email/import")["notCreated"].(map[string]any); nc["i"].(map[string]any)["type"] != "blobNotFound" {
+		t.Fatalf("expired upload still importable: %v", r)
+	}
+	if resp, _ := f.get("/jmap/download/"+f.mb.ID.String()+"/"+blobID+"/x.eml", nil); resp.StatusCode != 404 {
+		t.Fatalf("expired upload still downloadable: %d", resp.StatusCode)
 	}
 }
 

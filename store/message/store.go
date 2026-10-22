@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -158,4 +159,113 @@ func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 			return fn(info)
 		})
 	})
+}
+
+// ---- JMAP uploads ----
+//
+// Blobs uploaded through JMAP (drafts to import, attachments for Email/set)
+// live in the "uploads" namespace of the mailbox's messages pool, so any
+// JMAP node behind the load balancer can use a blob another node received.
+// They expire after UploadTTL; the worker's upload sweep deletes expired
+// ones and mailbox removal deletes a mailbox's uploads with the rest.
+
+const uploadsNS = "uploads"
+
+// UploadTTL is how long an uploaded blob can be referenced.
+const UploadTTL = time.Hour
+
+func uploadOID(mb uuid.UUID, id string) string { return mb.String() + "/" + id }
+
+// PutUpload stores an uploaded blob for the mailbox.
+func (s *Store) PutUpload(ctx context.Context, mb uuid.UUID, id string, data []byte, typ string) error {
+	expires := s.Now().Add(UploadTTL).Unix()
+	tx := rados.NewWriteTx().CreateExclusive().WriteFull(data).
+		SetXattr("type", []byte(typ)).SetXattr("expires", []byte(strconv.FormatInt(expires, 10)))
+	_, err := s.pool(ctx, mb).Namespace(uploadsNS).Write(ctx, uploadOID(mb, id), tx)
+	return mapErr(err)
+}
+
+// GetUpload returns an uploaded blob and its media type; ErrNotFound when
+// absent or expired.
+func (s *Store) GetUpload(ctx context.Context, mb uuid.UUID, id string) ([]byte, string, error) {
+	io := s.pool(ctx, mb).Namespace(uploadsNS)
+	x, err := io.GetXattrs(ctx, uploadOID(mb, id))
+	if err != nil {
+		return nil, "", mapErr(err)
+	}
+	if exp, err := strconv.ParseInt(string(x["expires"]), 10, 64); err == nil && s.Now().Unix() > exp {
+		return nil, "", ErrNotFound
+	}
+	data, _, err := io.Get(ctx, uploadOID(mb, id))
+	if err != nil {
+		return nil, "", mapErr(err)
+	}
+	return data, string(x["type"]), nil
+}
+
+// DeleteUpload removes an uploaded blob (missing is fine).
+func (s *Store) DeleteUpload(ctx context.Context, mb uuid.UUID, id string) error {
+	err := s.pool(ctx, mb).Namespace(uploadsNS).Delete(ctx, uploadOID(mb, id))
+	if errors.Is(err, rados.ErrNotFound) {
+		return nil
+	}
+	return mapErr(err)
+}
+
+// DeleteUploads removes every upload of a mailbox (mailbox removal).
+func (s *Store) DeleteUploads(ctx context.Context, mb uuid.UUID) (int, error) {
+	io := s.pool(ctx, mb).Namespace(uploadsNS)
+	var oids []string
+	prefix := mb.String() + "/"
+	if err := io.List(ctx, func(oid string) error {
+		if strings.HasPrefix(oid, prefix) {
+			oids = append(oids, oid)
+		}
+		return nil
+	}); err != nil {
+		return 0, mapErr(err)
+	}
+	for _, oid := range oids {
+		if err := io.Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return 0, mapErr(err)
+		}
+	}
+	return len(oids), nil
+}
+
+// SweepUploads deletes expired uploads on every connected storage and
+// returns how many it removed. The uploads namespace only ever holds
+// blobs younger than UploadTTL (plus whatever a crash left), so listing
+// it is cheap however large the messages pool is.
+func (s *Store) SweepUploads(ctx context.Context) (int, error) {
+	removed := 0
+	now := s.Now().Unix()
+	err := s.r.Each(ctx, storage.RoleMessages, func(_ int64, io rados.IOContext) error {
+		io = io.Namespace(uploadsNS)
+		var expired []string
+		if err := io.List(ctx, func(oid string) error {
+			x, err := io.GetXattrs(ctx, oid)
+			if err != nil {
+				if errors.Is(err, rados.ErrNotFound) {
+					return nil
+				}
+				return mapErr(err)
+			}
+			exp, err := strconv.ParseInt(string(x["expires"]), 10, 64)
+			if err != nil || now > exp {
+				expired = append(expired, oid) // unreadable expiry: treat as expired
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, oid := range expired {
+			if err := io.Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
+				return mapErr(err)
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed, err
 }

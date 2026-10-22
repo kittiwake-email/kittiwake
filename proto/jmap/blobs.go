@@ -1,7 +1,6 @@
 package jmap
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -10,79 +9,21 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
 	dmail "kittiwake/mail"
 	"kittiwake/service/actor"
 	"kittiwake/service/mailbox"
+	"kittiwake/store/message"
 )
 
-// uploadStore keeps uploaded blobs in memory with a TTL and a size bound.
-type uploadStore struct {
-	mu       sync.Mutex
-	items    map[string]*list.Element
-	order    *list.List // oldest first
-	total    int64
-	maxTotal int64
-	ttl      time.Duration
-	now      func() time.Time
-}
-
-type uploadBlob struct {
-	id      string
-	account uuid.UUID
-	data    []byte
-	typ     string
-	created time.Time
-}
-
-func newUploadStore(maxTotal int64) *uploadStore {
-	return &uploadStore{items: map[string]*list.Element{}, order: list.New(), maxTotal: maxTotal, ttl: time.Hour, now: time.Now}
-}
-
-func (u *uploadStore) put(account uuid.UUID, data []byte, typ string) *uploadBlob {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.evictLocked()
-	for u.total+int64(len(data)) > u.maxTotal && u.order.Len() > 0 {
-		u.removeLocked(u.order.Front())
-	}
-	b := &uploadBlob{id: "u-" + uuid.NewString(), account: account, data: data, typ: typ, created: u.now()}
-	u.items[b.id] = u.order.PushBack(b)
-	u.total += int64(len(data))
-	return b
-}
-
-func (u *uploadStore) get(id string) (*uploadBlob, bool) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.evictLocked()
-	e, ok := u.items[id]
-	if !ok {
-		return nil, false
-	}
-	return e.Value.(*uploadBlob), true
-}
-
-func (u *uploadStore) evictLocked() {
-	cutoff := u.now().Add(-u.ttl)
-	for e := u.order.Front(); e != nil; {
-		next := e.Next()
-		if e.Value.(*uploadBlob).created.Before(cutoff) {
-			u.removeLocked(e)
-		}
-		e = next
-	}
-}
-
-func (u *uploadStore) removeLocked(e *list.Element) {
-	b := e.Value.(*uploadBlob)
-	u.order.Remove(e)
-	delete(u.items, b.id)
-	u.total -= int64(len(b.data))
+// Uploads is where uploaded blobs live between the upload and the
+// Email/import or Email/set that uses them. The message store keeps them
+// in RADOS so every JMAP node sees them; a blob id is "u-<uuid>".
+type Uploads interface {
+	PutUpload(ctx context.Context, mb uuid.UUID, id string, data []byte, typ string) error
+	GetUpload(ctx context.Context, mb uuid.UUID, id string) ([]byte, string, error)
 }
 
 // accountFromPath validates an accountId path element against the actor.
@@ -118,9 +59,14 @@ func (s *Server) serveUpload(w http.ResponseWriter, r *http.Request, rest string
 	if typ == "" {
 		typ = "application/octet-stream"
 	}
-	b := s.uploads.put(acct, data, typ)
+	id := "u-" + uuid.NewString()
+	if err := s.cfg.Uploads.PutUpload(r.Context(), acct, id, data, typ); err != nil {
+		s.log.Error("jmap: upload store failed", "error", err.Error())
+		http.Error(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"accountId": acct.String(), "blobId": b.id, "type": b.typ, "size": len(b.data),
+		"accountId": acct.String(), "blobId": id, "type": typ, "size": len(data),
 	})
 }
 
@@ -187,11 +133,14 @@ var errBlobNotFound = errors.New("jmap: blob not found")
 func (s *Server) blob(ctx context.Context, acct uuid.UUID, blobID string) ([]byte, string, error) {
 	switch {
 	case strings.HasPrefix(blobID, "u-"):
-		b, ok := s.uploads.get(blobID)
-		if !ok || b.account != acct {
-			return nil, "", errBlobNotFound
+		data, typ, err := s.cfg.Uploads.GetUpload(ctx, acct, blobID)
+		if err != nil {
+			if errors.Is(err, message.ErrNotFound) {
+				return nil, "", errBlobNotFound
+			}
+			return nil, "", err
 		}
-		return b.data, b.typ, nil
+		return data, typ, nil
 	case strings.HasPrefix(blobID, "m-"):
 		id, err := uuid.Parse(blobID[2:])
 		if err != nil {

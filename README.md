@@ -555,6 +555,12 @@ now, with the objects behind it. It only ever touches what the account holder al
 deleted; live messages stay. A mailbox on hold refuses it. Deleting a mailbox removes
 everything at once, retention included.
 
+JMAP uploads (blobs for `Email/import` and attachments for `Email/set`) are not kept in the
+process that received them: they go to an `uploads` namespace in the mailbox's messages pool,
+so the next request may land on any JMAP node behind the load balancer. An upload can be
+referenced for one hour; the worker sweeps expired ones hourly (the namespace only ever holds
+young blobs, so the sweep never walks the pool), and removing a mailbox removes its uploads.
+
 ## Spam routing
 
 If the MTA (Postfix with rspamd, SpamAssassin, …) marks a message as spam, LMTP delivery files

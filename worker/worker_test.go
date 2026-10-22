@@ -340,6 +340,37 @@ func TestLostLeaseStopsTask(t *testing.T) {
 	}
 }
 
+// The upload sweep removes expired JMAP uploads and keeps fresh ones;
+// mailbox removal takes a mailbox's uploads with it.
+func TestUploadSweepAndRemoval(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if err := f.st.Messages.PutUpload(ctx, f.mb.ID, "u-old", []byte("old"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(message.UploadTTL + time.Minute)
+	if err := f.st.Messages.PutUpload(ctx, f.mb.ID, "u-new", []byte("new"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.st.Queue.Enqueue(ctx, TaskUploadSweep, struct{}{}, time.Time{})
+	f.drain(t)
+	if _, _, err := f.st.Messages.GetUpload(ctx, f.mb.ID, "u-old"); err == nil {
+		t.Fatal("expired upload survived the sweep")
+	}
+	if _, _, err := f.st.Messages.GetUpload(ctx, f.mb.ID, "u-new"); err != nil {
+		t.Fatalf("fresh upload swept: %v", err)
+	}
+	acct, _ := f.st.Identity.GetAccountByUsername(ctx, "wido@example.org")
+	_ = f.st.Identity.DeleteAccount(ctx, acct.Value.ID)
+	if err := f.adm.DeleteMailbox(f.adm_, f.mb.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.drain(t)
+	if _, _, err := f.st.Messages.GetUpload(ctx, f.mb.ID, "u-new"); err == nil {
+		t.Fatal("upload survived mailbox removal")
+	}
+}
+
 func TestOrphanSweepAndAuditPurge(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

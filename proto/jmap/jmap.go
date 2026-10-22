@@ -32,8 +32,11 @@ const (
 // Config for the server.
 type Config struct {
 	// BaseURL is the public base, e.g. "https://mail.example.org".
-	BaseURL           string
-	MaxUploadSize     int64
+	BaseURL       string
+	MaxUploadSize int64
+	// Uploads stores uploaded blobs shared by every JMAP node (the message
+	// store). Required.
+	Uploads           Uploads
 	MaxCallsInRequest int
 	MaxObjectsInGet   int
 	MaxObjectsInSet   int
@@ -68,7 +71,6 @@ type Server struct {
 	mb      *mailbox.Service
 	del     *delivery.Service
 	log     *slog.Logger
-	uploads *uploadStore
 	methods map[string]methodFunc
 }
 
@@ -78,7 +80,10 @@ func New(cfg Config, mb *mailbox.Service, del *delivery.Service, log *slog.Logge
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{cfg: cfg, mb: mb, del: del, log: log, uploads: newUploadStore(256 << 20)}
+	if cfg.Uploads == nil {
+		panic("jmap: Config.Uploads is required")
+	}
+	s := &Server{cfg: cfg, mb: mb, del: del, log: log}
 	s.methods = map[string]methodFunc{
 		"Core/echo":          s.coreEcho,
 		"Mailbox/get":        s.mailboxGet,

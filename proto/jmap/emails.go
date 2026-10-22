@@ -2,6 +2,7 @@ package jmap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/mail"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"kittiwake/service/actor"
 	"kittiwake/service/mailbox"
 	"kittiwake/store/index"
+	"kittiwake/store/message"
 )
 
 // keyword <-> IMAP flag mapping.
@@ -905,10 +907,13 @@ func (s *Server) emailImport(ctx context.Context, st *requestState, args map[str
 			continue
 		}
 		blobID, _ := obj["blobId"].(string)
-		blob, ok := s.uploads.get(blobID)
-		if !ok {
-			notCreated[cid] = setError("blobNotFound", "")
-			continue
+		blobData, _, err := s.blob(ctx, mb, blobID)
+		if err != nil {
+			if errors.Is(err, errBlobNotFound) || errors.Is(err, message.ErrNotFound) {
+				notCreated[cid] = setError("blobNotFound", "")
+				continue
+			}
+			return nil, mapErr(err)
 		}
 		mbIDs, _ := obj["mailboxIds"].(map[string]any)
 		var folderID string
@@ -940,7 +945,7 @@ func (s *Server) emailImport(ctx context.Context, st *requestState, args map[str
 			}
 			receivedAt = t
 		}
-		d, err := s.del.Import(ctx, mb, folderID, blob.data, flags, receivedAt)
+		d, err := s.del.Import(ctx, mb, folderID, blobData, flags, receivedAt)
 		if err != nil {
 			notCreated[cid] = mapErr(err).toMap()
 			continue
