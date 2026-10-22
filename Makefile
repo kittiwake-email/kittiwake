@@ -28,3 +28,11 @@ clean:
 # Run everything in one process on the volatile in-memory backend.
 run-dev: build
 	bin/dovetail serve --config examples/dev.yaml --seed-account wido@example.org:devpassword
+
+# Integration tests against a real Ceph cluster (see TESTENV.md).
+integration:
+	go test -tags integration -count=1 -v ./rados/ -run TestLibradosConformance
+
+# End-to-end run of the binary on the lab config.
+e2e: build
+	scripts/e2e.sh examples/lab.yaml

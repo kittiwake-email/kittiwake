@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+func TestMemoryConformance(t *testing.T) {
+	RunConformance(t, func(t *testing.T) IOContext {
+		c := NewMemoryClient()
+		io, _ := c.Pool("p")
+		return io
+	})
+}
+
 func TestMemoryBasicWriteGet(t *testing.T) {
 	c := NewMemoryClient()
 	io, _ := c.Pool("p")

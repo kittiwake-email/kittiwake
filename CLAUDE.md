@@ -20,9 +20,16 @@ make lint             # go vet + gofmt check
 go test ./store/index -run TestFolders          # one test
 go test ./mail -run TestRoundTrip -v
 make run-dev          # whole platform in one process on the memory backend with a seeded account
+make integration      # RADOS conformance suite on a real cluster (lab box, see TESTENV.md)
+make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (lab box)
 bin/dovetail check-config --config examples/dovetail.yaml
 bin/dovetail admin --config <cfg> bootstrap --username root@example.org --password-stdin
 ```
+
+Lab: `TESTENV.md` describes the Ceph test cluster and the `dovetail` box (IPv6-only, no
+GitHub access; rsync the tree to `/root/dovetail`). Real-cluster findings so far: go-ceph
+panics on zero-length WriteFull (handled in rados/librados.go) and assert_version fails with
+ERANGE or EOVERFLOW depending on direction (both map to ErrVersionMismatch).
 
 Never run `go mod tidy` blindly: go-ceph pulls cgo-only packages; `go get <mod>@<ver>` for
 new deps. `go build ./...` must stay green with cgo (librados backend compiles even without a

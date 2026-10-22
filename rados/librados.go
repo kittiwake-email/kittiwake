@@ -273,6 +273,7 @@ func (io *libradosIOContext) Write(ctx context.Context, oid string, tx *WriteTx)
 	defer op.Release()
 	var rmXattrs []string
 	removed := false
+	truncate := false
 	for _, s := range tx.steps {
 		switch s.kind {
 		case txCreateExclusive:
@@ -282,7 +283,14 @@ func (io *libradosIOContext) Write(ctx context.Context, oid string, tx *WriteTx)
 		case txAssertVersion:
 			op.AssertVersion(s.version)
 		case txWriteFull:
-			op.WriteFull(s.data)
+			if len(s.data) == 0 {
+				// go-ceph rejects zero-length write steps; create the
+				// object in the transaction and truncate it afterwards.
+				op.Create(ceph.CreateIdempotent)
+				truncate = true
+			} else {
+				op.WriteFull(s.data)
+			}
 		case txSetXattr:
 			op.SetXattr(s.name, s.data)
 		case txRmXattr:
@@ -300,6 +308,11 @@ func (io *libradosIOContext) Write(ctx context.Context, oid string, tx *WriteTx)
 	}
 	if err := op.Operate(h, oid, ceph.OperationNoFlag); err != nil {
 		return 0, mapErr(err)
+	}
+	if truncate && !removed {
+		if err := h.Truncate(oid, 0); err != nil {
+			return 0, mapErr(err)
+		}
 	}
 	// librados has no rmxattr write-op step; apply separately.
 	for _, n := range rmXattrs {
@@ -488,7 +501,9 @@ func mapErr(err error) error {
 			return ErrNotFound
 		case -int(syscall.EEXIST):
 			return ErrExists
-		case -int(syscall.ERANGE):
+		case -int(syscall.ERANGE), -int(syscall.EOVERFLOW):
+			// assert_version: ERANGE when the object is newer than
+			// asserted, EOVERFLOW when the asserted version is ahead.
 			return ErrVersionMismatch
 		case -int(syscall.EBUSY):
 			return ErrLocked

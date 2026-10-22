@@ -1,0 +1,31 @@
+# Lab config for the test box "dovetail" (2a14:9b80::3143), see TESTENV.md.
+# Ceph client packages come from download.ceph.com; the cluster is reached
+# through /etc/ceph/ceph.conf with the client.dovetail keyring.
+modes: [lmtp, jmap, admin, postfix, imap, pop3, worker]
+ceph:
+  backend: librados
+  config_file: /etc/ceph/ceph.conf
+  user: dovetail
+  keyring: /etc/ceph/ceph.client.dovetail.keyring
+  pools:
+    messages: dovetail.messages
+    attachments: dovetail.attachments
+    index: dovetail.index
+    meta: dovetail.meta
+listen:
+  lmtp:       {address: "[::1]:2424", proxy_protocol: optional}
+  imap:       {address: "[::1]:1143", proxy_protocol: optional}
+  pop3:       {address: "[::1]:1110", proxy_protocol: optional}
+  jmap:       {address: "[::1]:8080", proxy_protocol: optional}
+  admin:      {address: "[::1]:8081", proxy_protocol: off}
+  postfix:    {address: "[::1]:2525", proxy_protocol: off}
+  management: {address: "[::1]:9090", proxy_protocol: off}
+smtp:
+  relay_host: "[::1]:1025"
+session:
+  issuer: http://[::1]:8080
+export:
+  directory: /var/lib/dovetail/exports
+log:
+  level: info
+  format: text
