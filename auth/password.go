@@ -263,3 +263,42 @@ func parseArgon(s string) (argonParams, error) {
 func ConstantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
+
+// NormalizeHash validates a password hash taken from another system (the
+// form it has in that system's database) and returns it with a scheme
+// prefix. Prefixed hashes must use a supported scheme; bare crypt-style
+// hashes get their scheme inferred: "$6$" SHA512-CRYPT, "$5$" SHA256-CRYPT,
+// "$2a$"/"$2b$"/"$2y$" BLF-CRYPT, "$argon2id$" ARGON2ID, "$argon2i$"
+// ARGON2I. The hash is checked for shape, never verified.
+func NormalizeHash(h string) (string, error) {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return "", fmt.Errorf("%w: empty hash", ErrUnknownScheme)
+	}
+	if !strings.HasPrefix(h, "{") {
+		switch {
+		case strings.HasPrefix(h, "$6$"):
+			h = "{SHA512-CRYPT}" + h
+		case strings.HasPrefix(h, "$5$"):
+			h = "{SHA256-CRYPT}" + h
+		case strings.HasPrefix(h, "$2a$"), strings.HasPrefix(h, "$2b$"), strings.HasPrefix(h, "$2y$"):
+			h = "{BLF-CRYPT}" + h
+		case strings.HasPrefix(h, "$argon2id$"):
+			h = "{ARGON2ID}" + h
+		case strings.HasPrefix(h, "$argon2i$"):
+			h = "{ARGON2I}" + h
+		default:
+			return "", fmt.Errorf("%w: cannot infer the scheme of %q; add a {SCHEME} prefix", ErrUnknownScheme, h[:min(len(h), 6)])
+		}
+	}
+	scheme, _, rest := splitScheme(h)
+	if scheme == "" || rest == "" {
+		return "", fmt.Errorf("%w: malformed hash", ErrUnknownScheme)
+	}
+	// A probe verification exercises the parser of the scheme without
+	// revealing anything: unknown schemes and malformed hashes fail here.
+	if _, err := VerifyPassword(h, "probe-only"); err != nil {
+		return "", err
+	}
+	return h, nil
+}

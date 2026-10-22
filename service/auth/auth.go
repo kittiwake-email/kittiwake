@@ -868,6 +868,34 @@ func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind
 	if err != nil {
 		return "", err
 	}
+	return s.storePassword(ctx, acctID, h, kind, comment, expiresAt, "")
+}
+
+// SetPasswordHash stores an existing hash as the account's primary password,
+// as migrations from other platforms need: the hash is taken in the form
+// it has in the old database (Dovecot scheme prefix, or a bare crypt-style
+// hash whose scheme is inferred), validated for shape and never verified.
+// The first successful login upgrades it to argon2id like any legacy hash.
+func (s *Service) SetPasswordHash(ctx context.Context, acctID uuid.UUID, hash, comment string, expiresAt *time.Time) (string, error) {
+	h, err := cryptoauth.NormalizeHash(hash)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", identity.ErrInvalid, err)
+	}
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		comment = "migrated hash"
+	}
+	if expiresAt != nil && !expiresAt.After(s.Now()) {
+		return "", fmt.Errorf("%w: password expiry must be in the future", identity.ErrInvalid)
+	}
+	return s.storePassword(ctx, acctID, h, identity.PasswordPrimary, comment, expiresAt, "hash")
+}
+
+// storePassword adds the hash as a password of the account; a permanent
+// primary replaces the existing permanent primary. source is "" for a
+// password hashed here and "hash" for one taken over from elsewhere.
+func (s *Service) storePassword(ctx context.Context, acctID uuid.UUID, h, kind, comment string, expiresAt *time.Time, source string) (string, error) {
+	now := s.Now().UTC()
 	id := uuid.NewString()
 	a, err := s.ids.UpdateAccount(ctx, acctID, func(a *identity.Account) error {
 		kept := a.Passwords[:0]
@@ -893,7 +921,11 @@ func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind
 	if expiresAt != nil {
 		exp = expiresAt.Format(time.RFC3339)
 	}
-	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-set", Target: kind, Detail: fmt.Sprintf("comment=%q expires=%s", comment, exp), Subject: subjectIfOther(ctx, a.Username)})
+	detail := fmt.Sprintf("comment=%q expires=%s", comment, exp)
+	if source != "" {
+		detail += " source=" + source + " scheme=" + cryptoauth.Scheme(h)
+	}
+	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-set", Target: kind, Detail: detail, Subject: subjectIfOther(ctx, a.Username)})
 	return id, nil
 }
 

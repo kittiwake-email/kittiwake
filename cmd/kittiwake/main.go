@@ -137,9 +137,13 @@ func runCheckConfig(args []string) error {
 	if err != nil {
 		return err
 	}
-	return emit(map[string]any{"ok": true, "modes": cfg.Modes, "backend": cfg.Ceph.Backend, "pools": cfg.Ceph.Pools},
+	form := "per-instance (modes come from --modes, e.g. systemd kittiwake@<mode>)"
+	if len(cfg.Modes) > 0 {
+		form = fmt.Sprintf("one process running %v", cfg.Modes)
+	}
+	return emit(map[string]any{"ok": true, "modes": cfg.Modes, "form": form, "backend": cfg.Ceph.Backend, "pools": cfg.Ceph.Pools},
 		func() {
-			fmt.Printf("config ok: modes=%v backend=%s pools=%+v\n", cfg.Modes, cfg.Ceph.Backend, cfg.Ceph.Pools)
+			fmt.Printf("config ok: %s; backend=%s pools=%+v\n", form, cfg.Ceph.Backend, cfg.Ceph.Pools)
 		})
 }
 
@@ -171,7 +175,7 @@ func runServe(args []string) error {
 		cfg.Listen.Management.Address = *mgmt
 	}
 	if len(cfg.Modes) == 0 {
-		return fmt.Errorf("no modes configured")
+		return fmt.Errorf("no modes: pass --modes <mode,...> (as the systemd instances do) or set modes in the config")
 	}
 	log := app.NewLogger(cfg.Log)
 	client, err := app.Connect(cfg.Ceph)

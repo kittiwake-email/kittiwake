@@ -173,6 +173,7 @@ type HoldRequest struct {
 type Password struct {
 	ID        string     `json:"id"`
 	Kind      string     `json:"kind"`
+	Scheme    string     `json:"scheme"`
 	Comment   string     `json:"comment"`
 	ExpiresAt *time.Time `json:"expires_at"` // nil = never
 	Created   time.Time  `json:"created"`
@@ -217,7 +218,10 @@ type AccountRequest struct {
 
 // PasswordRequest sets a password. Kind is "primary" (default) or "application".
 type PasswordRequest struct {
-	Password  string     `json:"password"`
+	Password string `json:"password,omitempty"`
+	// Hash takes an existing hash as another platform stores it (exactly one
+	// of Password and Hash; primary only).
+	Hash      string     `json:"hash,omitempty"`
 	Kind      string     `json:"kind,omitempty"`
 	Comment   string     `json:"comment,omitempty"`    // required
 	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil = never

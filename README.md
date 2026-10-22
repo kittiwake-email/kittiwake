@@ -697,6 +697,16 @@ optional **expiry** (null = never): a helpdesk can hand out a temporary password
 working by itself, next to the permanent one. Expired passwords are dropped the next time a
 password is set.
 
+**Migrated passwords.** An admin can set the primary password from an existing hash as
+another platform stores it (`kittiwake-admin account set-password <account> --hash-stdin`,
+or the `hash` field of the admin password endpoint): Dovecot-prefixed forms such as
+`{SHA512-CRYPT}$6$...`, `{BLF-CRYPT}$2y$...`, `{SSHA512}...`, `{ARGON2ID}...`, or a bare
+`$6$`, `$5$`, `$2y$` or `$argon2id$` hash whose scheme is inferred. The hash is checked for
+shape, never verified, stored verbatim, audited as a migrated hash, and shown with its
+scheme in the password list; the first successful login upgrades it to argon2id, so a
+migrated user base converges on the current scheme without password resets. Schemes we
+cannot verify (MD5-CRYPT) are refused.
+
 **Lifecycle, by design.** An account belongs to its domain (a domain cannot be removed while
 it still has accounts or aliases) and points at a mailbox; the mailbox owns the data and
 knows nothing about names. Removing an account, or a whole domain, leaves its mailboxes
@@ -960,8 +970,9 @@ belonging to an account with the `admin` role, for operating the platform:
 
 The daemon takes a single YAML file as configuration:
 
-- Mode(s) to run and listen addresses (one listener per mode; JMAP and the admin API are
-  separate listeners and separate code paths)
+- Listen addresses (one listener per mode; JMAP and the admin API are separate listeners
+  and separate code paths); optionally the modes to run in one process, otherwise each
+  systemd instance passes its mode with `--modes`
 - Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
 - Ceph: `config_file` and `options` applied to every cluster connection (clusters
   themselves are registered in the database); pool names only for the memory backend

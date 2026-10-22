@@ -1,8 +1,10 @@
 # Kittiwake configuration. All keys shown with their defaults unless noted.
 # Secrets may be given inline, as "file:/path", or with ${ENV_VAR} substitution.
 
-# Modes this process runs. Split modes over processes to scale each one.
-modes: [lmtp, jmap, admin, postfix]
+# Modes this process runs, for the one-process form (development, small
+# setups). Under systemd each instance passes its mode (kittiwake@<mode>
+# runs `serve --modes <mode>`), so the line is left out there.
+# modes: [lmtp, jmap, admin, postfix]
 
 # Metadata database (MariaDB 10.6+): domains, mailboxes, accounts, aliases,
 # tokens, sessions, the worker queue and the Ceph cluster registry. Create or

@@ -477,3 +477,51 @@ func TestServicesEnforced(t *testing.T) {
 		t.Fatalf("services changes not audited: %v", acts)
 	}
 }
+
+// A hash taken over from another platform works as the primary password
+// and is upgraded to argon2id on the first successful login.
+func TestSetPasswordHash(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for _, bad := range []string{"", "plain-text", "{NOPE}abc", "$1$md5crypt$abc"} {
+		if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, bad, "", nil); !errors.Is(err, identity.ErrInvalid) {
+			t.Fatalf("hash %q accepted: %v", bad, err)
+		}
+	}
+	// Bare crypt hash: scheme inferred, stored prefixed.
+	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := f.ids.GetAccount(ctx, f.acct.ID)
+	var primary identity.Password
+	for _, p := range v.Value.Passwords {
+		if p.Kind == identity.PasswordPrimary {
+			primary = p
+		}
+	}
+	if cryptoauth.Scheme(primary.Hash) != "SHA512-CRYPT" || primary.Comment != "migrated hash" {
+		t.Fatalf("stored: %+v", primary)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "imap", ""); err == nil {
+		t.Fatal("old password still accepted after the hash replaced the primary")
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "migrated-pass-1", "imap", ""); err != nil {
+		t.Fatalf("migrated hash refused: %v", err)
+	}
+	v, _ = f.ids.GetAccount(ctx, f.acct.ID)
+	for _, p := range v.Value.Passwords {
+		if p.Kind == identity.PasswordPrimary && cryptoauth.Scheme(p.Hash) != "ARGON2ID" {
+			t.Fatalf("not rehashed after login: %s", cryptoauth.Scheme(p.Hash))
+		}
+	}
+	// Prefixed Dovecot form, and a plain-text import for the record.
+	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "{SHA512-CRYPT}$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "from dovecot", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "{PLAIN}plain-import-1", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "plain-import-1", "imap", ""); err != nil {
+		t.Fatalf("plain import refused: %v", err)
+	}
+}

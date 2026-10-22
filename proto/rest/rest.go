@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	cryptoauth "kittiwake/auth"
 	"log/slog"
 	"net"
 	"net/http"
@@ -539,6 +540,7 @@ func (s *Server) oauthRevoke(w http.ResponseWriter, r *http.Request) {
 type passwordView struct {
 	ID        string     `json:"id"`
 	Kind      string     `json:"kind"`
+	Scheme    string     `json:"scheme"` // hash scheme, e.g. ARGON2ID or a migrated SHA512-CRYPT
 	Comment   string     `json:"comment"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	Created   time.Time  `json:"created"`
@@ -547,7 +549,7 @@ type passwordView struct {
 func passwordViews(pw []identity.Password) []passwordView {
 	out := make([]passwordView, 0, len(pw))
 	for _, p := range pw {
-		out = append(out, passwordView{ID: p.ID, Kind: p.Kind, Comment: p.Comment, ExpiresAt: p.ExpiresAt, Created: p.Created})
+		out = append(out, passwordView{ID: p.ID, Kind: p.Kind, Scheme: cryptoauth.Scheme(p.Hash), Comment: p.Comment, ExpiresAt: p.ExpiresAt, Created: p.Created})
 	}
 	return out
 }
@@ -660,7 +662,10 @@ func (s *Server) meRevokeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type passwordRequest struct {
-	Password  string     `json:"password"`
+	Password string `json:"password"`
+	// Hash: an existing hash in the form another platform stores it
+	// (migrations); exactly one of password and hash. Admin only, primary only.
+	Hash      string     `json:"hash,omitempty"`
 	Kind      string     `json:"kind,omitempty"`
 	Comment   string     `json:"comment,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"` // nil = never
@@ -1252,14 +1257,28 @@ func (s *Server) accountPassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	id, err := s.auth.SetPassword(r.Context(), a.ID, req.Password, req.Kind, req.Comment, req.ExpiresAt)
-	if err != nil {
-		s.fail(w, r, err)
+	if (req.Password == "") == (req.Hash == "") {
+		s.fail(w, r, badRequest("exactly one of password and hash is required"))
 		return
 	}
 	kind := req.Kind
 	if kind == "" {
 		kind = identity.PasswordPrimary
+	}
+	var id string
+	var err2 error
+	if req.Hash != "" {
+		if kind != identity.PasswordPrimary {
+			s.fail(w, r, badRequest("a migrated hash can only be the primary password"))
+			return
+		}
+		id, err2 = s.auth.SetPasswordHash(r.Context(), a.ID, req.Hash, req.Comment, req.ExpiresAt)
+	} else {
+		id, err2 = s.auth.SetPassword(r.Context(), a.ID, req.Password, req.Kind, req.Comment, req.ExpiresAt)
+	}
+	if err2 != nil {
+		s.fail(w, r, err2)
+		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "kind": kind, "comment": req.Comment, "expires_at": req.ExpiresAt})
 }

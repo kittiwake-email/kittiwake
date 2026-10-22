@@ -62,6 +62,10 @@ log: {level: debug, format: text}
 	if _, err := Parse([]byte("cache: {root: -1s}\n")); err == nil {
 		t.Fatal("expected negative cache TTL error")
 	}
+	// modes is optional (systemd instances pass --modes).
+	if cfg, err := Parse([]byte("database: {dsn: x}\n")); err != nil || len(cfg.Modes) != 0 {
+		t.Fatalf("config without modes: %+v %v", cfg.Modes, err)
+	}
 	// librados needs a database; memory does not.
 	if _, err := Parse([]byte("modes: [imap]\n")); err == nil || !strings.Contains(err.Error(), "database.dsn") {
 		t.Fatalf("expected dsn error, got %v", err)

@@ -392,6 +392,8 @@ func (a *cli) account(args []string) error {
        account list [--domain d] [--prefix p] | get <username|uuid> | delete <id>
        account set <id> [--roles r,..] [--mailbox uuid] [--enable|--disable]
        account password <id> --comment text [--kind primary|application] [--expires YYYY-MM-DD|RFC3339] --password-stdin
+       account set-password <id> --password-stdin|--hash-stdin [--comment text] [--expires YYYY-MM-DD|RFC3339]
+                                   sets the primary password; --hash-stdin takes an existing hash as the old platform stores it
        account password <id> list
        account password <id> expire <password-id> --expires YYYY-MM-DD|RFC3339|never [--comment text]
        account password <id> remove <password-id>
@@ -558,9 +560,9 @@ func (a *cli) account(args []string) error {
 						if p.ExpiresAt != nil {
 							exp = fmtTime(*p.ExpiresAt)
 						}
-						rows = append(rows, []string{p.ID, p.Kind, p.Comment, exp, fmtTime(p.Created)})
+						rows = append(rows, []string{p.ID, p.Kind, p.Scheme, p.Comment, exp, fmtTime(p.Created)})
 					}
-					table([]string{"ID", "KIND", "COMMENT", "EXPIRES", "CREATED"}, rows)
+					table([]string{"ID", "KIND", "SCHEME", "COMMENT", "EXPIRES", "CREATED"}, rows)
 				})
 			case "remove":
 				if len(rest) != 2 {
@@ -625,6 +627,44 @@ func (a *cli) account(args []string) error {
 			return err
 		}
 		ps, err := a.c.SetPassword(a.ctx, id, admin.PasswordRequest{Password: pw, Kind: *kind, Comment: *comment, ExpiresAt: exp})
+		if err != nil {
+			return err
+		}
+		return emit(ps, nil)
+	case "set-password":
+		fs := newFlagSet("account set-password")
+		comment := fs.String("comment", "", "what the password is for (default: \"set by admin\", or \"migrated hash\")")
+		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (default: never)")
+		pwStdin := fs.Bool("password-stdin", false, "read the plain password from stdin")
+		hashStdin := fs.Bool("hash-stdin", false, "read an existing hash from stdin, as stored by the old platform ({SHA512-CRYPT}$6$..., $2y$..., ...)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *pwStdin == *hashStdin {
+			return errors.New("give exactly one of --password-stdin and --hash-stdin")
+		}
+		var exp *time.Time
+		if *expires != "" {
+			t, err := parseDate(*expires)
+			if err != nil {
+				return fmt.Errorf("--expires: %w", err)
+			}
+			exp = &t
+		}
+		secret, err := readPasswordStdin()
+		if err != nil {
+			return err
+		}
+		req := admin.PasswordRequest{Kind: "primary", Comment: *comment, ExpiresAt: exp}
+		if *hashStdin {
+			req.Hash = secret
+		} else {
+			req.Password = secret
+			if req.Comment == "" {
+				req.Comment = "set by admin"
+			}
+		}
+		ps, err := a.c.SetPassword(a.ctx, id, req)
 		if err != nil {
 			return err
 		}

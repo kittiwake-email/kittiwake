@@ -15,7 +15,9 @@ import (
 
 // Config is the whole configuration file.
 type Config struct {
-	// Modes to run in this process: lmtp, imap, pop3, jmap, admin, postfix, worker.
+	// Modes to run in this process: lmtp, imap, pop3, jmap, admin, postfix,
+	// worker. Optional: a systemd instance passes its mode with --modes
+	// instead; the list is for running several modes in one process.
 	Modes []string `yaml:"modes"`
 
 	Ceph     Ceph     `yaml:"ceph"`
