@@ -1,11 +1,12 @@
 # Dovetail build helpers. Requires Go 1.26+ and librados-dev (cgo).
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS  = -X dovetail/app.Version=$(VERSION)
+LDFLAGS  = -X dovetail/app.Version=$(VERSION) -X main.Version=$(VERSION)
 
 .PHONY: build test test-race vet fmt lint clean run-dev
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o bin/dovetail ./cmd/dovetail
+	go build -ldflags '$(LDFLAGS)' -o bin/dovetail-admin ./cmd/dovetail-admin
 
 test:
 	go test ./...
@@ -45,7 +46,8 @@ DEPLOY_SSH   = $(DEPLOY_USER)@$(DEPLOY_ADDR)
 DEPLOY_SCP   = $(DEPLOY_USER)@[$(DEPLOY_ADDR)]
 deploy: build
 	scp bin/dovetail $(DEPLOY_SCP):/usr/local/bin/dovetail.new
-	ssh $(DEPLOY_SSH) 'mv /usr/local/bin/dovetail.new /usr/local/bin/dovetail && chmod 755 /usr/local/bin/dovetail && dovetail -v && (systemctl try-restart dovetail.target 2>/dev/null || true)'
+	scp bin/dovetail-admin $(DEPLOY_SCP):/usr/local/bin/dovetail-admin.new
+	ssh $(DEPLOY_SSH) 'mv /usr/local/bin/dovetail.new /usr/local/bin/dovetail && mv /usr/local/bin/dovetail-admin.new /usr/local/bin/dovetail-admin && chmod 755 /usr/local/bin/dovetail /usr/local/bin/dovetail-admin && dovetail -v && dovetail-admin -v && (systemctl try-restart dovetail.target 2>/dev/null || true)'
 
 deploy-units:
 	ssh $(DEPLOY_SSH) 'install -d /etc/systemd/system /etc/dovetail/instances'

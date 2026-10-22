@@ -1,0 +1,874 @@
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"dovetail/client/admin"
+)
+
+// ---- domain ----
+
+func (a *cli) domain(args []string) error {
+	const u = "domain create <name> [--disabled] | list | get <name> | enable <name> | disable <name> | delete <name>"
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("domain create")
+		disabled := fs.Bool("disabled", false, "create disabled")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		req := admin.DomainRequest{Name: pos[0]}
+		if *disabled {
+			req.Enabled = boolPtr(false)
+		}
+		d, err := a.c.CreateDomain(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return emit(d, nil)
+	case "list":
+		names, err := a.c.ListDomainsAll(a.ctx)
+		if err != nil {
+			return err
+		}
+		if names == nil {
+			names = []string{}
+		}
+		return emit(names, func() {
+			for _, n := range names {
+				fmt.Println(n)
+			}
+		})
+	case "get", "enable", "disable", "delete":
+		pos, _, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		switch args[0] {
+		case "get":
+			d, err := a.c.GetDomain(a.ctx, pos[0])
+			if err != nil {
+				return err
+			}
+			return emit(d, nil)
+		case "delete":
+			if err := a.c.DeleteDomain(a.ctx, pos[0]); err != nil {
+				return err
+			}
+			return ok("deleted " + pos[0])
+		default:
+			d, err := a.c.UpdateDomain(a.ctx, pos[0], admin.DomainRequest{Enabled: boolPtr(args[0] == "enable")})
+			if err != nil {
+				return err
+			}
+			return emit(d, nil)
+		}
+	}
+	return fmt.Errorf("unknown domain subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+// ---- mailbox ----
+
+func quotaFlags(fs *flag.FlagSet) (*int64, *int64, *int64, *int64) {
+	return fs.Int64("soft-bytes", -1, "soft size limit in bytes (0 = default)"),
+		fs.Int64("hard-bytes", -1, "hard size limit in bytes"),
+		fs.Int64("soft-messages", -1, "soft message count limit"),
+		fs.Int64("hard-messages", -1, "hard message count limit")
+}
+
+func quotaFrom(sb, hb, sm, hm int64) *admin.QuotaLimits {
+	if sb < 0 && hb < 0 && sm < 0 && hm < 0 {
+		return nil
+	}
+	q := &admin.QuotaLimits{}
+	if sb >= 0 {
+		q.SoftBytes = sb
+	}
+	if hb >= 0 {
+		q.HardBytes = hb
+	}
+	if sm >= 0 {
+		q.SoftMessages = sm
+	}
+	if hm >= 0 {
+		q.HardMessages = hm
+	}
+	return q
+}
+
+func (a *cli) mailbox(args []string) error {
+	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N] [--disabled]
+       mailbox list | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
+       mailbox set <uuid> [quota flags] [--enable|--disable]     (quota flags replace the whole quota)
+       mailbox hold <uuid> --reason text [--case ref] [--no-delivery] [--allow-send] [--sealed]
+       mailbox release <uuid> [--note text]
+       mailbox export <uuid> [--no-gzip] | exports [--mailbox uuid] | download <name> [--out file]
+       mailbox import <uuid> --archive file.tar[.gz] | --dir /path/to/Maildir`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		fs := newFlagSet("mailbox create")
+		sb, hb, sm, hm := quotaFlags(fs)
+		disabled := fs.Bool("disabled", false, "create disabled")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm)}
+		if *disabled {
+			req.Enabled = boolPtr(false)
+		}
+		m, err := a.c.CreateMailbox(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return emit(m, nil)
+	case "list":
+		items, err := a.c.ListMailboxes(a.ctx)
+		if err != nil {
+			return err
+		}
+		if items == nil {
+			items = []admin.MailboxListItem{}
+		}
+		return emit(items, func() {
+			var rows [][]string
+			for _, m := range items {
+				rows = append(rows, []string{m.ID, fmt.Sprint(m.Enabled), fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
+			}
+			table([]string{"MAILBOX", "ENABLED", "HOLD", "ACCOUNTS"}, rows)
+		})
+	case "holds":
+		items, err := a.c.ListHolds(a.ctx)
+		if err != nil {
+			return err
+		}
+		if items == nil {
+			items = []admin.Mailbox{}
+		}
+		return emit(items, func() {
+			var rows [][]string
+			for _, m := range items {
+				h := m.Hold
+				rows = append(rows, []string{m.ID, h.Reason, h.CaseRef, h.SetBy, fmtTime(h.SetAt), fmt.Sprint(h.Sealed)})
+			}
+			table([]string{"MAILBOX", "REASON", "CASE", "SET BY", "SET AT", "SEALED"}, rows)
+		})
+	case "exports":
+		fs := newFlagSet("mailbox exports")
+		mb := fs.String("mailbox", "", "only this mailbox")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		items, err := a.c.ListExports(a.ctx, *mb)
+		if err != nil {
+			return err
+		}
+		if items == nil {
+			items = []admin.ExportItem{}
+		}
+		return emit(items, func() {
+			var rows [][]string
+			for _, e := range items {
+				msgs := "-"
+				if e.Result != nil {
+					msgs = strconv.Itoa(e.Result.Messages)
+				}
+				rows = append(rows, []string{e.Name, strconv.FormatInt(e.Bytes, 10), msgs, fmtTime(e.Modified)})
+			}
+			table([]string{"NAME", "BYTES", "MESSAGES", "MODIFIED"}, rows)
+		})
+	case "download":
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("mailbox download")
+		out := fs.String("out", "", "output file (default: the export's name in the current directory)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		dst := *out
+		if dst == "" {
+			dst = pos[0]
+		}
+		rc, err := a.c.DownloadExport(a.ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			return err
+		}
+		n, err := io.Copy(f, rc)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		return emit(map[string]any{"file": dst, "bytes": n}, func() { fmt.Printf("saved %s (%d bytes)\n", dst, n) })
+	}
+	// Everything else takes a mailbox uuid first.
+	pos, rest, err := splitArgs(args[1:], 1, u)
+	if err != nil {
+		return err
+	}
+	id := pos[0]
+	switch args[0] {
+	case "inspect":
+		info, err := a.c.InspectMailbox(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		return emit(info, nil)
+	case "set":
+		fs := newFlagSet("mailbox set")
+		sb, hb, sm, hm := quotaFlags(fs)
+		en, dis := enableFlags(fs)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		enabled, err := enabledFrom(*en, *dis)
+		if err != nil {
+			return err
+		}
+		req := admin.MailboxRequest{Enabled: enabled, Quota: quotaFrom(*sb, *hb, *sm, *hm)}
+		if req.Enabled == nil && req.Quota == nil {
+			return errors.New("nothing to change")
+		}
+		m, err := a.c.UpdateMailbox(a.ctx, id, req)
+		if err != nil {
+			return err
+		}
+		return emit(m, nil)
+	case "delete":
+		if err := a.c.DeleteMailbox(a.ctx, id); err != nil {
+			return err
+		}
+		return ok("deleted " + id + " (data removal scheduled)")
+	case "recalc":
+		usage, err := a.c.RecalculateMailbox(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		return emit(usage, nil)
+	case "hold":
+		fs := newFlagSet("mailbox hold")
+		reason := fs.String("reason", "", "reason (required)")
+		caseRef := fs.String("case", "", "case reference")
+		noDelivery := fs.Bool("no-delivery", false, "refuse new deliveries")
+		allowSend := fs.Bool("allow-send", false, "allow sending")
+		sealed := fs.Bool("sealed", false, "deny all user access")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *reason == "" {
+			return errors.New("--reason is required")
+		}
+		m, err := a.c.HoldMailbox(a.ctx, id, admin.HoldRequest{Reason: *reason, CaseRef: *caseRef, AcceptDelivery: boolPtr(!*noDelivery), AllowSend: *allowSend, Sealed: *sealed})
+		if err != nil {
+			return err
+		}
+		return emit(m, nil)
+	case "release":
+		fs := newFlagSet("mailbox release")
+		note := fs.String("note", "", "note for the audit log")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		m, err := a.c.ReleaseMailbox(a.ctx, id, *note)
+		if err != nil {
+			return err
+		}
+		return emit(m, nil)
+	case "export":
+		fs := newFlagSet("mailbox export")
+		noGzip := fs.Bool("no-gzip", false, "plain tar instead of tar.gz")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		s, err := a.c.ScheduleExport(a.ctx, id, !*noGzip)
+		if err != nil {
+			return err
+		}
+		return emit(s, func() {
+			fmt.Printf("export scheduled, task %s; poll: dovetail-admin mailbox exports --mailbox %s\n", s.TaskID, id)
+		})
+	case "import":
+		fs := newFlagSet("mailbox import")
+		archive := fs.String("archive", "", "tar or tar.gz archive")
+		dir := fs.String("dir", "", "Maildir directory (packed and uploaded)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		var sum admin.ImportSummary
+		switch {
+		case *archive != "":
+			f, err := os.Open(*archive)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			sum, err = a.c.ImportMailbox(a.ctx, id, f, isGzipName(*archive))
+			if err != nil {
+				return err
+			}
+		case *dir != "":
+			pr, pw := io.Pipe()
+			go func() { pw.CloseWithError(packMaildir(*dir, pw)) }()
+			var err error
+			sum, err = a.c.ImportMailbox(a.ctx, id, pr, true)
+			_ = pr.Close()
+			if err != nil {
+				return err
+			}
+		default:
+			return errors.New("one of --archive or --dir is required")
+		}
+		return emit(sum, func() {
+			fmt.Printf("imported %d messages (%d bytes) into %d folders, %d errors\n", sum.Messages, sum.Bytes, sum.Folders, len(sum.Errors))
+			for _, e := range sum.Errors {
+				fmt.Println("  error:", e)
+			}
+		})
+	}
+	return fmt.Errorf("unknown mailbox subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+// ---- account ----
+
+func (a *cli) account(args []string) error {
+	const u = `account create --username u@d --mailbox <uuid> [--roles read,write,send] [--password-stdin] [--disabled]
+       account list [--domain d] [--prefix p] | get <username|uuid> | delete <id>
+       account set <id> [--roles r,..] [--mailbox uuid] [--enable|--disable]
+       account password <id> [--kind primary|application] [--comment text] --password-stdin
+       account totp-disable <id> | sessions <id> | revoke-session <id> <session-id>
+       account token create <id> --expires YYYY-MM-DD|RFC3339 --comment text [--roles r,..]
+       account tokens <id> | token delete <id> <token-id>`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		fs := newFlagSet("account create")
+		username := fs.String("username", "", "username (e-mail address)")
+		mailbox := fs.String("mailbox", "", "mailbox uuid")
+		roles := fs.String("roles", "read,write,send", "comma-separated roles")
+		pwStdin := fs.Bool("password-stdin", false, "read the primary password from stdin")
+		disabled := fs.Bool("disabled", false, "create disabled")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *username == "" {
+			return errors.New("--username is required")
+		}
+		req := admin.AccountRequest{Username: *username, MailboxID: *mailbox, Roles: splitList(*roles)}
+		if *pwStdin {
+			pw, err := readPasswordStdin()
+			if err != nil {
+				return err
+			}
+			req.Password = pw
+		}
+		if *disabled {
+			req.Enabled = boolPtr(false)
+		}
+		acct, err := a.c.CreateAccount(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return emit(acct, nil)
+	case "list":
+		fs := newFlagSet("account list")
+		domain := fs.String("domain", "", "only this domain (default: all)")
+		prefix := fs.String("prefix", "", "username prefix")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		domains := []string{*domain}
+		if *domain == "" {
+			var err error
+			if domains, err = a.c.ListDomainsAll(a.ctx); err != nil {
+				return err
+			}
+		}
+		accounts := []admin.Account{}
+		for _, d := range domains {
+			names, err := a.c.ListAccountsAll(a.ctx, d, *prefix)
+			if err != nil {
+				return err
+			}
+			for _, n := range names {
+				acct, err := a.c.GetAccount(a.ctx, n)
+				if err != nil {
+					if admin.IsNotFound(err) {
+						continue
+					}
+					return err
+				}
+				accounts = append(accounts, acct)
+			}
+		}
+		return emit(accounts, func() {
+			var rows [][]string
+			for _, x := range accounts {
+				mb := x.MailboxID
+				if mb == "" || mb == "00000000-0000-0000-0000-000000000000" {
+					mb = "-"
+				}
+				rows = append(rows, []string{x.Username, mb, fmt.Sprint(x.Enabled), strings.Join(x.Roles, ","), fmt.Sprint(x.TOTPEnabled)})
+			}
+			table([]string{"USERNAME", "MAILBOX", "ENABLED", "ROLES", "TOTP"}, rows)
+		})
+	case "token":
+		return a.accountToken(args[1:], u)
+	}
+	pos, rest, err := splitArgs(args[1:], 1, u)
+	if err != nil {
+		return err
+	}
+	id := pos[0]
+	switch args[0] {
+	case "get":
+		acct, err := a.c.GetAccount(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		return emit(acct, nil)
+	case "set":
+		fs := newFlagSet("account set")
+		roles := fs.String("roles", "", "comma-separated roles")
+		mailbox := fs.String("mailbox", "", "move to this mailbox uuid")
+		en, dis := enableFlags(fs)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		enabled, err := enabledFrom(*en, *dis)
+		if err != nil {
+			return err
+		}
+		req := admin.AccountRequest{Roles: splitList(*roles), MailboxID: *mailbox, Enabled: enabled}
+		if req.Roles == nil && req.MailboxID == "" && req.Enabled == nil {
+			return errors.New("nothing to change")
+		}
+		acct, err := a.c.UpdateAccount(a.ctx, id, req)
+		if err != nil {
+			return err
+		}
+		return emit(acct, nil)
+	case "delete":
+		if err := a.c.DeleteAccount(a.ctx, id); err != nil {
+			return err
+		}
+		return ok("deleted " + id)
+	case "password":
+		fs := newFlagSet("account password")
+		kind := fs.String("kind", "primary", "primary or application")
+		comment := fs.String("comment", "", "comment (application passwords)")
+		pwStdin := fs.Bool("password-stdin", false, "read the password from stdin (required)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if !*pwStdin {
+			return errors.New("--password-stdin is required (passwords are never taken from arguments)")
+		}
+		pw, err := readPasswordStdin()
+		if err != nil {
+			return err
+		}
+		ps, err := a.c.SetPassword(a.ctx, id, admin.PasswordRequest{Password: pw, Kind: *kind, Comment: *comment})
+		if err != nil {
+			return err
+		}
+		return emit(ps, nil)
+	case "totp-disable":
+		if err := a.c.DisableTOTP(a.ctx, id); err != nil {
+			return err
+		}
+		return ok("totp disabled for " + id)
+	case "sessions":
+		list, err := a.c.ListSessions(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		if list == nil {
+			list = []admin.Session{}
+		}
+		return emit(list, func() {
+			var rows [][]string
+			for _, s := range list {
+				rows = append(rows, []string{s.ID, s.Client, strings.Join(s.Roles, ","), fmtTime(s.Created), fmtTime(s.LastUsed), s.LastIP, fmtTime(s.ExpiresAt)})
+			}
+			table([]string{"SESSION", "CLIENT", "ROLES", "CREATED", "LAST USED", "LAST IP", "EXPIRES"}, rows)
+		})
+	case "revoke-session":
+		if len(rest) != 1 {
+			return errors.New("usage: account revoke-session <id> <session-id>")
+		}
+		if err := a.c.RevokeSession(a.ctx, id, rest[0]); err != nil {
+			return err
+		}
+		return ok("revoked session " + rest[0])
+	case "tokens":
+		list, err := a.c.ListTokens(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		if list == nil {
+			list = []admin.Token{}
+		}
+		return emit(list, func() {
+			var rows [][]string
+			for _, t := range list {
+				rows = append(rows, []string{t.ID, t.Comment, strings.Join(t.Roles, ","), fmtTime(t.ExpiresAt), fmtTime(t.LastUsed)})
+			}
+			table([]string{"TOKEN", "COMMENT", "ROLES", "EXPIRES", "LAST USED"}, rows)
+		})
+	}
+	return fmt.Errorf("unknown account subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+func (a *cli) accountToken(args []string, u string) error {
+	if len(args) == 0 {
+		return errors.New("usage: account token create <id> ... | token delete <id> <token-id>")
+	}
+	switch args[0] {
+	case "create":
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("account token create")
+		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (required)")
+		comment := fs.String("comment", "", "purpose of the token (required)")
+		roles := fs.String("roles", "", "comma-separated roles (default: the account's)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *expires == "" || *comment == "" {
+			return errors.New("--expires and --comment are required")
+		}
+		exp, err := parseDate(*expires)
+		if err != nil {
+			return fmt.Errorf("--expires: %w", err)
+		}
+		tk, err := a.c.CreateToken(a.ctx, pos[0], admin.TokenRequest{Roles: splitList(*roles), ExpiresAt: exp, Comment: *comment})
+		if err != nil {
+			return err
+		}
+		return emit(tk, func() {
+			fmt.Printf("token id:     %s (expires %s)\n", tk.Token.ID, tk.Token.ExpiresAt.Format(time.RFC3339))
+			fmt.Printf("token secret: %s\n", tk.Secret)
+			fmt.Println("The secret is shown once.")
+		})
+	case "delete":
+		if len(args) != 3 {
+			return errors.New("usage: account token delete <id> <token-id>")
+		}
+		if err := a.c.DeleteToken(a.ctx, args[1], args[2]); err != nil {
+			return err
+		}
+		return ok("deleted token " + args[2])
+	}
+	return fmt.Errorf("unknown token subcommand %q", args[0])
+}
+
+// ---- alias ----
+
+func parseDestinations(s string) []admin.Destination {
+	var out []admin.Destination
+	for _, d := range splitList(s) {
+		if strings.Contains(d, "@") {
+			out = append(out, admin.Destination{Address: d})
+		} else {
+			out = append(out, admin.Destination{MailboxID: d})
+		}
+	}
+	return out
+}
+
+func (a *cli) alias(args []string) error {
+	const u = `alias create <address> --to <uuid|address>[,...] [--disabled]
+       alias list --domain d | get <address> | delete <address>
+       alias set <address> [--to ...] [--enable|--disable]`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		return nil
+	}
+	if args[0] == "list" {
+		fs := newFlagSet("alias list")
+		domain := fs.String("domain", "", "domain (required)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *domain == "" {
+			return errors.New("--domain is required")
+		}
+		names, err := a.c.ListAliasesAll(a.ctx, *domain)
+		if err != nil {
+			return err
+		}
+		if names == nil {
+			names = []string{}
+		}
+		return emit(names, func() {
+			for _, n := range names {
+				fmt.Println(n)
+			}
+		})
+	}
+	pos, rest, err := splitArgs(args[1:], 1, u)
+	if err != nil {
+		return err
+	}
+	addr := pos[0]
+	switch args[0] {
+	case "create":
+		fs := newFlagSet("alias create")
+		to := fs.String("to", "", "destinations: mailbox uuids or addresses, comma-separated (required)")
+		disabled := fs.Bool("disabled", false, "create disabled")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *to == "" {
+			return errors.New("--to is required")
+		}
+		req := admin.AliasRequest{Address: addr, Destinations: parseDestinations(*to)}
+		if *disabled {
+			req.Enabled = boolPtr(false)
+		}
+		al, err := a.c.CreateAlias(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return emit(al, nil)
+	case "get":
+		al, err := a.c.GetAlias(a.ctx, addr)
+		if err != nil {
+			return err
+		}
+		return emit(al, nil)
+	case "set":
+		fs := newFlagSet("alias set")
+		to := fs.String("to", "", "replace destinations")
+		en, dis := enableFlags(fs)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		enabled, err := enabledFrom(*en, *dis)
+		if err != nil {
+			return err
+		}
+		req := admin.AliasRequest{Enabled: enabled, Destinations: parseDestinations(*to)}
+		if req.Enabled == nil && req.Destinations == nil {
+			return errors.New("nothing to change")
+		}
+		al, err := a.c.UpdateAlias(a.ctx, addr, req)
+		if err != nil {
+			return err
+		}
+		return emit(al, nil)
+	case "delete":
+		if err := a.c.DeleteAlias(a.ctx, addr); err != nil {
+			return err
+		}
+		return ok("deleted " + addr)
+	}
+	return fmt.Errorf("unknown alias subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+// ---- audit ----
+
+func (a *cli) audit(args []string) error {
+	fs := newFlagSet("audit")
+	mailbox := fs.String("mailbox", "", "mailbox uuid (default: the admin log)")
+	account := fs.String("account", "", "username")
+	action := fs.String("action", "", "action, e.g. login-failed")
+	ip := fs.String("ip", "", "client IP")
+	from := fs.String("from", "", "first day YYYY-MM-DD (default today)")
+	to := fs.String("to", "", "last day YYYY-MM-DD (default: --from)")
+	limit := fs.Int("limit", 100, "records per page")
+	after := fs.String("after", "", "cursor from a previous page")
+	all := fs.Bool("all", false, "follow cursors and return everything")
+	if len(args) > 0 && args[0] == "help" {
+		fs.Usage()
+		return nil
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	q := admin.AuditQuery{Mailbox: *mailbox, Account: *account, Action: *action, ClientIP: *ip, Limit: *limit, After: *after}
+	var err error
+	if *from != "" {
+		if q.From, err = parseDate(*from); err != nil {
+			return fmt.Errorf("--from: %w", err)
+		}
+	}
+	if *to != "" {
+		if q.To, err = parseDate(*to); err != nil {
+			return fmt.Errorf("--to: %w", err)
+		}
+	}
+	var items []admin.AuditRecord
+	next := ""
+	if *all {
+		items, err = a.c.AuditAll(a.ctx, q)
+	} else {
+		var p admin.AuditPage
+		p, err = a.c.Audit(a.ctx, q)
+		items, next = p.Items, p.Next
+	}
+	if err != nil {
+		return err
+	}
+	if items == nil {
+		items = []admin.AuditRecord{}
+	}
+	return emit(map[string]any{"items": items, "next": next}, func() {
+		var rows [][]string
+		for _, r := range items {
+			actor := r.Account
+			if r.Admin != "" {
+				actor = r.Admin + " for " + r.Account
+			}
+			rows = append(rows, []string{r.Time.Format(time.RFC3339), r.Protocol, actor, r.ClientIP, r.Action, r.Target, r.Result, r.Detail})
+		}
+		table([]string{"TIME", "PROTO", "ACTOR", "CLIENT IP", "ACTION", "TARGET", "RESULT", "DETAIL"}, rows)
+		if next != "" {
+			fmt.Printf("more: --after %s\n", next)
+		}
+	})
+}
+
+// ---- queue / keys / identity / openapi ----
+
+func (a *cli) queue(args []string) error {
+	const u = "queue stats <type> | dead <type> | retry <type> <task-id>"
+	if len(args) < 2 || args[0] == "help" {
+		return errors.New("usage: dovetail-admin " + u)
+	}
+	typ := args[1]
+	switch args[0] {
+	case "stats":
+		st, err := a.c.QueueStats(a.ctx, typ)
+		if err != nil {
+			return err
+		}
+		return emit(st, nil)
+	case "dead":
+		list, err := a.c.QueueDead(a.ctx, typ)
+		if err != nil {
+			return err
+		}
+		if list == nil {
+			list = []admin.Task{}
+		}
+		return emit(list, func() {
+			var rows [][]string
+			for _, t := range list {
+				rows = append(rows, []string{t.ID, strconv.Itoa(t.Attempts), fmtTime(t.Created), t.LastError})
+			}
+			table([]string{"TASK", "ATTEMPTS", "CREATED", "LAST ERROR"}, rows)
+		})
+	case "retry":
+		if len(args) != 3 {
+			return errors.New("usage: dovetail-admin " + u)
+		}
+		if err := a.c.QueueRetry(a.ctx, typ, args[2]); err != nil {
+			return err
+		}
+		return ok("requeued " + args[2])
+	}
+	return fmt.Errorf("unknown queue subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+func (a *cli) keys(args []string) error {
+	if len(args) != 1 || args[0] != "rotate" {
+		return errors.New("usage: dovetail-admin keys rotate")
+	}
+	if err := a.c.RotateKeys(a.ctx); err != nil {
+		return err
+	}
+	return ok("signing keys rotated")
+}
+
+func (a *cli) identity(args []string) error {
+	const u = "identity export [--out file] | import <file>"
+	if len(args) == 0 || args[0] == "help" {
+		return errors.New("usage: dovetail-admin " + u)
+	}
+	switch args[0] {
+	case "export":
+		fs := newFlagSet("identity export")
+		out := fs.String("out", "", "write to this file instead of stdout")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		dump, err := a.c.ExportIdentity(a.ctx)
+		if err != nil {
+			return err
+		}
+		if *out == "" {
+			_, err = os.Stdout.Write(dump)
+			return err
+		}
+		if err := os.WriteFile(*out, dump, 0o600); err != nil {
+			return err
+		}
+		return ok("wrote " + *out)
+	case "import":
+		if len(args) != 2 {
+			return errors.New("usage: dovetail-admin " + u)
+		}
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			return err
+		}
+		summary, err := a.c.ImportIdentity(a.ctx, data)
+		if err != nil {
+			return err
+		}
+		return emit(map[string]string{"summary": summary}, func() { fmt.Println(summary) })
+	}
+	return fmt.Errorf("unknown identity subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+func (a *cli) openapi(args []string) error {
+	fs := newFlagSet("openapi")
+	out := fs.String("out", "", "write to this file instead of stdout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	spec, err := a.c.OpenAPI(a.ctx)
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		_, err = os.Stdout.Write(spec)
+		return err
+	}
+	if err := os.WriteFile(*out, spec, 0o644); err != nil {
+		return err
+	}
+	return ok("wrote " + *out)
+}
