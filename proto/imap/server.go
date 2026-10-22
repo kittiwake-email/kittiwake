@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -79,7 +80,26 @@ func New(cfg Config, authSvc *authsvc.Service, mb *mailbox.Service, del *deliver
 
 type slogLogger struct{ l *slog.Logger }
 
-func (s slogLogger) Printf(format string, v ...any) { s.l.Warn(fmt.Sprintf(format, v...)) }
+// Printf routes go-imap's log lines to slog. A peer that hangs up (reset,
+// broken pipe) is normal traffic (port scanners, connect-only health
+// checks, clients losing their network) and goes to debug, not warn.
+func (s slogLogger) Printf(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	if peerHungUp(msg) {
+		s.l.Debug(msg)
+		return
+	}
+	s.l.Warn(msg)
+}
+
+func peerHungUp(msg string) bool {
+	for _, m := range []string{"connection reset by peer", "broken pipe", "use of closed network connection", "i/o timeout"} {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // Serve accepts connections on l.
 func (s *Server) Serve(l net.Listener) error {
