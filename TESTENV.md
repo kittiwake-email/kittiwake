@@ -54,3 +54,17 @@ make deploy-units           # (re)install unit files, env files, example config
 ssh root@2a14:9b80::3143 'systemctl status dovetail.target; journalctl -u "dovetail@*" -f'
 ssh root@2a14:9b80::3143 'cd /root/dovetail && E2E_ATTACH=1 BIN=/usr/local/bin/dovetail scripts/e2e.sh /etc/dovetail/dovetail.yaml'
 ```
+
+## Administration on the box
+
+`/usr/local/bin/dovetail-admin` talks to the admin listener; its token is in
+`/root/.config/dovetail/admin.yaml` (minted with `dovetail admin -c /etc/dovetail/dovetail.yaml
+token --account <admin>`). The OpenAPI document of the running version is at
+`http://[::1]:8081/openapi.yaml`.
+
+```
+dovetail-admin status
+dovetail-admin mailbox list
+dovetail-admin -o json account list --domain lab.example
+dovetail-admin audit --mailbox <uuid> --all
+```
