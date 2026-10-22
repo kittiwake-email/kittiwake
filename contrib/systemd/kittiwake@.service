@@ -6,7 +6,7 @@
 # port for metrics) come from /etc/kittiwake/instances/<mode>.env.
 [Unit]
 Description=Kittiwake mail platform (%i)
-Documentation=https://github.com/wido/kittiwake
+Documentation=https://github.com/kittiwake-email/kittiwake
 After=network-online.target
 Wants=network-online.target
 PartOf=kittiwake.target
