@@ -114,6 +114,7 @@ func quotaFrom(sb, hb, sm, hm int64) *admin.QuotaLimits {
 func (a *cli) mailbox(args []string) error {
 	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N]
        mailbox list [--orphaned] | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
+       mailbox empty <uuid>                    messages to retention, folders without a role removed (fresh sync)
        mailbox set <uuid> [quota flags]                            (quota flags replace the whole quota)
        mailbox suspend <uuid> --reason text    soft: LMTP 450, the MTA queues; users locked out
        mailbox disable <uuid> --reason text    hard: LMTP 550, rejected at SMTP time; users locked out
@@ -296,6 +297,12 @@ func (a *cli) mailbox(args []string) error {
 			return err
 		}
 		return ok("deleted " + id + " (data removal scheduled)")
+	case "empty":
+		msgs, folders, err := a.c.EmptyMailbox(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		return emit(map[string]int{"messages": msgs, "folders": folders}, func() { fmt.Printf("emptied: %d messages to retention, %d folders removed\n", msgs, folders) })
 	case "recalc":
 		usage, err := a.c.RecalculateMailbox(a.ctx, id)
 		if err != nil {
@@ -391,12 +398,9 @@ func (a *cli) account(args []string) error {
 	const u = `account create --username u@d --mailbox <uuid> [--roles read,write,send] [--password-stdin] [--disabled]
        account list [--domain d] [--prefix p] | get <username|uuid> | delete <id>
        account set <id> [--roles r,..] [--mailbox uuid] [--enable|--disable]
-       account password <id> --comment text [--kind primary|application] [--expires YYYY-MM-DD|RFC3339] --password-stdin
-       account set-password <id> --password-stdin|--hash-stdin [--comment text] [--expires YYYY-MM-DD|RFC3339]
-                                   sets the primary password; --hash-stdin takes an existing hash as the old platform stores it
-       account password <id> list
-       account password <id> expire <password-id> --expires YYYY-MM-DD|RFC3339|never [--comment text]
-       account password <id> remove <password-id>
+       account password <id> set --password-stdin [--kind primary|application] [--comment text] [--expires DATE] [--plain]
+                                   stdin starting with { or $ is stored as an existing hash ({SHA512-CRYPT}$6$..., $2y$..., {PLAIN}text)
+       account password <id> list | expire <password-id> --expires DATE|never [--comment text] | remove <password-id>
                                               (an expiring primary is added as a temporary password; the permanent one keeps working)
        account totp-disable <id> | sessions <id> | revoke-session <id> <session-id>
        account token create <id> --expires YYYY-MM-DD|RFC3339 --comment text [--roles r,..]
@@ -543,132 +547,109 @@ func (a *cli) account(args []string) error {
 		}
 		return ok("deleted " + id)
 	case "password":
-		if len(rest) > 0 {
-			switch rest[0] {
-			case "list":
-				list, err := a.c.ListPasswords(a.ctx, id)
+		const pu = `account password <account> set --password-stdin [--kind primary|application] [--comment text] [--expires DATE] [--plain]
+       account password <account> list
+       account password <account> expire <password-id> --expires DATE|never [--comment text]
+       account password <account> remove <password-id>`
+		if len(rest) == 0 || rest[0] == "help" {
+			fmt.Println("usage: kittiwake-admin " + pu)
+			return nil
+		}
+		switch rest[0] {
+		case "set":
+			fs := newFlagSet("account password set")
+			kind := fs.String("kind", "primary", "primary or application")
+			comment := fs.String("comment", "", "what the password is for (default: \"set by admin\", or \"migrated hash\" for a hash)")
+			expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (default: never)")
+			pwStdin := fs.Bool("password-stdin", false, "read the password from stdin (required); a value starting with { or $ is taken as an existing hash ({SHA512-CRYPT}$6$..., $2y$..., {PLAIN}text)")
+			plain := fs.Bool("plain", false, "treat the stdin value as a plain password even if it starts with { or $")
+			if err := fs.Parse(rest[1:]); err != nil {
+				return err
+			}
+			if !*pwStdin {
+				return errors.New("--password-stdin is required (passwords are never taken from arguments)")
+			}
+			var exp *time.Time
+			if *expires != "" {
+				t, err := parseDate(*expires)
 				if err != nil {
-					return err
+					return fmt.Errorf("--expires: %w", err)
 				}
-				if list == nil {
-					list = []admin.Password{}
+				exp = &t
+			}
+			secret, err := readPasswordStdin()
+			if err != nil {
+				return err
+			}
+			req := admin.PasswordRequest{Kind: *kind, Comment: *comment, ExpiresAt: exp}
+			if !*plain && (strings.HasPrefix(secret, "{") || strings.HasPrefix(secret, "$")) {
+				req.Hash = secret
+			} else {
+				req.Password = secret
+				if req.Comment == "" {
+					req.Comment = "set by admin"
 				}
-				return emit(list, func() {
-					var rows [][]string
-					for _, p := range list {
-						exp := "never"
-						if p.ExpiresAt != nil {
-							exp = fmtTime(*p.ExpiresAt)
-						}
-						rows = append(rows, []string{p.ID, p.Kind, p.Scheme, p.Comment, exp, fmtTime(p.Created)})
+			}
+			ps, err := a.c.SetPassword(a.ctx, id, req)
+			if err != nil {
+				return err
+			}
+			return emit(ps, nil)
+		case "list":
+			list, err := a.c.ListPasswords(a.ctx, id)
+			if err != nil {
+				return err
+			}
+			if list == nil {
+				list = []admin.Password{}
+			}
+			return emit(list, func() {
+				var rows [][]string
+				for _, p := range list {
+					exp := "never"
+					if p.ExpiresAt != nil {
+						exp = fmtTime(*p.ExpiresAt)
 					}
-					table([]string{"ID", "KIND", "SCHEME", "COMMENT", "EXPIRES", "CREATED"}, rows)
-				})
-			case "remove":
-				if len(rest) != 2 {
-					return errors.New("usage: kittiwake-admin account password <account> remove <password-id>")
+					rows = append(rows, []string{p.ID, p.Kind, p.Scheme, p.Comment, exp, fmtTime(p.Created)})
 				}
-				if err := a.c.DeletePassword(a.ctx, id, rest[1]); err != nil {
-					return err
-				}
-				return ok("removed password " + rest[1])
-			case "expire":
-				fs := newFlagSet("account password expire")
-				expires := fs.String("expires", "", "YYYY-MM-DD, RFC3339 or \"never\" (required)")
-				comment := fs.String("comment", "", "new comment (optional)")
-				if len(rest) < 2 {
-					return errors.New("usage: kittiwake-admin account password <account> expire <password-id> --expires DATE|never [--comment text]")
-				}
-				if err := fs.Parse(rest[2:]); err != nil {
-					return err
-				}
-				if *expires == "" {
-					return errors.New("--expires is required (a date, or \"never\")")
-				}
-				req := admin.PasswordUpdate{Comment: *comment}
-				if *expires != "never" {
-					t, err := parseDate(*expires)
-					if err != nil {
-						return fmt.Errorf("--expires: %w", err)
-					}
-					req.ExpiresAt = &t
-				}
-				p, err := a.c.UpdatePassword(a.ctx, id, rest[1], req)
+				table([]string{"ID", "KIND", "SCHEME", "COMMENT", "EXPIRES", "CREATED"}, rows)
+			})
+		case "remove":
+			if len(rest) != 2 {
+				return errors.New("usage: kittiwake-admin account password <account> remove <password-id>")
+			}
+			if err := a.c.DeletePassword(a.ctx, id, rest[1]); err != nil {
+				return err
+			}
+			return ok("removed password " + rest[1])
+		case "expire":
+			fs := newFlagSet("account password expire")
+			expires := fs.String("expires", "", "YYYY-MM-DD, RFC3339 or \"never\" (required)")
+			comment := fs.String("comment", "", "new comment (optional)")
+			if len(rest) < 2 {
+				return errors.New("usage: kittiwake-admin account password <account> expire <password-id> --expires DATE|never [--comment text]")
+			}
+			if err := fs.Parse(rest[2:]); err != nil {
+				return err
+			}
+			if *expires == "" {
+				return errors.New("--expires is required (a date, or \"never\")")
+			}
+			req := admin.PasswordUpdate{Comment: *comment}
+			if *expires != "never" {
+				t, err := parseDate(*expires)
 				if err != nil {
-					return err
+					return fmt.Errorf("--expires: %w", err)
 				}
-				return emit(p, nil)
+				req.ExpiresAt = &t
 			}
-		}
-		fs := newFlagSet("account password")
-		kind := fs.String("kind", "primary", "primary or application")
-		comment := fs.String("comment", "", "what the password is for (required)")
-		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (default: never)")
-		pwStdin := fs.Bool("password-stdin", false, "read the password from stdin (required)")
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		if !*pwStdin {
-			return errors.New("--password-stdin is required (passwords are never taken from arguments)")
-		}
-		if *comment == "" {
-			return errors.New("--comment is required")
-		}
-		var exp *time.Time
-		if *expires != "" {
-			t, err := parseDate(*expires)
+			p, err := a.c.UpdatePassword(a.ctx, id, rest[1], req)
 			if err != nil {
-				return fmt.Errorf("--expires: %w", err)
+				return err
 			}
-			exp = &t
+			return emit(p, nil)
 		}
-		pw, err := readPasswordStdin()
-		if err != nil {
-			return err
-		}
-		ps, err := a.c.SetPassword(a.ctx, id, admin.PasswordRequest{Password: pw, Kind: *kind, Comment: *comment, ExpiresAt: exp})
-		if err != nil {
-			return err
-		}
-		return emit(ps, nil)
-	case "set-password":
-		fs := newFlagSet("account set-password")
-		comment := fs.String("comment", "", "what the password is for (default: \"set by admin\", or \"migrated hash\")")
-		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (default: never)")
-		pwStdin := fs.Bool("password-stdin", false, "read the plain password from stdin")
-		hashStdin := fs.Bool("hash-stdin", false, "read an existing hash from stdin, as stored by the old platform ({SHA512-CRYPT}$6$..., $2y$..., ...)")
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		if *pwStdin == *hashStdin {
-			return errors.New("give exactly one of --password-stdin and --hash-stdin")
-		}
-		var exp *time.Time
-		if *expires != "" {
-			t, err := parseDate(*expires)
-			if err != nil {
-				return fmt.Errorf("--expires: %w", err)
-			}
-			exp = &t
-		}
-		secret, err := readPasswordStdin()
-		if err != nil {
-			return err
-		}
-		req := admin.PasswordRequest{Kind: "primary", Comment: *comment, ExpiresAt: exp}
-		if *hashStdin {
-			req.Hash = secret
-		} else {
-			req.Password = secret
-			if req.Comment == "" {
-				req.Comment = "set by admin"
-			}
-		}
-		ps, err := a.c.SetPassword(a.ctx, id, req)
-		if err != nil {
-			return err
-		}
-		return emit(ps, nil)
+		return fmt.Errorf("unknown password subcommand %q\nusage: kittiwake-admin %s", rest[0], pu)
 	case "totp-disable":
 		if err := a.c.DisableTOTP(a.ctx, id); err != nil {
 			return err

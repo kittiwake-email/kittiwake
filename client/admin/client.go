@@ -619,6 +619,17 @@ func (c *Client) ImportIdentity(ctx context.Context, dump []byte) (string, error
 	return out.Summary, c.do(ctx, http.MethodPost, "/v1/admin/import", nil, bytes.NewReader(dump), "application/json", &out)
 }
 
+// EmptyMailbox removes every message (into retention) and the folders
+// without a role; the mailbox and its accounts stay.
+func (c *Client) EmptyMailbox(ctx context.Context, id string) (messages, folders int, err error) {
+	var out struct {
+		Messages int `json:"messages"`
+		Folders  int `json:"folders"`
+	}
+	err = c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/empty", nil, nil, "", &out)
+	return out.Messages, out.Folders, err
+}
+
 // ---- clusters ----
 
 // AddCluster registers a Ceph cluster; the server verifies it and records its fsid.

@@ -876,10 +876,16 @@ func (s *Service) SetPassword(ctx context.Context, acctID uuid.UUID, plain, kind
 // it has in the old database (Dovecot scheme prefix, or a bare crypt-style
 // hash whose scheme is inferred), validated for shape and never verified.
 // The first successful login upgrades it to argon2id like any legacy hash.
-func (s *Service) SetPasswordHash(ctx context.Context, acctID uuid.UUID, hash, comment string, expiresAt *time.Time) (string, error) {
+func (s *Service) SetPasswordHash(ctx context.Context, acctID uuid.UUID, hash, kind, comment string, expiresAt *time.Time) (string, error) {
 	h, err := cryptoauth.NormalizeHash(hash)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", identity.ErrInvalid, err)
+	}
+	if kind == "" {
+		kind = identity.PasswordPrimary
+	}
+	if kind != identity.PasswordPrimary && kind != identity.PasswordApplication {
+		return "", fmt.Errorf("%w: password kind", identity.ErrInvalid)
 	}
 	comment = strings.TrimSpace(comment)
 	if comment == "" {
@@ -888,7 +894,7 @@ func (s *Service) SetPasswordHash(ctx context.Context, acctID uuid.UUID, hash, c
 	if expiresAt != nil && !expiresAt.After(s.Now()) {
 		return "", fmt.Errorf("%w: password expiry must be in the future", identity.ErrInvalid)
 	}
-	return s.storePassword(ctx, acctID, h, identity.PasswordPrimary, comment, expiresAt, "hash")
+	return s.storePassword(ctx, acctID, h, kind, comment, expiresAt, "hash")
 }
 
 // storePassword adds the hash as a password of the account; a permanent

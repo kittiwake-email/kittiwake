@@ -484,12 +484,12 @@ func TestSetPasswordHash(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	for _, bad := range []string{"", "plain-text", "{NOPE}abc", "$1$md5crypt$abc"} {
-		if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, bad, "", nil); !errors.Is(err, identity.ErrInvalid) {
+		if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, bad, "", "", nil); !errors.Is(err, identity.ErrInvalid) {
 			t.Fatalf("hash %q accepted: %v", bad, err)
 		}
 	}
 	// Bare crypt hash: scheme inferred, stored prefixed.
-	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "", nil); err != nil {
+	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	v, _ := f.ids.GetAccount(ctx, f.acct.ID)
@@ -515,10 +515,10 @@ func TestSetPasswordHash(t *testing.T) {
 		}
 	}
 	// Prefixed Dovecot form, and a plain-text import for the record.
-	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "{SHA512-CRYPT}$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "from dovecot", nil); err != nil {
+	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "{SHA512-CRYPT}$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "", "from dovecot", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "{PLAIN}plain-import-1", "", nil); err != nil {
+	if _, err := f.svc.SetPasswordHash(ctx, f.acct.ID, "{PLAIN}plain-import-1", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "plain-import-1", "imap", ""); err != nil {

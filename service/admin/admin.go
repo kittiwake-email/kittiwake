@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -329,6 +330,65 @@ func (s *Service) RecalculateQuota(ctx context.Context, id uuid.UUID) (index.Usa
 	}
 	s.ok(ctx, id, "quota-recalc", id.String(), fmt.Sprintf("%+v", root.Usage))
 	return root.Usage, nil
+}
+
+// EmptyMailbox removes every message of the mailbox (into retention, so
+// the worker purges them) and deletes the folders that have no role, for
+// a fresh start such as a new sync. The mailbox, its accounts, role
+// folders and UIDVALIDITY stay.
+func (s *Service) EmptyMailbox(ctx context.Context, id uuid.UUID) (messages, folders int, err error) {
+	if err := s.authorize(ctx, "mailbox-empty", id.String()); err != nil {
+		return 0, 0, err
+	}
+	if v, err := s.ids.GetMailbox(ctx, id); err != nil {
+		return 0, 0, s.fail(ctx, id, "mailbox-empty", id.String(), err)
+	} else if v.Value.Hold != nil {
+		return 0, 0, s.fail(ctx, id, "mailbox-empty", id.String(), fmt.Errorf("%w: mailbox is on legal hold", ErrForbidden))
+	}
+	root, err := s.idx.GetRoot(ctx, id)
+	if err != nil {
+		if errors.Is(err, index.ErrNotFound) {
+			return 0, 0, nil // never used: nothing to empty
+		}
+		return 0, 0, s.fail(ctx, id, "mailbox-empty", id.String(), err)
+	}
+	now := s.Now()
+	for _, f := range root.Folders {
+		for {
+			recs, _, err := s.idx.ListFolder(ctx, id, f.ID, 0, 500)
+			if err != nil {
+				return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
+			}
+			if len(recs) == 0 {
+				break
+			}
+			for _, r := range recs {
+				if _, err := s.idx.Remove(ctx, id, f.ID, r.UID, "admin-empty", now); err != nil {
+					return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
+				}
+				messages++
+			}
+		}
+	}
+	// Deepest folders first so parents are empty of children when their turn comes.
+	var extra []*index.Folder
+	for _, f := range root.Folders {
+		if f.Role == "" && f.Name != "INBOX" {
+			extra = append(extra, f)
+		}
+	}
+	sort.Slice(extra, func(i, j int) bool { return len(extra[i].Name) > len(extra[j].Name) })
+	for _, f := range extra {
+		if err := s.idx.DeleteFolder(ctx, id, f.ID); err != nil && !errors.Is(err, index.ErrNotFound) {
+			return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
+		}
+		folders++
+	}
+	if s.queue != nil {
+		_, _ = s.queue.Enqueue(ctx, TaskPurgeTrash, map[string]any{"mailbox": id}, time.Time{})
+	}
+	s.ok(ctx, id, "mailbox-empty", id.String(), fmt.Sprintf("messages=%d folders=%d", messages, folders))
+	return messages, folders, nil
 }
 
 // ---- legal hold ----

@@ -698,7 +698,7 @@ working by itself, next to the permanent one. Expired passwords are dropped the 
 password is set.
 
 **Migrated passwords.** An admin can set the primary password from an existing hash as
-another platform stores it (`kittiwake-admin account set-password <account> --hash-stdin`,
+another platform stores it (`kittiwake-admin account password <account> set --password-stdin` with a value that starts with `{` or `$`,
 or the `hash` field of the admin password endpoint): Dovecot-prefixed forms such as
 `{SHA512-CRYPT}$6$...`, `{BLF-CRYPT}$2y$...`, `{SSHA512}...`, `{ARGON2ID}...`, or a bare
 `$6$`, `$5$`, `$2y$` or `$argon2id$` hash whose scheme is inferred. The hash is checked for

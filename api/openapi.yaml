@@ -578,6 +578,23 @@ paths:
             application/gzip: { schema: { type: string, format: binary } }
             application/x-tar: { schema: { type: string, format: binary } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/empty:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    post:
+      tags: [admin]
+      summary: Empty the mailbox for a fresh start (messages go to retention, folders without a role are removed)
+      responses:
+        "200":
+          description: What was removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages: { type: integer }
+                  folders: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/mailboxes/{id}/recalculate:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
     post:
@@ -992,7 +1009,7 @@ components:
             type: object
             properties:
               password: { type: string, minLength: 8, description: Plain password, hashed here with argon2id }
-              hash: { type: string, description: "Admin only: an existing hash as another platform stores it ({SHA512-CRYPT}$6$..., {BLF-CRYPT}$2y$..., {ARGON2ID}..., {SSHA512}..., or a bare $6$/$5$/$2y$/$argon2id$ hash whose scheme is inferred); exactly one of password and hash; primary only; upgraded to argon2id on first login" }
+              hash: { type: string, description: "Admin only: an existing hash as another platform stores it ({SHA512-CRYPT}$6$..., {BLF-CRYPT}$2y$..., {ARGON2ID}..., {SSHA512}..., {PLAIN}..., or a bare $6$/$5$/$2y$/$argon2id$ hash whose scheme is inferred); exactly one of password and hash; upgraded to argon2id on first login" }
               kind: { type: string, enum: [primary, application] }
               comment: { type: string, description: "What the password is for (required; self-service primary change defaults to 'set by user')" }
               expires_at: { type: string, format: date-time, nullable: true, description: "When the password stops working; omit for never (temporary passwords)" }

@@ -730,7 +730,7 @@ func TestAdminPasswordManagement(t *testing.T) {
 	// A migrated hash as the primary password: exactly one of password/hash, primary only.
 	f.expect(f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{"password": "x", "hash": "y"}, ""), 400, "both")
 	f.expect(f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{}, ""), 400, "neither")
-	f.expect(f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{"hash": "$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "kind": "application"}, ""), 400, "hash as application")
+	f.expect(f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{"hash": "$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/", "kind": "application", "comment": "migrated app"}, ""), 200, "hash as application password")
 	f.expect(f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{"hash": "$1$nope$abc"}, ""), 400, "unsupported scheme")
 	r = f.do("PUT", "/v1/admin/accounts/"+id+"/password", a, map[string]any{"hash": "$6$saltsalt$W1Pe3prjOPvOhWOPQaRxextX94W2cyh4mpskonVD2EAq/QU1pFhqobuszJeSY4R9obTz8JJsiQrZMn.15n4Ep/"}, "")
 	f.expect(r, 200, "hash")
@@ -739,7 +739,7 @@ func TestAdminPasswordManagement(t *testing.T) {
 	for _, it := range r.body["items"].([]any) {
 		schemes = append(schemes, it.(map[string]any)["scheme"].(string))
 	}
-	if len(schemes) != 1 || schemes[0] != "SHA512-CRYPT" {
+	if len(schemes) != 2 || schemes[0] != "SHA512-CRYPT" || schemes[1] != "SHA512-CRYPT" {
 		t.Fatalf("schemes after hash import: %v", schemes)
 	}
 	// Read-only admins may list, not change.

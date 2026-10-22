@@ -192,6 +192,7 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"PATCH /v1/admin/mailboxes/{id}", s.mailboxPatch},
 		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
 		route{"POST /v1/admin/mailboxes/{id}/recalculate", s.mailboxRecalculate},
+		route{"POST /v1/admin/mailboxes/{id}/empty", s.mailboxEmpty},
 		route{"POST /v1/admin/mailboxes/{id}/export", s.mailboxExport},
 		route{"POST /v1/admin/mailboxes/{id}/import", s.mailboxImport},
 		route{"GET /v1/admin/exports", s.exportList},
@@ -928,6 +929,20 @@ func (s *Server) mailboxDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+func (s *Server) mailboxEmpty(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	msgs, folders, err := s.admin.EmptyMailbox(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"messages": msgs, "folders": folders})
+}
+
 func (s *Server) mailboxRecalculate(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -1268,11 +1283,7 @@ func (s *Server) accountPassword(w http.ResponseWriter, r *http.Request) {
 	var id string
 	var err2 error
 	if req.Hash != "" {
-		if kind != identity.PasswordPrimary {
-			s.fail(w, r, badRequest("a migrated hash can only be the primary password"))
-			return
-		}
-		id, err2 = s.auth.SetPasswordHash(r.Context(), a.ID, req.Hash, req.Comment, req.ExpiresAt)
+		id, err2 = s.auth.SetPasswordHash(r.Context(), a.ID, req.Hash, kind, req.Comment, req.ExpiresAt)
 	} else {
 		id, err2 = s.auth.SetPassword(r.Context(), a.ID, req.Password, req.Kind, req.Comment, req.ExpiresAt)
 	}
