@@ -34,7 +34,9 @@ Each mode is a separately scalable component:
 - `lmtp` – inbound delivery from the MTA
 - `imap` – IMAP server for legacy clients
 - `pop3` – POP3 server for legacy clients
-- `api` – JMAP (mailbox API), authentication endpoints and the admin REST API
+- `jmap` – JMAP (mailbox API) with the OAuth token and self-service endpoints clients need
+  next to it; user-facing
+- `admin` – the admin REST API; operator-facing, on its own listener
 - `postfix` – socketmap lookup service for Postfix (domains, recipients, aliases)
 - `worker` – background task execution (trash purge, attachment garbage collection, quota
   recalculation, mailbox removal, reconciliation, …)
@@ -766,7 +768,8 @@ belonging to an account with the `admin` role, for operating the platform:
 
 The daemon takes a single YAML file as configuration:
 
-- Mode(s) to run and listen addresses
+- Mode(s) to run and listen addresses (one listener per mode; JMAP and the admin API are
+  separate listeners and separate code paths)
 - Ceph cluster connection information
   - Monitors
   - Credentials

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/http"
 
 	"dovetail/app"
@@ -8,26 +9,47 @@ import (
 	"dovetail/proto/rest"
 )
 
-// buildAPI assembles the HTTP API served by the api mode: the REST
-// endpoints (OAuth, self-service, admin) and JMAP.
-func buildAPI(a *app.App) http.Handler {
+// restServer builds the REST adapter shared by the jmap and admin modes
+// (they mount different handlers of it on different listeners).
+func restServer(a *app.App) (*rest.Server, []net.IPNet) {
 	trusted, err := httpx.ParseTrusted(a.Cfg.Proxy.TrustedAddresses)
 	if err != nil {
 		a.Log.Error("proxy.trusted_addresses invalid; ignoring", "error", err.Error())
 	}
 	rest.Version = app.Version
-	restSrv := rest.New(rest.Config{
+	srv := rest.New(rest.Config{
 		Realm: "dovetail", TrustedProxies: trusted, DefaultQuota: a.DefaultQuota(),
 		MaxBody: 1 << 20, Identity: a.Stores.Identity,
 		Export: a.Services.Export, ExportDir: a.Cfg.Export.Directory,
 	}, a.Services.Auth, a.Services.Admin, a.Stores.Audit, a.Stores.Queue, a.Log)
+	return srv, trusted
+}
 
+// buildJMAP assembles the user-facing listener: JMAP plus the OAuth token
+// and self-service endpoints clients need next to it.
+func buildJMAP(a *app.App) http.Handler {
+	srv, trusted := restServer(a)
 	mux := http.NewServeMux()
-	mux.Handle("/v1/", restSrv.Handler())
+	mux.Handle("/v1/", srv.AccountHandler())
 	mountJMAP(a, mux, trusted)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			_, _ = w.Write([]byte("dovetail " + app.Version + "\n"))
+			_, _ = w.Write([]byte("dovetail " + app.Version + " (jmap)\n"))
+			return
+		}
+		http.NotFound(w, r)
+	})
+	return mux
+}
+
+// buildAdmin assembles the operator-facing listener: the admin REST API only.
+func buildAdmin(a *app.App) http.Handler {
+	srv, _ := restServer(a)
+	mux := http.NewServeMux()
+	mux.Handle("/v1/admin/", srv.AdminHandler())
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			_, _ = w.Write([]byte("dovetail " + app.Version + " (admin)\n"))
 			return
 		}
 		http.NotFound(w, r)

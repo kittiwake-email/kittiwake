@@ -15,7 +15,7 @@ import (
 
 // Config is the whole configuration file.
 type Config struct {
-	// Modes to run in this process: lmtp, imap, pop3, api, postfix, worker.
+	// Modes to run in this process: lmtp, imap, pop3, jmap, admin, postfix, worker.
 	Modes []string `yaml:"modes"`
 
 	Ceph    Ceph    `yaml:"ceph"`
@@ -57,7 +57,8 @@ type Listen struct {
 	LMTP       Listener `yaml:"lmtp"`
 	IMAP       Listener `yaml:"imap"`
 	POP3       Listener `yaml:"pop3"`
-	API        Listener `yaml:"api"`
+	JMAP       Listener `yaml:"jmap"`  // JMAP, OAuth token and self-service endpoints
+	Admin      Listener `yaml:"admin"` // admin REST API, operators only
 	Postfix    Listener `yaml:"postfix"`
 	Management Listener `yaml:"management"`
 }
@@ -173,7 +174,8 @@ func Default() Config {
 			LMTP:       Listener{Address: "[::]:24", ProxyProtocol: "optional"},
 			IMAP:       Listener{Address: "[::]:143", ProxyProtocol: "optional"},
 			POP3:       Listener{Address: "[::]:110", ProxyProtocol: "optional"},
-			API:        Listener{Address: "[::]:8080", ProxyProtocol: "optional"},
+			JMAP:       Listener{Address: "[::]:8080", ProxyProtocol: "optional"},
+			Admin:      Listener{Address: "[::1]:8081", ProxyProtocol: "off"},
 			Postfix:    Listener{Address: "[::1]:2525", ProxyProtocol: "off"},
 			Management: Listener{Address: "[::1]:9090", ProxyProtocol: "off"},
 		},
@@ -222,7 +224,7 @@ func Parse(b []byte) (Config, error) {
 }
 
 // ValidModes is the set of accepted mode names.
-var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "api": true, "postfix": true, "worker": true}
+var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "admin": true, "postfix": true, "worker": true}
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
@@ -231,7 +233,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: unknown mode %q", m)
 		}
 	}
-	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "api": c.Listen.API, "postfix": c.Listen.Postfix, "management": c.Listen.Management} {
+	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "admin": c.Listen.Admin, "postfix": c.Listen.Postfix, "management": c.Listen.Management} {
 		switch l.ProxyProtocol {
 		case "", "off", "optional", "required":
 		default:

@@ -148,8 +148,11 @@ func runServe(args []string) error {
 			return err
 		}
 	}
-	if cfg.HasMode("api") {
-		a.APIHandler = buildAPI(a)
+	if cfg.HasMode("jmap") {
+		a.JMAPHandler = buildJMAP(a)
+	}
+	if cfg.HasMode("admin") {
+		a.AdminHandler = buildAdmin(a)
 	}
 	a.ExtraModes = protocolModes()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

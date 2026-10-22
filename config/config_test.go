@@ -8,7 +8,7 @@ import (
 )
 
 func TestParseDefaults(t *testing.T) {
-	cfg, err := Parse([]byte("modes: [lmtp, api]\n"))
+	cfg, err := Parse([]byte("modes: [lmtp, jmap]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

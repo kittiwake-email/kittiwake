@@ -91,9 +91,10 @@ type App struct {
 	Client   rados.Client
 	Stores   Stores
 	Services Services
-	// APIHandler is mounted by the api mode; set by cmd (keeps app free of
-	// the JMAP/REST packages' construction details).
-	APIHandler http.Handler
+	// JMAPHandler and AdminHandler are mounted by the jmap and admin modes;
+	// set by cmd (keeps app free of the protocol packages' construction).
+	JMAPHandler  http.Handler
+	AdminHandler http.Handler
 	// ExtraModes lets cmd register protocol servers (IMAP, POP3) without
 	// app importing them. Each is called from Run with the start helper.
 	ExtraModes []ModeFunc
@@ -266,11 +267,19 @@ func (a *App) Run(ctx context.Context) error {
 		a.addCloser(func(context.Context) error { return srv.Close() })
 		start("postfix", func() error { return srv.Serve(ln) })
 	}
-	if a.Cfg.HasMode("api") {
-		if a.APIHandler == nil {
-			return errors.New("api mode enabled but no API handler configured")
+	if a.Cfg.HasMode("jmap") {
+		if a.JMAPHandler == nil {
+			return errors.New("jmap mode enabled but no JMAP handler configured")
 		}
-		if err := a.serveHTTP("api", a.Cfg.Listen.API, a.APIHandler, start); err != nil {
+		if err := a.serveHTTP("jmap", a.Cfg.Listen.JMAP, a.JMAPHandler, start); err != nil {
+			return err
+		}
+	}
+	if a.Cfg.HasMode("admin") {
+		if a.AdminHandler == nil {
+			return errors.New("admin mode enabled but no admin handler configured")
+		}
+		if err := a.serveHTTP("admin", a.Cfg.Listen.Admin, a.AdminHandler, start); err != nil {
 			return err
 		}
 	}

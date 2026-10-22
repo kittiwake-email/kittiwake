@@ -90,30 +90,30 @@ type route struct {
 	h       http.HandlerFunc
 }
 
-// Handler returns the HTTP handler for everything under /v1/.
-func (s *Server) Handler() http.Handler {
+// register installs routes on mux with the wrapper and records them.
+func (s *Server) register(mux *http.ServeMux, wrap func(http.Handler) http.Handler, rs ...route) {
+	body := httpx.MaxBody(s.cfg.MaxBody)
+	for _, r := range rs {
+		var h http.Handler = r.h
+		if wrap != nil {
+			h = wrap(h)
+		}
+		mux.Handle(r.pattern, body(h))
+		s.mu.Lock()
+		s.routes = append(s.routes, r.pattern)
+		s.mu.Unlock()
+	}
+}
+
+// AccountHandler serves the user-facing endpoints that belong next to JMAP:
+// the OAuth token/revoke endpoints and the /v1/me self-service endpoints.
+// It is mounted on the jmap listener.
+func (s *Server) AccountHandler() http.Handler {
 	mux := http.NewServeMux()
 	selfAuth := httpx.Auth(s.auth, audit.ProtoREST, s.cfg.TrustedProxies, s.cfg.Realm)
-	adminAuth := httpx.Auth(s.auth, audit.ProtoAdmin, s.cfg.TrustedProxies, s.cfg.Realm)
-	adminRole := httpx.RequireRole(identity.RoleAdmin)
-	body := httpx.MaxBody(s.cfg.MaxBody)
-
-	reg := func(wrap func(http.Handler) http.Handler, rs ...route) {
-		for _, r := range rs {
-			var h http.Handler = r.h
-			if wrap != nil {
-				h = wrap(h)
-			}
-			mux.Handle(r.pattern, body(h))
-			s.mu.Lock()
-			s.routes = append(s.routes, r.pattern)
-			s.mu.Unlock()
-		}
-	}
 	public := func(h http.Handler) http.Handler { return h }
 	self := func(h http.Handler) http.Handler { return selfAuth(h) }
-	adm := func(h http.Handler) http.Handler { return adminAuth(adminRole(h)) }
-
+	reg := func(wrap func(http.Handler) http.Handler, rs ...route) { s.register(mux, wrap, rs...) }
 	reg(public,
 		route{"POST /v1/oauth/token", s.oauthToken},
 		route{"POST /v1/oauth/revoke", s.oauthRevoke},
@@ -131,6 +131,18 @@ func (s *Server) Handler() http.Handler {
 	)
 	// TODO: self-service API token management (/v1/me/tokens) needs a
 	// token CRUD on the auth service; until then tokens are admin-managed.
+	return mux
+}
+
+// AdminHandler serves the operator-facing /v1/admin endpoints. It is
+// mounted on the admin listener, which should only be reachable by
+// operators.
+func (s *Server) AdminHandler() http.Handler {
+	mux := http.NewServeMux()
+	adminAuth := httpx.Auth(s.auth, audit.ProtoAdmin, s.cfg.TrustedProxies, s.cfg.Realm)
+	adminRole := httpx.RequireRole(identity.RoleAdmin)
+	adm := func(h http.Handler) http.Handler { return adminAuth(adminRole(h)) }
+	reg := func(wrap func(http.Handler) http.Handler, rs ...route) { s.register(mux, wrap, rs...) }
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
 		route{"POST /v1/admin/domains", s.domainCreate},
@@ -175,6 +187,15 @@ func (s *Server) Handler() http.Handler {
 		route{"GET /v1/admin/export", s.exportIdentity},
 		route{"POST /v1/admin/import", s.importIdentity},
 	)
+	return mux
+}
+
+// Handler combines both handlers on one mux (tests and single-listener
+// deployments). Production runs them on separate listeners.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/admin/", s.AdminHandler())
+	mux.Handle("/v1/", s.AccountHandler())
 	return mux
 }
 

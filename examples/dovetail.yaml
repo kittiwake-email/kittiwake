@@ -2,7 +2,7 @@
 # Secrets may be given inline, as "file:/path", or with ${ENV_VAR} substitution.
 
 # Modes this process runs. Split modes over processes to scale each one.
-modes: [lmtp, api, postfix]
+modes: [lmtp, jmap, admin, postfix]
 
 ceph:
   backend: librados            # librados | memory (volatile, development only)
@@ -22,7 +22,8 @@ listen:
   lmtp:       {address: "[::]:24",    proxy_protocol: required}
   imap:       {address: "[::]:143",   proxy_protocol: required}
   pop3:       {address: "[::]:110",   proxy_protocol: required}
-  api:        {address: "[::]:8080",  proxy_protocol: required}
+  jmap:       {address: "[::]:8080",  proxy_protocol: required}  # JMAP + OAuth + /v1/me, user-facing
+  admin:      {address: "[::1]:8081", proxy_protocol: off}       # /v1/admin, operators only
   postfix:    {address: "[::1]:2525", proxy_protocol: off}   # socketmap, private network only
   management: {address: "[::1]:9090", proxy_protocol: off}   # /metrics /healthz /readyz
 

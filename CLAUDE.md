@@ -54,7 +54,7 @@ errors, protocol adapters map service errors to wire codes (`delivery.Status`, h
 Tests that query the audit store must pin `auditor.Now`/`audit.Store.Now` to the fixture
 clock (audit objects are per UTC day). Smoke-test the binary with
 `make run-dev` plus Python's smtplib.LMTP/imaplib/poplib and curl against 127.0.0.1 ports
-2424/1143/1110/8080 (see examples/dev.yaml); kill it by PID, not by `pkill -f`.
+2424/1143/1110/8080 (jmap) and 8081 (admin) (see examples/dev.yaml); kill it by PID, not by `pkill -f`.
 
 ## What this is
 
@@ -75,8 +75,8 @@ These are settled. Do not design around them.
   carries actor, client IP and protocol. Each layer is tested against the mock of the layer
   below. The service interfaces are the project's public Go API.
 
-- **One Go binary (`dovetail`), multiple modes:** `lmtp`, `imap`, `pop3`, `api`, `postfix`,
-  `worker` (+ `dav` later), plus an `admin` subcommand that talks to RADOS directly
+- **One Go binary (`dovetail`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
+  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `postfix`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to RADOS directly
   (bootstrap, export/import, reconcile). Modes combine in one process or split across many.
 - **Everything in Ceph RADOS. No SQL, no Redis.** Stateless daemons via librados (cgo; target
   latest stable Ceph). Four pools: `messages`, `attachments`, `index`, `meta`. Pure RADOS,
