@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -146,6 +147,39 @@ func TestPurgeTrashAndAttachmentGC(t *testing.T) {
 	st, _ := f.st.Queue.Stats(ctx, TaskPurgeTrash)
 	if st.Pending+st.Leased+st.Dead != 0 {
 		t.Fatalf("queue not clean: %+v", st)
+	}
+}
+
+// An admin purge (all=true) empties the retention set before the purge
+// dates and leaves live messages alone.
+func TestAdminPurgeIgnoresRetentionDates(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	d1, _ := f.deliver(t)
+	d2, _ := f.deliver(t)
+	if err := f.mbx.Destroy(f.user, f.mb.ID, d1.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.adm.PurgeMailbox(f.adm_, f.mb.ID)
+	if err != nil || res.Retained != 1 || res.TaskID == "" {
+		t.Fatalf("purge request: %+v %v", res, err)
+	}
+	f.drain(t)
+	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, d1.MessageID); err == nil {
+		t.Fatal("deleted message survived the admin purge")
+	}
+	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, d2.MessageID); err != nil {
+		t.Fatal("live message purged")
+	}
+	if ents, _, _, _ := f.st.Index.ListRetention(ctx, f.mb.ID, time.Time{}, 10); len(ents) != 0 {
+		t.Fatal("retention entry not dropped")
+	}
+	// Refused on hold.
+	if _, err := f.adm.Hold(f.adm_, f.mb.ID, admin.HoldRequest{Reason: "case"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.adm.PurgeMailbox(f.adm_, f.mb.ID); !errors.Is(err, identity.ErrConflict) {
+		t.Fatalf("purge on hold: %v", err)
 	}
 }
 

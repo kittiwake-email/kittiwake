@@ -306,6 +306,13 @@ func (c *Client) DeleteMailbox(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/admin/mailboxes/"+pathEscape(id), nil, nil, "", nil)
 }
 
+// PurgeMailbox removes the retention set of a mailbox ahead of the
+// retention period (everything the account holder already deleted).
+func (c *Client) PurgeMailbox(ctx context.Context, id string) (PurgeResult, error) {
+	var out PurgeResult
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/purge", nil, nil, "", &out)
+}
+
 // RecalculateMailbox rebuilds the usage counters.
 func (c *Client) RecalculateMailbox(ctx context.Context, id string) (Usage, error) {
 	var out RecalculateResult

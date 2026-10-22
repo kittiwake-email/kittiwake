@@ -392,6 +392,14 @@ func TestAdminCRUD(t *testing.T) {
 	}
 	r = f.do("POST", "/v1/admin/mailboxes/"+mbID+"/recalculate", a, nil, "")
 	f.expect(r, 404, "recalculate unindexed")
+	// Purge: schedules a worker task; nothing retained on a fresh mailbox.
+	r = f.do("POST", "/v1/admin/mailboxes/"+mbID+"/purge", a, nil, "")
+	f.expect(r, 202, "purge")
+	if r.body["retained"] != float64(0) || r.body["task_id"] == "" {
+		t.Fatalf("purge: %v", r.body)
+	}
+	f.expect(f.do("POST", "/v1/admin/mailboxes/"+uuid.NewString()+"/purge", a, nil, ""), 404, "purge unknown")
+	f.expect(f.do("POST", "/v1/admin/mailboxes/"+mbID+"/purge", f.bearer(f.roTk), nil, ""), 403, "purge read-only")
 	// Accounts.
 	r = f.do("POST", "/v1/admin/accounts", a, map[string]any{"username": "Bob@test.example", "mailbox_id": mbID, "roles": []string{"read", "write"}, "password": "bobpassword"}, "")
 	f.expect(r, 201, "account create")
@@ -521,6 +529,7 @@ func TestHoldAndAudit(t *testing.T) {
 		t.Fatalf("hold: %v", hold)
 	}
 	f.expect(f.do("POST", "/v1/admin/mailboxes/"+mb+"/hold", a, map[string]any{"reason": "again"}, ""), 409, "double hold")
+	f.expect(f.do("POST", "/v1/admin/mailboxes/"+mb+"/purge", a, nil, ""), 409, "purge on hold")
 	r = f.do("GET", "/v1/admin/holds", a, nil, "")
 	if len(r.body["items"].([]any)) != 1 {
 		t.Fatalf("holds: %v", r.body)

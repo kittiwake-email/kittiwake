@@ -543,6 +543,12 @@ from its folder index and parked in the retention set of the mailbox, where it s
 same retention period before the worker purges it (lazy expunge, as Dovecot calls it).
 Destroying a message from Trash via JMAP behaves the same way.
 
+An admin can cut that short for one mailbox: `kittiwake-admin mailbox purge <uuid>` (`POST
+/v1/admin/mailboxes/{id}/purge`) schedules a worker task that removes the whole retention set
+now, with the objects behind it. It only ever touches what the account holder already
+deleted; live messages stay. A mailbox on hold refuses it. Deleting a mailbox removes
+everything at once, retention included.
+
 ## Spam routing
 
 If the MTA (Postfix with rspamd, SpamAssassin, …) marks a message as spam, LMTP delivery files

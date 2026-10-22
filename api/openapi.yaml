@@ -578,6 +578,27 @@ paths:
             application/gzip: { schema: { type: string, format: binary } }
             application/x-tar: { schema: { type: string, format: binary } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/purge:
+    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    post:
+      tags: [admin]
+      summary: Purge the retention set now, ahead of the retention period
+      description: >-
+        Removes everything the account holder already deleted (expunged and trashed messages
+        waiting for their purge date) and the objects behind them, as a worker task. Live
+        messages are never touched. Refused while the mailbox is on hold.
+      responses:
+        "202":
+          description: Purge scheduled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  retained: { type: integer, description: Messages in the retention set at the time of the request }
+                  task_id: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /v1/admin/mailboxes/{id}/recalculate:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
     post:

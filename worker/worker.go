@@ -290,6 +290,9 @@ type mailboxPayload struct {
 	// StorageID pins the storage for a mailbox whose record is gone
 	// (remove-mailbox); zero means "look it up".
 	StorageID int64 `json:"storage_id,omitempty"`
+	// All makes purge-trash ignore the purge dates: an admin purge removes
+	// the whole retention set now.
+	All bool `json:"all,omitempty"`
 }
 
 func (w *Worker) handle(ctx context.Context, task queue.Task) error {
@@ -303,7 +306,7 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 	}
 	switch task.Type {
 	case TaskPurgeTrash:
-		return w.purgeTrash(ctx, mp.Mailbox)
+		return w.purgeTrash(ctx, mp.Mailbox, mp.All)
 	case TaskRemoveMailbox:
 		if mp.StorageID != 0 {
 			ctx = storage.WithID(ctx, mp.StorageID)
@@ -381,7 +384,10 @@ func (w *Worker) exportMailbox(ctx context.Context, et ExportTask) error {
 
 // purgeTrash deletes the message objects of due retention entries unless
 // the mailbox is on hold or within the post-hold grace period.
-func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
+// purgeTrash deletes the retention entries of a mailbox whose purge date
+// has passed, or all of them when all is set (admin purge). Resumable like
+// every task: each pass lists what is still there.
+func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 	if v, err := w.ids.GetMailbox(ctx, mb); err == nil {
 		if v.Value.Hold != nil {
 			w.log.Debug("purge skipped: on hold", slog.String("mailbox", mb.String()))
@@ -394,9 +400,13 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
 	} else if !errors.Is(err, identity.ErrNotFound) {
 		return err
 	}
+	before := w.Now()
+	if all {
+		before = time.Time{}
+	}
 	purged := 0
 	for {
-		entries, keys, more, err := w.idx.ListRetention(ctx, mb, w.Now(), w.cfg.ScanBatch)
+		entries, keys, more, err := w.idx.ListRetention(ctx, mb, before, w.cfg.ScanBatch)
 		if err != nil {
 			return err
 		}
@@ -411,13 +421,20 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID) error {
 				return err
 			}
 			purged++
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if !more {
 			break
 		}
 	}
 	if purged > 0 {
-		w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "purge", Detail: fmt.Sprintf("messages=%d", purged)})
+		detail := fmt.Sprintf("messages=%d", purged)
+		if all {
+			detail += " ahead of retention (admin purge)"
+		}
+		w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "purge", Detail: detail})
 	}
 	return nil
 }

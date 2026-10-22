@@ -331,6 +331,44 @@ func (s *Service) RecalculateQuota(ctx context.Context, id uuid.UUID) (index.Usa
 	return root.Usage, nil
 }
 
+// PurgeResult is what a purge request schedules.
+type PurgeResult struct {
+	// Retained is how many messages sat in the retention set when the
+	// purge was requested; the worker removes them and their objects.
+	Retained int    `json:"retained"`
+	TaskID   string `json:"task_id"`
+}
+
+// PurgeMailbox removes, ahead of the retention period, everything the
+// account holder already deleted: the retention set of the mailbox (expunged
+// and trashed messages waiting for their purge date). Live messages are never
+// touched. The removal runs as a worker task; a mailbox on hold is refused.
+func (s *Service) PurgeMailbox(ctx context.Context, id uuid.UUID) (PurgeResult, error) {
+	if err := s.authorize(ctx, "mailbox-purge", id.String()); err != nil {
+		return PurgeResult{}, err
+	}
+	m, err := s.ids.GetMailbox(ctx, id)
+	if err != nil {
+		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), err)
+	}
+	if m.Value.Hold != nil {
+		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), fmt.Errorf("%w: mailbox on hold", identity.ErrConflict))
+	}
+	if s.queue == nil {
+		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), errors.New("no task queue"))
+	}
+	entries, _, _, err := s.idx.ListRetention(ctx, id, time.Time{}, 0)
+	if err != nil {
+		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), err)
+	}
+	taskID, err := s.queue.Enqueue(ctx, TaskPurgeTrash, map[string]any{"mailbox": id, "all": true}, time.Time{})
+	if err != nil {
+		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), err)
+	}
+	s.ok(ctx, id, "mailbox-purge", id.String(), fmt.Sprintf("retained=%d scheduled", len(entries)))
+	return PurgeResult{Retained: len(entries), TaskID: taskID}, nil
+}
+
 // ---- legal hold ----
 
 // HoldRequest describes a hold.

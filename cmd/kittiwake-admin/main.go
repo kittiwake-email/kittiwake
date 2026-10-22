@@ -58,7 +58,7 @@ flags:
 commands:
   status                              version and time of the admin API
   domain    create|list|get|enable|disable|delete
-  mailbox   create|list|inspect|set|suspend|disable|activate|delete|recalc|hold|release|holds|export|exports|download|import
+  mailbox   create|list|inspect|set|suspend|disable|activate|delete|recalc|purge|hold|release|holds|export|exports|download|import
   account   create|list|get|set|delete|password (set|list|expire|remove)|totp-disable|sessions|revoke-session|token|tokens
   alias     create|list|get|set|delete
   audit     query the audit log

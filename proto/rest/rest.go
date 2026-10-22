@@ -192,6 +192,7 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"PATCH /v1/admin/mailboxes/{id}", s.mailboxPatch},
 		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
 		route{"POST /v1/admin/mailboxes/{id}/recalculate", s.mailboxRecalculate},
+		route{"POST /v1/admin/mailboxes/{id}/purge", s.mailboxPurge},
 		route{"POST /v1/admin/mailboxes/{id}/export", s.mailboxExport},
 		route{"POST /v1/admin/mailboxes/{id}/import", s.mailboxImport},
 		route{"GET /v1/admin/exports", s.exportList},
@@ -934,6 +935,22 @@ func (s *Server) mailboxDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// mailboxPurge schedules the removal of everything the account holder
+// already deleted (the retention set), ahead of the retention period.
+func (s *Server) mailboxPurge(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	res, err := s.admin.PurgeMailbox(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, res)
 }
 
 func (s *Server) mailboxRecalculate(w http.ResponseWriter, r *http.Request) {

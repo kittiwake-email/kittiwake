@@ -114,6 +114,7 @@ func quotaFrom(sb, hb, sm, hm int64) *admin.QuotaLimits {
 func (a *cli) mailbox(args []string) error {
 	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N]
        mailbox list [--orphaned] | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
+       mailbox purge <uuid>                    remove what the user already deleted (retention set) now instead of after the retention period
        mailbox set <uuid> [quota flags]                            (quota flags replace the whole quota)
        mailbox suspend <uuid> --reason text    soft: LMTP 450, the MTA queues; users locked out
        mailbox disable <uuid> --reason text    hard: LMTP 550, rejected at SMTP time; users locked out
@@ -302,6 +303,14 @@ func (a *cli) mailbox(args []string) error {
 			return err
 		}
 		return emit(usage, nil)
+	case "purge":
+		res, err := a.c.PurgeMailbox(a.ctx, id)
+		if err != nil {
+			return err
+		}
+		return emit(res, func() {
+			fmt.Printf("purge scheduled for %s: %d retained messages (task %s)\n", id, res.Retained, res.TaskID)
+		})
 	case "hold":
 		fs := newFlagSet("mailbox hold")
 		reason := fs.String("reason", "", "reason (required)")

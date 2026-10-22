@@ -391,6 +391,12 @@ type ImportSummary struct {
 }
 
 // RecalculateResult is the response of a quota recalculation.
+// PurgeResult is what a purge request scheduled.
+type PurgeResult struct {
+	Retained int    `json:"retained"`
+	TaskID   string `json:"task_id"`
+}
+
 type RecalculateResult struct {
 	Usage Usage `json:"usage"`
 }
