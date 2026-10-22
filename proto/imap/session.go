@@ -469,6 +469,9 @@ func (s *session) Append(name string, r imap.LiteralReader, options *imap.Append
 	if err != nil {
 		return nil, s.srv.mapErr(err, "append")
 	}
+	if s.sel != nil && s.sel.folderID == f.ID {
+		s.sel.noteAppended(d.Record)
+	}
 	return &imap.AppendData{UID: imap.UID(d.UID), UIDValidity: f.UIDValidity}, nil
 }
 

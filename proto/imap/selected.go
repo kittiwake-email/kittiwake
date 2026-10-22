@@ -26,9 +26,29 @@ type selected struct {
 	readOnly  bool
 	uids      []uint32
 	recs      map[uint32]index.Record
-	modseq    uint64   // folder modseq at the last sync
+	modseq    uint64   // mailbox modseq at the last sync
 	vanished  []uint32 // UIDs gone from the folder but not yet reported as EXPUNGE
 	searchRes imap.UIDSet
+	// pendingAdded are UIDs applied locally (own APPEND) still to be
+	// announced with EXISTS on the next sync.
+	pendingAdded []uint32
+}
+
+// noteAppended applies a record this session just appended. When nothing
+// else changed in the mailbox meanwhile (the record's modseq directly
+// follows ours), the next sync needs no reads at all.
+func (sel *selected) noteAppended(rec index.Record) {
+	if rec.ModSeq != sel.modseq+1 {
+		return // other changes interleaved; the next sync reads the log
+	}
+	if _, known := sel.recs[rec.UID]; known {
+		return
+	}
+	sel.recs[rec.UID] = rec
+	sel.uids = append(sel.uids, rec.UID)
+	sort.Slice(sel.uids, func(i, j int) bool { return sel.uids[i] < sel.uids[j] })
+	sel.pendingAdded = append(sel.pendingAdded, rec.UID)
+	sel.modseq = rec.ModSeq
 }
 
 func newSelected(s *session, f *index.Folder, readOnly bool) (*selected, error) {
@@ -41,7 +61,7 @@ func newSelected(s *session, f *index.Folder, readOnly bool) (*selected, error) 
 		sel.uids = append(sel.uids, r.UID)
 		sel.recs[r.UID] = r
 	}
-	sel.modseq = f.ModSeq
+	sel.modseq = f.ModSeq // folder modseq <= mailbox modseq; the first sync catches up
 	return sel, nil
 }
 
@@ -98,10 +118,21 @@ func (sel *selected) removeUID(uid uint32) {
 // read. A log horizon miss or an implausibly large delta falls back to a
 // full re-list.
 func (sel *selected) sync(w *imapserver.UpdateWriter, allowExpunge bool) error {
-	flagChanged, added, current, ok, err := sel.applyChanges()
-	if err != nil {
-		return err
+	var flagChanged, added []uint32
+	var current uint64
+	ok := true
+	var err error
+	if sel.s.srv.mb != nil && len(sel.pendingAdded) > 0 && sel.freshEnough() {
+		// Only our own append happened; announce it without reading.
+		current = sel.modseq
+	} else {
+		flagChanged, added, current, ok, err = sel.applyChanges()
+		if err != nil {
+			return err
+		}
 	}
+	added = append(sel.pendingAdded, added...)
+	sel.pendingAdded = nil
 	if !ok {
 		root, err := sel.s.root()
 		if err != nil {
@@ -117,6 +148,14 @@ func (sel *selected) sync(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	}
 	sel.modseq = current
 	return sel.emit(w, flagChanged, added, allowExpunge)
+}
+
+// freshEnough reports whether the session may skip the change-log read:
+// the last thing that happened to the mailbox, as far as this process has
+// seen, is our own append.
+func (sel *selected) freshEnough() bool {
+	root, err := sel.s.srv.mb.RootCached(sel.s.ctx, sel.s.mb, 2*time.Second)
+	return err == nil && root.ModSeq == sel.modseq
 }
 
 // applyChanges folds the mailbox change log since the session's modseq

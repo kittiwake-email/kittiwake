@@ -387,6 +387,9 @@ type Delivered struct {
 	Via       string
 	// MessageIDHeader is the message's Message-ID header, for logs.
 	MessageIDHeader string
+	// Record is the index entry as written (protocol adapters that hold a
+	// folder snapshot can apply it without re-reading).
+	Record index.Record
 }
 
 // Deliver stores an inbound message in every mailbox the recipient resolves
@@ -595,7 +598,7 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 			s.log.DebugContext(nctx, "notify failed", slog.String("error", err.Error()))
 		}
 	}()
-	return Delivered{MailboxID: mb, MessageID: msgID, FolderID: folderID, UID: rec.UID}, nil
+	return Delivered{MailboxID: mb, MessageID: msgID, FolderID: folderID, UID: rec.UID, Record: rec}, nil
 }
 
 // recordFor builds the index record from the parsed document.
