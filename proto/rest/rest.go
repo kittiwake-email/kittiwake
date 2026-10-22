@@ -280,8 +280,11 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 // deployments). Production runs them on separate listeners.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/v1/admin/", s.AdminHandler())
-	mux.Handle("/v1/", s.AccountHandler())
+	account := s.AccountHandler()
+	mux.Handle("/v1/oauth/", account)
+	mux.Handle("/v1/me", account)
+	mux.Handle("/v1/me/", account)
+	mux.Handle("/", s.AdminHandler()) // /v1/admin/*, /openapi.yaml, /
 	return mux
 }
 
