@@ -1,7 +1,11 @@
-# Groups all Kittiwake instances: systemctl start|stop|restart kittiwake.target
+# Groups the Kittiwake instances enabled on this host:
+#   systemctl enable --now kittiwake@imap kittiwake@jmap   # the modes this host runs
+#   systemctl restart kittiwake.target                     # restart all of them
+# Enabling an instance adds it to the target (WantedBy in kittiwake@.service);
+# the target itself does not pull in any mode, so a host runs only what was
+# enabled on it.
 [Unit]
-Description=Kittiwake mail platform (all instances)
-Wants=kittiwake@lmtp.service kittiwake@imap.service kittiwake@pop3.service kittiwake@jmap.service kittiwake@admin.service kittiwake@postfix.service kittiwake@worker.service
+Description=Kittiwake mail platform (enabled instances)
 
 [Install]
 WantedBy=multi-user.target

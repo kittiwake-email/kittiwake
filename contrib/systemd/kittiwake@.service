@@ -34,4 +34,4 @@ RuntimeDirectory=kittiwake
 ReadOnlyPaths=/etc/ceph
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=kittiwake.target
