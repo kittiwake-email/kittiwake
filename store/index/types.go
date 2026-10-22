@@ -81,7 +81,13 @@ type Root struct {
 	Horizon      uint64    `json:"horizon"` // lowest modseq still in the change log
 	Usage        Usage     `json:"usage"`
 	Created      time.Time `json:"created"`
+
+	// pending change-log entries written with the next root transaction.
+	pending []Change
 }
+
+// Log queues a change-log entry to be written atomically with the root.
+func (r *Root) Log(c Change) { r.pending = append(r.pending, c) }
 
 // FolderByID returns the folder with the id, or nil.
 func (r *Root) FolderByID(id string) *Folder {

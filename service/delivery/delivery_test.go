@@ -106,7 +106,7 @@ func TestResolve(t *testing.T) {
 }
 
 func TestDeliverStoresEverything(t *testing.T) {
-	f := newFixture(t, Config{SpamHeader: "X-Spam-Flag", SpamValue: "YES", InlineMax: 16})
+	f := newFixture(t, Config{SpamHeader: "X-Spam-Flag", SpamValue: "YES", InlineMax: 16, SearchEvents: true})
 	ctx := context.Background()
 	pdf := strings.Repeat("PDFDATA", 100)
 	raw := "From: a@example.com\r\nTo: wido@example.org\r\nSubject: =?utf-8?q?Caf=C3=A9?=\r\nMessage-ID: <x1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nSee attached\r\n--B\r\nContent-Type: application/pdf; name=a.pdf\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=a.pdf\r\n\r\n" + b64lines(pdf) + "\r\n--B--\r\n"

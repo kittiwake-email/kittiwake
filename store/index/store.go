@@ -11,6 +11,8 @@ import (
 	"math/rand/v2"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,18 +39,50 @@ const (
 type Store struct {
 	io  rados.IOContext
 	Now func() time.Time
+
+	// roots caches the last root seen per mailbox so an optimistic update
+	// can skip its initial read (the version assertion keeps it correct).
+	roots sync.Map // uuid.UUID -> cachedRoot
+	nroot atomic.Int64
 }
+
+type cachedRoot struct {
+	vr versionedRoot
+	at time.Time
+}
+
+const maxCachedRoots = 10000
 
 // New returns a store on the index pool context.
 func New(indexPool rados.IOContext) *Store {
 	return &Store{io: indexPool, Now: time.Now}
 }
 
+func (s *Store) cacheRoot(mb uuid.UUID, vr versionedRoot) {
+	if _, loaded := s.roots.Swap(mb, cachedRoot{vr: vr, at: s.Now()}); !loaded {
+		if s.nroot.Add(1) > maxCachedRoots {
+			// Bounded: drop an arbitrary entry.
+			s.roots.Range(func(k, _ any) bool { s.roots.Delete(k); s.nroot.Add(-1); return false })
+		}
+	}
+}
+
+func (s *Store) cached(mb uuid.UUID) (versionedRoot, time.Time, bool) {
+	v, ok := s.roots.Load(mb)
+	if !ok {
+		return versionedRoot{}, time.Time{}, false
+	}
+	c := v.(cachedRoot)
+	return c.vr, c.at, true
+}
+
 // ---- object names and keys ----
 
 func rootOID(mb uuid.UUID) string      { return mb.String() }
-func changesOID(mb uuid.UUID) string   { return mb.String() + "/changes" }
 func retentionOID(mb uuid.UUID) string { return mb.String() + "/retention" }
+
+// changeKey is the root omap key of a change-log entry.
+func changeKey(m uint64) string { return "c/" + modseqKey(m) }
 
 // folderOID returns the shard object holding uid for the folder.
 func folderOID(mb uuid.UUID, fid string, uid uint32) string {
@@ -117,7 +151,9 @@ func (s *Store) getRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, error
 	if err := json.Unmarshal(data, &r); err != nil {
 		return versionedRoot{}, fmt.Errorf("index: decode root %s: %w", mb, err)
 	}
-	return versionedRoot{root: r, version: ver}, nil
+	vr := versionedRoot{root: r, version: ver}
+	s.cacheRoot(mb, vr)
+	return vr, nil
 }
 
 // GetRoot returns the mailbox root. ErrNotFound if the mailbox index does
@@ -127,20 +163,39 @@ func (s *Store) GetRoot(ctx context.Context, mb uuid.UUID) (Root, error) {
 	return vr.root, err
 }
 
+// GetRootCached returns the root as last seen by this process when that is
+// younger than maxAge, else reads it. For approximate uses (quota checks).
+func (s *Store) GetRootCached(ctx context.Context, mb uuid.UUID, maxAge time.Duration) (Root, error) {
+	if vr, at, ok := s.cached(mb); ok && s.Now().Sub(at) < maxAge {
+		return vr.root, nil
+	}
+	return s.GetRoot(ctx, mb)
+}
+
 // updateRoot applies fn under optimistic concurrency with retries.
+// updateRoot applies fn under optimistic concurrency. The first attempt
+// uses the cached root (no read); a version mismatch re-reads and retries.
+// Change-log entries queued with Root.Log are written in the same
+// transaction as the root data.
 func (s *Store) updateRoot(ctx context.Context, mb uuid.UUID, fn func(r *Root) error) (Root, error) {
 	for attempt := 0; attempt < maxRootAttempts; attempt++ {
-		if attempt > 0 {
-			if err := backoff(ctx, attempt); err != nil {
+		var vr versionedRoot
+		var err error
+		if c, _, ok := s.cached(mb); ok && attempt == 0 {
+			vr = c
+		} else {
+			if attempt > 0 {
+				if err := backoff(ctx, attempt); err != nil {
+					return Root{}, err
+				}
+			}
+			if vr, err = s.getRoot(ctx, mb); err != nil {
 				return Root{}, err
 			}
 		}
-		vr, err := s.getRoot(ctx, mb)
-		if err != nil {
-			return Root{}, err
-		}
 		r := vr.root
 		r.Folders = cloneFolders(vr.root.Folders)
+		r.pending = nil
 		if err := fn(&r); err != nil {
 			return Root{}, err
 		}
@@ -148,13 +203,25 @@ func (s *Store) updateRoot(ctx context.Context, mb uuid.UUID, fn func(r *Root) e
 		if err != nil {
 			return Root{}, err
 		}
-		_, err = s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().AssertVersion(vr.version).WriteFull(data))
+		tx := rados.NewWriteTx().AssertVersion(vr.version).WriteFull(data)
+		if len(r.pending) > 0 {
+			kv := make(map[string][]byte, len(r.pending))
+			for _, c := range r.pending {
+				b, _ := json.Marshal(&c)
+				kv[changeKey(c.ModSeq)] = b
+			}
+			tx.OmapSet(kv)
+		}
+		ver, err := s.io.Write(ctx, rootOID(mb), tx)
 		if err == nil {
+			r.pending = nil
+			s.cacheRoot(mb, versionedRoot{root: r, version: ver})
 			return r, nil
 		}
 		if !errors.Is(err, rados.ErrVersionMismatch) {
 			return Root{}, mapErr(err)
 		}
+		s.roots.Delete(mb)
 	}
 	return Root{}, ErrConflict
 }
@@ -215,7 +282,13 @@ func (s *Store) EnsureRoot(ctx context.Context, mb uuid.UUID) (Root, error) {
 	if err != nil {
 		return Root{}, err
 	}
-	_, err = s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().CreateExclusive().WriteFull(data))
+	kv := map[string][]byte{}
+	for _, f := range r.Folders {
+		c := Change{ModSeq: f.ModSeq, Kind: KindFolder, Op: OpCreated, ID: f.ID, Timestamp: now}
+		b, _ := json.Marshal(&c)
+		kv[changeKey(c.ModSeq)] = b
+	}
+	ver, err := s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().CreateExclusive().WriteFull(data).OmapSet(kv))
 	if errors.Is(err, rados.ErrExists) {
 		vr, err := s.getRoot(ctx, mb)
 		return vr.root, err
@@ -223,11 +296,7 @@ func (s *Store) EnsureRoot(ctx context.Context, mb uuid.UUID) (Root, error) {
 	if err != nil {
 		return Root{}, mapErr(err)
 	}
-	for _, f := range r.Folders {
-		if err := s.logChange(ctx, mb, Change{ModSeq: f.ModSeq, Kind: KindFolder, Op: OpCreated, ID: f.ID, Timestamp: now}); err != nil {
-			return Root{}, err
-		}
-	}
+	s.cacheRoot(mb, versionedRoot{root: r, version: ver})
 	return r, nil
 }
 
@@ -242,15 +311,6 @@ func (s *Store) Exists(ctx context.Context, mb uuid.UUID) (bool, error) {
 
 // ---- change log ----
 
-func (s *Store) logChange(ctx context.Context, mb uuid.UUID, c Change) error {
-	data, err := json.Marshal(&c)
-	if err != nil {
-		return err
-	}
-	_, err = s.io.Write(ctx, changesOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{modseqKey(c.ModSeq): data}))
-	return mapErr(err)
-}
-
 // Changes returns changes with modseq > since, in order, up to max.
 func (s *Store) Changes(ctx context.Context, mb uuid.UUID, since uint64, max int) (changes []Change, more bool, current uint64, err error) {
 	vr, err := s.getRoot(ctx, mb)
@@ -263,11 +323,8 @@ func (s *Store) Changes(ctx context.Context, mb uuid.UUID, since uint64, max int
 	if since >= vr.root.ModSeq {
 		return nil, false, vr.root.ModSeq, nil
 	}
-	kv, more, err := s.io.OmapList(ctx, changesOID(mb), "", modseqKey(since), max)
+	kv, more, err := s.io.OmapList(ctx, rootOID(mb), "c/", changeKey(since), max)
 	if err != nil {
-		if errors.Is(err, rados.ErrNotFound) {
-			return nil, false, vr.root.ModSeq, nil
-		}
 		return nil, false, 0, mapErr(err)
 	}
 	for _, e := range kv {
@@ -293,29 +350,25 @@ func (s *Store) TrimChanges(ctx context.Context, mb uuid.UUID, keep int) error {
 	if newHorizon <= vr.root.Horizon {
 		return nil
 	}
+	var rm []string
 	for {
-		kv, _, err := s.io.OmapList(ctx, changesOID(mb), "", "", 512)
+		kv, more, err := s.io.OmapList(ctx, rootOID(mb), "c/", "", 512)
 		if err != nil {
-			if errors.Is(err, rados.ErrNotFound) {
-				break
-			}
 			return mapErr(err)
 		}
-		var rm []string
+		n := len(rm)
 		for _, e := range kv {
-			if e.Key < modseqKey(newHorizon) {
+			if e.Key < changeKey(newHorizon) {
 				rm = append(rm, e.Key)
 			}
 		}
-		if len(rm) == 0 {
+		if len(rm) == n || !more || len(rm)-n < len(kv) {
 			break
 		}
-		if _, err := s.io.Write(ctx, changesOID(mb), rados.NewWriteTx().OmapRemove(rm...)); err != nil {
+		if _, err := s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().OmapRemove(rm[n:]...)); err != nil {
 			return mapErr(err)
 		}
-		if len(rm) < len(kv) {
-			break
-		}
+		rm = rm[:n]
 	}
 	_, err = s.updateRoot(ctx, mb, func(r *Root) error {
 		if newHorizon > r.Horizon {
@@ -323,7 +376,15 @@ func (s *Store) TrimChanges(ctx context.Context, mb uuid.UUID, keep int) error {
 		}
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if len(rm) > 0 {
+		if _, err := s.io.Write(ctx, rootOID(mb), rados.NewWriteTx().OmapRemove(rm...)); err != nil {
+			return mapErr(err)
+		}
+	}
+	return nil
 }
 
 // ---- folders ----
@@ -383,16 +444,12 @@ func (s *Store) CreateFolder(ctx context.Context, mb uuid.UUID, name, role strin
 			r.NextFolderID++
 			r.Folders = append(r.Folders, f)
 			created = append(created, f)
+			r.Log(Change{ModSeq: f.ModSeq, Kind: KindFolder, Op: OpCreated, ID: f.ID, Timestamp: now})
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
-	}
-	for _, f := range created {
-		if err := s.logChange(ctx, mb, Change{ModSeq: f.ModSeq, Kind: KindFolder, Op: OpCreated, ID: f.ID, Timestamp: now}); err != nil {
-			return nil, err
-		}
 	}
 	return created[len(created)-1], nil
 }
@@ -402,10 +459,8 @@ func (s *Store) RenameFolder(ctx context.Context, mb uuid.UUID, id, newName stri
 	if err := ValidateFolderName(newName); err != nil {
 		return err
 	}
-	var changed []Change
 	now := s.Now().UTC()
 	_, err := s.updateRoot(ctx, mb, func(r *Root) error {
-		changed = nil
 		f := r.FolderByID(id)
 		if f == nil {
 			return ErrNotFound
@@ -430,25 +485,16 @@ func (s *Store) RenameFolder(ctx context.Context, mb uuid.UUID, id, newName stri
 				g.Name = newName + strings.TrimPrefix(g.Name, old)
 				r.ModSeq++
 				g.ModSeq = r.ModSeq
-				changed = append(changed, Change{ModSeq: r.ModSeq, Kind: KindFolder, Op: OpUpdated, ID: g.ID, Timestamp: now})
+				r.Log(Change{ModSeq: r.ModSeq, Kind: KindFolder, Op: OpUpdated, ID: g.ID, Timestamp: now})
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	for _, c := range changed {
-		if err := s.logChange(ctx, mb, c); err != nil {
-			return err
-		}
-	}
-	return nil
+	return err
 }
 
 // DeleteFolder removes an empty folder without children.
 func (s *Store) DeleteFolder(ctx context.Context, mb uuid.UUID, id string) error {
-	var ch Change
 	var shards []string
 	now := s.Now().UTC()
 	_, err := s.updateRoot(ctx, mb, func(r *Root) error {
@@ -476,7 +522,7 @@ func (s *Store) DeleteFolder(ctx context.Context, mb uuid.UUID, id string) error
 		}
 		r.Folders = out
 		r.ModSeq++
-		ch = Change{ModSeq: r.ModSeq, Kind: KindFolder, Op: OpDestroyed, ID: id, Timestamp: now}
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindFolder, Op: OpDestroyed, ID: id, Timestamp: now})
 		return nil
 	})
 	if err != nil {
@@ -487,7 +533,7 @@ func (s *Store) DeleteFolder(ctx context.Context, mb uuid.UUID, id string) error
 			return mapErr(err)
 		}
 	}
-	return s.logChange(ctx, mb, ch)
+	return nil
 }
 
 // folderShards lists the shard objects a folder may have used.
@@ -506,7 +552,6 @@ func folderShards(mb uuid.UUID, f *Folder) []string {
 // UpdateFolder applies fn to folder metadata (subscription, keywords).
 func (s *Store) UpdateFolder(ctx context.Context, mb uuid.UUID, id string, fn func(f *Folder) error) (*Folder, error) {
 	var out *Folder
-	var ch Change
 	now := s.Now().UTC()
 	_, err := s.updateRoot(ctx, mb, func(r *Root) error {
 		f := r.FolderByID(id)
@@ -522,13 +567,10 @@ func (s *Store) UpdateFolder(ctx context.Context, mb uuid.UUID, id string, fn fu
 		f.ModSeq = r.ModSeq
 		c := *f
 		out = &c
-		ch = Change{ModSeq: r.ModSeq, Kind: KindFolder, Op: OpUpdated, ID: id, Timestamp: now}
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindFolder, Op: OpUpdated, ID: id, Timestamp: now})
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, s.logChange(ctx, mb, ch)
+	return out, err
 }
 
 // ---- messages ----
@@ -747,42 +789,66 @@ func (s *Store) Append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 		}
 		r.Usage.Bytes += rec.Size
 		r.Usage.Messages++
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindEmail, Op: OpCreated, ID: rec.MessageID.String(), FolderID: fid, UID: rec.UID, Timestamp: now})
 		return nil
 	})
 	if err != nil {
 		return Record{}, err
 	}
+	// The message object, the thread membership and the message-id map are
+	// independent: write them concurrently. The folder record (commit
+	// point) follows once all succeeded.
+	loc := []byte(Location{FolderID: fid, UID: rec.UID}.String())
+	var pg parallel
 	if store != nil {
-		if err := store(rec.UID, rec.ModSeq); err != nil {
-			return Record{}, err
-		}
+		pg.go_(func() error { return store(rec.UID, rec.ModSeq) })
+	}
+	pg.go_(func() error {
+		_, err := s.io.Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(tid, rec.MessageID): loc}))
+		return mapErr(err)
+	})
+	if rec.MsgIDHeader != "" {
+		// threadFor already resolved an existing mapping into tid, so an
+		// unconditional write is idempotent (no read needed).
+		pg.go_(func() error {
+			_, err := s.io.Write(ctx, threadOID(mb, rec.MsgIDHeader), rados.NewWriteTx().OmapSet(map[string][]byte{msgidKey(rec.MsgIDHeader): []byte(tid)}))
+			return mapErr(err)
+		})
+	}
+	if err := pg.wait(); err != nil {
+		return Record{}, err
 	}
 	if err := s.putRecord(ctx, mb, fid, rec); err != nil {
 		return Record{}, err
 	}
-	// Thread maps: membership on the thread's shard, message-id on its own
-	// shard (first message wins for an id).
-	loc := []byte(Location{FolderID: fid, UID: rec.UID}.String())
-	if _, err := s.io.Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(tid, rec.MessageID): loc})); err != nil {
-		return Record{}, mapErr(err)
-	}
-	if rec.MsgIDHeader != "" {
-		oid := threadOID(mb, rec.MsgIDHeader)
-		m, err := s.io.OmapGet(ctx, oid, []string{msgidKey(rec.MsgIDHeader)})
-		if err != nil && !errors.Is(err, rados.ErrNotFound) {
-			return Record{}, mapErr(err)
-		}
-		if _, exists := m[msgidKey(rec.MsgIDHeader)]; !exists {
-			if _, err := s.io.Write(ctx, oid, rados.NewWriteTx().OmapSet(map[string][]byte{msgidKey(rec.MsgIDHeader): []byte(tid)})); err != nil {
-				return Record{}, mapErr(err)
-			}
-		}
-	}
-	if err := s.logChange(ctx, mb, Change{ModSeq: rec.ModSeq, Kind: KindEmail, Op: OpCreated, ID: rec.MessageID.String(), FolderID: fid, UID: rec.UID, Timestamp: now}); err != nil {
-		return Record{}, err
-	}
 	s.maybeTrim(ctx, mb, rec.ModSeq)
 	return rec, nil
+}
+
+// parallel runs functions concurrently and returns the first error.
+type parallel struct {
+	wg   sync.WaitGroup
+	mu   sync.Mutex
+	errs error
+}
+
+func (p *parallel) go_(f func() error) {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		if err := f(); err != nil {
+			p.mu.Lock()
+			if p.errs == nil {
+				p.errs = err
+			}
+			p.mu.Unlock()
+		}
+	}()
+}
+
+func (p *parallel) wait() error {
+	p.wg.Wait()
+	return p.errs
 }
 
 func (s *Store) maybeTrim(ctx context.Context, mb uuid.UUID, modseq uint64) {
@@ -830,15 +896,13 @@ func (s *Store) SetFlags(ctx context.Context, mb uuid.UUID, fid string, uid uint
 				f.Keywords = append(f.Keywords, fl)
 			}
 		}
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindEmail, Op: OpUpdated, ID: rec.MessageID.String(), FolderID: fid, UID: uid, Timestamp: now})
 		return nil
 	})
 	if err != nil {
 		return Record{}, err
 	}
 	if err := s.putRecord(ctx, mb, fid, rec); err != nil {
-		return Record{}, err
-	}
-	if err := s.logChange(ctx, mb, Change{ModSeq: rec.ModSeq, Kind: KindEmail, Op: OpUpdated, ID: rec.MessageID.String(), FolderID: fid, UID: uid, Timestamp: now}); err != nil {
 		return Record{}, err
 	}
 	s.maybeTrim(ctx, mb, rec.ModSeq)
@@ -902,6 +966,7 @@ func (s *Store) Move(ctx context.Context, mb uuid.UUID, from string, uid uint32,
 				dst.Keywords = append(dst.Keywords, fl)
 			}
 		}
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindEmail, Op: OpUpdated, ID: rec.MessageID.String(), FolderID: to, UID: rec.UID, Timestamp: now})
 		return nil
 	})
 	if err != nil {
@@ -916,13 +981,16 @@ func (s *Store) Move(ctx context.Context, mb uuid.UUID, from string, uid uint32,
 	if err := s.putRecord(ctx, mb, to, rec); err != nil {
 		return Record{}, err
 	}
-	if _, err := s.io.Write(ctx, folderOID(mb, from, oldUID), rados.NewWriteTx().OmapRemove(uidKey(oldUID))); err != nil {
-		return Record{}, mapErr(err)
-	}
-	if _, err := s.io.Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(rec.ThreadID, rec.MessageID): []byte(loc.String())})); err != nil {
-		return Record{}, mapErr(err)
-	}
-	if err := s.logChange(ctx, mb, Change{ModSeq: rec.ModSeq, Kind: KindEmail, Op: OpUpdated, ID: rec.MessageID.String(), FolderID: to, UID: rec.UID, Timestamp: now}); err != nil {
+	var pg parallel
+	pg.go_(func() error {
+		_, err := s.io.Write(ctx, folderOID(mb, from, oldUID), rados.NewWriteTx().OmapRemove(uidKey(oldUID)))
+		return mapErr(err)
+	})
+	pg.go_(func() error {
+		_, err := s.io.Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(rec.ThreadID, rec.MessageID): []byte(loc.String())}))
+		return mapErr(err)
+	})
+	if err := pg.wait(); err != nil {
 		return Record{}, err
 	}
 	s.maybeTrim(ctx, mb, rec.ModSeq)
@@ -953,6 +1021,7 @@ func (s *Store) Remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 		}
 		r.Usage.Bytes -= rec.Size
 		r.Usage.Messages--
+		r.Log(Change{ModSeq: r.ModSeq, Kind: KindEmail, Op: OpDestroyed, ID: rec.MessageID.String(), FolderID: fid, UID: uid, Timestamp: now})
 		return nil
 	})
 	if err != nil {
@@ -963,16 +1032,24 @@ func (s *Store) Remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 	if err != nil {
 		return RetentionEntry{}, err
 	}
+	// Retention entry first so a crash never loses the message's trail,
+	// then the index and thread removals concurrently.
 	if _, err := s.io.Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{retentionKey(entry.PurgeAt, rec.MessageID): data})); err != nil {
 		return RetentionEntry{}, mapErr(err)
 	}
-	if _, err := s.io.Write(ctx, folderOID(mb, fid, uid), rados.NewWriteTx().OmapRemove(uidKey(uid))); err != nil {
-		return RetentionEntry{}, mapErr(err)
-	}
-	if _, err := s.io.Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapRemove(threadKey(rec.ThreadID, rec.MessageID))); err != nil && !errors.Is(err, rados.ErrNotFound) {
-		return RetentionEntry{}, mapErr(err)
-	}
-	if err := s.logChange(ctx, mb, Change{ModSeq: modseq, Kind: KindEmail, Op: OpDestroyed, ID: rec.MessageID.String(), FolderID: fid, UID: uid, Timestamp: now}); err != nil {
+	var pg parallel
+	pg.go_(func() error {
+		_, err := s.io.Write(ctx, folderOID(mb, fid, uid), rados.NewWriteTx().OmapRemove(uidKey(uid)))
+		return mapErr(err)
+	})
+	pg.go_(func() error {
+		_, err := s.io.Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapRemove(threadKey(rec.ThreadID, rec.MessageID)))
+		if errors.Is(err, rados.ErrNotFound) {
+			return nil
+		}
+		return mapErr(err)
+	})
+	if err := pg.wait(); err != nil {
 		return RetentionEntry{}, err
 	}
 	s.maybeTrim(ctx, mb, modseq)
@@ -1132,11 +1209,12 @@ func (s *Store) DeleteAll(ctx context.Context, mb uuid.UUID) error {
 	for i := 0; i < threadShards; i++ {
 		oids = append(oids, fmt.Sprintf("%s/t.%02x", mb, i))
 	}
-	oids = append(oids, changesOID(mb), retentionOID(mb), rootOID(mb))
+	oids = append(oids, retentionOID(mb), rootOID(mb))
 	for _, oid := range oids {
 		if err := s.io.Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
 			return mapErr(err)
 		}
 	}
+	s.roots.Delete(mb)
 	return nil
 }

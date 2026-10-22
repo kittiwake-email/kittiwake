@@ -173,6 +173,7 @@ func New(cfg config.Config, client rados.Client, log *slog.Logger) (*App, error)
 			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, KeepRaw: cfg.Mail.KeepRaw,
 			SpamHeader: cfg.Mail.SpamHeader, SpamValue: cfg.Mail.SpamValue, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
 			DefaultQuota: dq, OverQuotaTempFail: cfg.Mail.OverQuotaTempFail, DisabledTempFail: cfg.Mail.DisabledTempFail,
+			LookupTTL: 2 * time.Second, // identity reads are cached per process; admin changes show within this
 		}),
 		Mailbox: mailbox.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, mailbox.Config{TrashRetention: cfg.Mail.TrashRetention, DefaultQuota: dq}),
 		Admin:   admin.New(st.Identity, st.Index, st.Queue, aud),
@@ -231,6 +232,11 @@ func (a *App) Run(ctx context.Context) error {
 			}
 		}()
 	}
+
+	// Audit records are batched into one omap write per object per second
+	// (they also go to the structured log synchronously).
+	a.Stores.Audit.StartBuffering(time.Second, 500, func(err error) { a.Log.Error("audit flush failed", slog.String("error", err.Error())) })
+	a.addCloser(func(context.Context) error { a.Stores.Audit.Close(); return nil })
 
 	// Management listener is always on.
 	mgmt := http.NewServeMux()

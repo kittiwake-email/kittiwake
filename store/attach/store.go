@@ -59,9 +59,16 @@ func (s *Store) Put(ctx context.Context, hash string, data []byte, contentType s
 		return ErrHash
 	}
 	now := []byte(strconv.FormatInt(s.Now().UTC().Unix(), 10))
+	// Content, xattrs and the first reference in one transaction; only when
+	// the object already exists does a second (reference-only) write follow.
 	tx := rados.NewWriteTx().CreateExclusive().WriteFull(data).
-		SetXattr("content_type", []byte(contentType)).SetXattr("created", now).SetXattr("size", []byte(strconv.Itoa(len(data))))
-	if _, err := s.io.Write(ctx, hash, tx); err != nil && !errors.Is(err, rados.ErrExists) {
+		SetXattr("content_type", []byte(contentType)).SetXattr("created", now).SetXattr("touched", now).
+		SetXattr("size", []byte(strconv.Itoa(len(data)))).OmapSet(map[string][]byte{refKey(mb, msg): nil})
+	_, err := s.io.Write(ctx, hash, tx)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, rados.ErrExists) {
 		return err
 	}
 	return s.AddRef(ctx, hash, mb, msg)

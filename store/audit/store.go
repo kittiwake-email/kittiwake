@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,16 +56,92 @@ type Record struct {
 	Admin string `json:"admin,omitempty"`
 }
 
-// Store is the audit store.
+// Store is the audit store. Writes are synchronous by default; daemons call
+// StartBuffering so records are grouped per target object and flushed in one
+// omap write per object per interval (one RADOS write per hundreds of
+// records instead of one per record). Records also go to the structured log
+// synchronously, so a crash loses at most one interval of RADOS copies.
 type Store struct {
 	io  rados.IOContext
 	Now func() time.Time
 	seq atomic.Uint64
+
+	mu       sync.Mutex
+	buffered bool
+	pending  map[string]map[string][]byte // oid -> key -> record
+	count    int
+	maxBatch int
+	wake     chan struct{}
+	stop     chan struct{}
+	done     chan struct{}
+	errs     func(error)
 }
 
 // New returns a store on the index pool context.
 func New(indexPool rados.IOContext) *Store {
-	return &Store{io: indexPool, Now: time.Now}
+	return &Store{io: indexPool, Now: time.Now, pending: map[string]map[string][]byte{}}
+}
+
+// StartBuffering switches to batched writes: flush every interval or when
+// maxBatch records are pending. onError receives flush failures (may be nil).
+func (s *Store) StartBuffering(interval time.Duration, maxBatch int, onError func(error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.buffered {
+		return
+	}
+	if maxBatch <= 0 {
+		maxBatch = 500
+	}
+	s.buffered, s.maxBatch, s.errs = true, maxBatch, onError
+	s.wake, s.stop, s.done = make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
+	go s.flusher(interval)
+}
+
+func (s *Store) flusher(interval time.Duration) {
+	defer close(s.done)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+		case <-s.wake:
+		case <-s.stop:
+			s.flushAll(context.Background())
+			return
+		}
+		s.flushAll(context.Background())
+	}
+}
+
+func (s *Store) flushAll(ctx context.Context) {
+	s.mu.Lock()
+	batch := s.pending
+	s.pending = map[string]map[string][]byte{}
+	s.count = 0
+	s.mu.Unlock()
+	for oid, kv := range batch {
+		if _, err := s.io.Write(ctx, oid, rados.NewWriteTx().OmapSet(kv)); err != nil && s.errs != nil {
+			s.errs(fmt.Errorf("audit flush %s (%d records): %w", oid, len(kv), err))
+		}
+	}
+}
+
+// Flush writes everything pending (tests and shutdown).
+func (s *Store) Flush(ctx context.Context) { s.flushAll(ctx) }
+
+// Close stops buffering after a final flush.
+func (s *Store) Close() {
+	s.mu.Lock()
+	if !s.buffered {
+		s.mu.Unlock()
+		return
+	}
+	s.buffered = false
+	stop, done := s.stop, s.done
+	s.mu.Unlock()
+	close(stop)
+	<-done
 }
 
 func day(t time.Time) string { return t.UTC().Format("2006-01-02") }
@@ -96,6 +173,28 @@ func (s *Store) Write(ctx context.Context, r Record) error {
 	if r.Protocol == ProtoAdmin || r.Protocol == ProtoCLI || r.Admin != "" || r.Mailbox == uuid.Nil {
 		oids = append(oids, adminOID(d))
 	}
+	s.mu.Lock()
+	if s.buffered {
+		for _, oid := range oids {
+			m := s.pending[oid]
+			if m == nil {
+				m = map[string][]byte{}
+				s.pending[oid] = m
+			}
+			m[k] = data
+			s.count++
+		}
+		full := s.count >= s.maxBatch
+		s.mu.Unlock()
+		if full {
+			select {
+			case s.wake <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}
+	s.mu.Unlock()
 	for _, oid := range oids {
 		if _, err := s.io.Write(ctx, oid, rados.NewWriteTx().OmapSet(map[string][]byte{k: data})); err != nil {
 			return err

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,6 +52,14 @@ type Config struct {
 	DefaultQuota      identity.QuotaLimits
 	OverQuotaTempFail bool
 	DisabledTempFail  bool
+	// SearchEvents publishes index/remove events to the task queue; off
+	// unless a search backend consumes them (one write per message).
+	SearchEvents bool
+	// LookupTTL caches domain/account/alias/mailbox lookups per process so
+	// a stream of deliveries to the same recipient costs no identity reads.
+	LookupTTL time.Duration
+	// QuotaStaleness: how old a cached root may be for the quota check.
+	QuotaStaleness time.Duration
 }
 
 // Task types this service enqueues.
@@ -76,6 +85,102 @@ type Service struct {
 	log   *slog.Logger
 	cfg   Config
 	Now   func() time.Time
+
+	lookups lookupCache
+}
+
+// lookupCache is a small TTL cache for identity objects keyed by kind+key.
+type lookupCache struct {
+	mu    sync.Mutex
+	items map[string]cacheItem
+}
+
+type cacheItem struct {
+	v   any
+	err error
+	at  time.Time
+}
+
+const maxCachedLookups = 50000
+
+func (c *lookupCache) get(key string, now time.Time, ttl time.Duration, load func() (any, error)) (any, error) {
+	if ttl > 0 {
+		c.mu.Lock()
+		if it, ok := c.items[key]; ok && now.Sub(it.at) < ttl {
+			c.mu.Unlock()
+			return it.v, it.err
+		}
+		c.mu.Unlock()
+	}
+	v, err := load()
+	if ttl > 0 && (err == nil || errors.Is(err, identity.ErrNotFound)) {
+		c.mu.Lock()
+		if c.items == nil {
+			c.items = map[string]cacheItem{}
+		}
+		if len(c.items) >= maxCachedLookups {
+			for k := range c.items { // drop arbitrary entries
+				delete(c.items, k)
+				if len(c.items) < maxCachedLookups/2 {
+					break
+				}
+			}
+		}
+		c.items[key] = cacheItem{v: v, err: err, at: now}
+		c.mu.Unlock()
+	}
+	return v, err
+}
+
+// Invalidate drops cached identity lookups (tests, admin changes).
+func (s *Service) Invalidate() {
+	s.lookups.mu.Lock()
+	s.lookups.items = nil
+	s.lookups.mu.Unlock()
+}
+
+func (s *Service) getDomain(ctx context.Context, name string) (identity.Domain, error) {
+	v, err := s.lookups.get("d:"+name, s.Now(), s.cfg.LookupTTL, func() (any, error) {
+		d, err := s.ids.GetDomain(ctx, name)
+		return d.Value, err
+	})
+	if err != nil {
+		return identity.Domain{}, err
+	}
+	return v.(identity.Domain), nil
+}
+
+func (s *Service) getAccount(ctx context.Context, username string) (identity.Account, error) {
+	v, err := s.lookups.get("a:"+username, s.Now(), s.cfg.LookupTTL, func() (any, error) {
+		a, err := s.ids.GetAccountByUsername(ctx, username)
+		return a.Value, err
+	})
+	if err != nil {
+		return identity.Account{}, err
+	}
+	return v.(identity.Account), nil
+}
+
+func (s *Service) getAlias(ctx context.Context, key string) (identity.Alias, error) {
+	v, err := s.lookups.get("l:"+key, s.Now(), s.cfg.LookupTTL, func() (any, error) {
+		a, err := s.ids.GetAlias(ctx, key)
+		return a.Value, err
+	})
+	if err != nil {
+		return identity.Alias{}, err
+	}
+	return v.(identity.Alias), nil
+}
+
+func (s *Service) getMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbox, error) {
+	v, err := s.lookups.get("m:"+id.String(), s.Now(), s.cfg.LookupTTL, func() (any, error) {
+		m, err := s.ids.GetMailbox(ctx, id)
+		return m.Value, err
+	})
+	if err != nil {
+		return identity.Mailbox{}, err
+	}
+	return v.(identity.Mailbox), nil
 }
 
 // New returns the service. queue may be nil (events dropped).
@@ -85,6 +190,9 @@ func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attac
 	}
 	if cfg.MaxMessageSize <= 0 {
 		cfg.MaxMessageSize = 50 << 20
+	}
+	if cfg.QuotaStaleness <= 0 {
+		cfg.QuotaStaleness = 5 * time.Second
 	}
 	if log == nil {
 		log = slog.Default()
@@ -107,14 +215,14 @@ func (s *Service) Resolve(ctx context.Context, address string) ([]Target, error)
 	if err != nil {
 		return nil, ErrUnknownRecipient
 	}
-	d, err := s.ids.GetDomain(ctx, domain)
+	d, err := s.getDomain(ctx, domain)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			return nil, ErrUnknownDomain
 		}
 		return nil, err
 	}
-	if !d.Value.Enabled {
+	if !d.Enabled {
 		return nil, ErrUnknownDomain
 	}
 	seen := map[string]bool{}
@@ -127,27 +235,27 @@ func (s *Service) resolve(ctx context.Context, addr, domain string, depth int, s
 	}
 	seen[addr] = true
 	// 1. Exact account.
-	if v, err := s.ids.GetAccountByUsername(ctx, addr); err == nil {
-		if v.Value.MailboxID != uuid.Nil {
-			return []Target{{MailboxID: v.Value.MailboxID, Via: v.Value.Username}}, nil
+	if a, err := s.getAccount(ctx, addr); err == nil {
+		if a.MailboxID != uuid.Nil {
+			return []Target{{MailboxID: a.MailboxID, Via: a.Username}}, nil
 		}
-	} else if !errors.Is(err, identity.ErrNotFound) {
+	} else if !errors.Is(err, identity.ErrNotFound) && !errors.Is(err, identity.ErrInvalid) {
 		return nil, err
 	}
 	// 2. Alias, 3. catch-all.
 	for _, key := range []string{addr, "@" + domain} {
-		v, err := s.ids.GetAlias(ctx, key)
+		al, err := s.getAlias(ctx, key)
 		if err != nil {
 			if errors.Is(err, identity.ErrNotFound) {
 				continue
 			}
 			return nil, err
 		}
-		if !v.Value.Enabled {
+		if !al.Enabled {
 			continue
 		}
 		var out []Target
-		for _, dst := range v.Value.Destinations {
+		for _, dst := range al.Destinations {
 			if dst.MailboxID != uuid.Nil {
 				out = append(out, Target{MailboxID: dst.MailboxID, Via: key})
 				continue
@@ -202,14 +310,13 @@ func (s *Service) CheckRecipient(ctx context.Context, address string, size int64
 
 // admission checks mailbox enabled, hold and quota for an incoming size.
 func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (identity.Mailbox, error) {
-	v, err := s.ids.GetMailbox(ctx, mb)
+	m, err := s.getMailbox(ctx, mb)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			return identity.Mailbox{}, ErrUnknownRecipient
 		}
 		return identity.Mailbox{}, err
 	}
-	m := v.Value
 	if !m.Enabled {
 		return m, ErrMailboxDisabled
 	}
@@ -221,7 +328,7 @@ func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (iden
 	}
 	limits := s.effectiveQuota(m.Quota)
 	if limits.HardBytes > 0 || limits.HardMessages > 0 {
-		root, err := s.idx.GetRoot(ctx, mb)
+		root, err := s.idx.GetRootCached(ctx, mb, s.cfg.QuotaStaleness)
 		if err != nil && !errors.Is(err, index.ErrNotFound) {
 			return m, err
 		}
@@ -418,30 +525,52 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 // later) but never a dangling index entry.
 func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, parsed *mail.Parsed, raw []byte, flags []string, internalDate time.Time) (Delivered, error) {
 	msgID := uuid.New()
-	// 1. Attachments (content + reference), idempotent and deduplicated.
-	for _, a := range parsed.Attachments {
-		if err := s.atts.Put(ctx, a.Hash, a.Data, a.ContentType, mb, msgID); err != nil {
-			return Delivered{}, fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
-		}
-	}
 	docJSON, err := json.Marshal(parsed.Doc)
 	if err != nil {
 		return Delivered{}, err
 	}
 	keepRaw := s.cfg.KeepRaw == "always" || (s.cfg.KeepRaw == "signed" && parsed.Signed)
-	// 2. Index allocation → message object at its location → index commit.
+
+	// Attachments (content + reference in one transaction each) are
+	// independent of the index: write them while the index allocates.
+	attDone := make(chan error, 1)
+	go func() {
+		for _, a := range parsed.Attachments {
+			if err := s.atts.Put(ctx, a.Hash, a.Data, a.ContentType, mb, msgID); err != nil {
+				attDone <- fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
+				return
+			}
+		}
+		attDone <- nil
+	}()
+
+	// Root transaction (UID, modseq, counters, change log) → message object
+	// at its location (concurrently with the thread maps, inside Append) →
+	// folder record (commit point). Round trips on the critical path: 3.
 	rec := recordFor(msgID, parsed.Doc, flags, internalDate)
 	rec, err = s.idx.Append(ctx, mb, folderID, rec, func(uid uint32, _ uint64) error {
 		loc := index.Location{FolderID: folderID, UID: uid}.String()
-		if err := s.msgs.Put(ctx, mb, msgID, docJSON, loc); err != nil {
+		var pg sync.WaitGroup
+		var rawErr error
+		if keepRaw {
+			pg.Add(1)
+			go func() {
+				defer pg.Done()
+				if err := s.msgs.PutRaw(ctx, mb, msgID, raw); err != nil {
+					rawErr = fmt.Errorf("delivery: raw object: %w", err)
+				}
+			}()
+		}
+		err := s.msgs.Put(ctx, mb, msgID, docJSON, loc)
+		pg.Wait()
+		if err != nil {
 			return fmt.Errorf("delivery: message object: %w", err)
 		}
-		if keepRaw {
-			if err := s.msgs.PutRaw(ctx, mb, msgID, raw); err != nil {
-				return fmt.Errorf("delivery: raw object: %w", err)
-			}
+		if rawErr != nil {
+			return rawErr
 		}
-		return nil
+		// Attachments must exist before the index entry commits.
+		return <-attDone
 	})
 	if err != nil {
 		if errors.Is(err, index.ErrNotFound) {
@@ -449,16 +578,20 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 		}
 		return Delivered{}, err
 	}
-	// Events and notifications (best effort).
-	if s.queue != nil {
+	// Events and notifications are off the critical path.
+	if s.cfg.SearchEvents && s.queue != nil {
 		if _, err := s.queue.Enqueue(ctx, TaskSearchIndex, SearchIndexTask{Mailbox: mb, Message: msgID, Op: "index"}, time.Time{}); err != nil {
 			s.log.WarnContext(ctx, "enqueue search-index failed", slog.String("error", err.Error()))
 		}
 	}
 	payload, _ := json.Marshal(map[string]any{"type": "email", "folder": folderID, "uid": rec.UID, "modseq": rec.ModSeq})
-	if err := s.idx.Notify(ctx, mb, payload); err != nil {
-		s.log.DebugContext(ctx, "notify failed", slog.String("error", err.Error()))
-	}
+	go func() {
+		nctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.idx.Notify(nctx, mb, payload); err != nil {
+			s.log.DebugContext(nctx, "notify failed", slog.String("error", err.Error()))
+		}
+	}()
 	return Delivered{MailboxID: mb, MessageID: msgID, FolderID: folderID, UID: rec.UID}, nil
 }
 
