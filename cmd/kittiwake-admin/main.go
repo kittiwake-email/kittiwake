@@ -121,7 +121,12 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return emit(st, func() { fmt.Printf("version: %s\ntime:    %s\n", st.Version, st.Time.Format(time.RFC3339)) })
+		return emit(st, func() {
+			fmt.Printf("version: %s\ntime:    %s\n", st.Version, st.Time.Format(time.RFC3339))
+			if st.Schema != nil {
+				fmt.Printf("schema:  %d (applied by %s on %s)\n", st.Schema.Version, st.Schema.AppliedBy, st.Schema.AppliedAt.Format(time.RFC3339))
+			}
+		})
 	case "domain":
 		return app.domain(sub)
 	case "mailbox":

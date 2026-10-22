@@ -41,6 +41,10 @@ import (
 // Version reported by /v1/admin/status.
 var Version = "dev"
 
+// Schema, when set, reports the metadata schema in place (version, when and
+// by which product version it was applied) in /v1/admin/status.
+var Schema func(ctx context.Context) (any, error)
+
 // Config for the server.
 type Config struct {
 	Realm          string
@@ -755,7 +759,16 @@ func (s *Server) meTOTPDisable(w http.ResponseWriter, r *http.Request) {
 // ---- admin: status ----
 
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"version": Version, "time": time.Now().UTC()})
+	out := map[string]any{"version": Version, "time": time.Now().UTC()}
+	if Schema != nil {
+		info, err := Schema(r.Context())
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		out["schema"] = info
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 // ---- admin: domains ----

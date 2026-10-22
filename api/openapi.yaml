@@ -373,8 +373,15 @@ paths:
               schema:
                 type: object
                 properties:
-                  version: { type: string }
+                  version: { type: string, description: "Product version: <release>+<commit>, e.g. 26.0+2b4ab79" }
                   time: { type: string, format: date-time }
+                  schema:
+                    type: object
+                    description: Metadata schema in place (absent without a database)
+                    properties:
+                      version: { type: integer }
+                      applied_at: { type: string, format: date-time }
+                      applied_by: { type: string, description: Product version that applied this schema version }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/domains:

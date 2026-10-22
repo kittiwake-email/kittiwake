@@ -5,7 +5,8 @@
 
 CREATE TABLE IF NOT EXISTS schema_version (
   version    INT UNSIGNED NOT NULL PRIMARY KEY,
-  applied_at DATETIME(6)  NOT NULL
+  applied_at DATETIME(6)  NOT NULL,
+  applied_by VARCHAR(64)  NOT NULL DEFAULT ''
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS storage (

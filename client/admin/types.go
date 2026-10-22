@@ -12,6 +12,15 @@ import (
 type Status struct {
 	Version string    `json:"version"`
 	Time    time.Time `json:"time"`
+	// Schema is absent with the RADOS identity backend (no database).
+	Schema *SchemaInfo `json:"schema,omitempty"`
+}
+
+// SchemaInfo is the metadata schema in place.
+type SchemaInfo struct {
+	Version   int       `json:"version"`
+	AppliedAt time.Time `json:"applied_at"`
+	AppliedBy string    `json:"applied_by"`
 }
 
 // Page is a paginated list of names (domains, accounts, aliases).

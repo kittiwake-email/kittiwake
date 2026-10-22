@@ -44,9 +44,6 @@ import (
 	"kittiwake/worker"
 )
 
-// Version is set at build time.
-var Version = "dev"
-
 // ModeFunc starts a mode. It must mark the mode handled via MarkHandled and
 // register closers with AddCloser.
 type ModeFunc func(ctx context.Context, a *App, start func(name string, f func() error)) error
@@ -176,6 +173,7 @@ func OpenDatabase(ctx context.Context, cfg config.Database) (*mariadb.DB, error)
 	if err != nil {
 		return nil, err
 	}
+	db.ProductVersion = Version
 	if cfg.ReadStickiness > 0 {
 		db.ReadStickiness = cfg.ReadStickiness
 	}

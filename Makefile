@@ -1,12 +1,19 @@
 # Kittiwake build helpers. Requires Go 1.26+ and librados-dev (cgo).
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS  = -X kittiwake/app.Version=$(VERSION) -X main.Version=$(VERSION)
+# Version: the release from app/version.go with the commit embedded (26.0+2b4ab79,
+# "-dirty" when the tree has uncommitted changes).
+RELEASE := $(shell sed -n 's/^const Release = "\(.*\)"/\1/p' app/version.go)
+COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
+VERSION := $(RELEASE)+$(COMMIT)
+LDFLAGS  = -X kittiwake/app.Commit=$(COMMIT) -X main.Version=$(VERSION)
 
-.PHONY: build test test-race test-sql vet fmt lint clean run-dev
+.PHONY: build version test test-race test-sql vet fmt lint clean run-dev
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o bin/kittiwake ./cmd/kittiwake
 	go build -ldflags '$(LDFLAGS)' -o bin/kittiwake-admin ./cmd/kittiwake-admin
+
+version:
+	@echo $(VERSION)
 
 test:
 	go test ./...

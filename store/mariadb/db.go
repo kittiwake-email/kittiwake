@@ -56,6 +56,10 @@ type DB struct {
 	// Queue tuning (see queue.Rados for the defaults).
 	MaxAttempts int
 	Backoff     func(attempt int) time.Duration
+	// ProductVersion is recorded with every migration this process applies
+	// (schema_version.applied_by), so the database says which release
+	// created or last upgraded its schema.
+	ProductVersion string
 }
 
 // Open connects to the primary DSN (go-sql-driver/mysql format, e.g.
@@ -227,6 +231,29 @@ func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
 	return int(v.Int64), nil
 }
 
+// SchemaInfo describes the schema in place: its version and which product
+// version applied it when.
+type SchemaInfo struct {
+	Version   int       `json:"version"`
+	AppliedAt time.Time `json:"applied_at"`
+	AppliedBy string    `json:"applied_by"`
+}
+
+// Schema returns the applied schema version with when and by which product
+// version it was applied; version 0 for an empty database.
+func (d *DB) Schema(ctx context.Context) (SchemaInfo, error) {
+	var out SchemaInfo
+	err := d.r().QueryRowContext(ctx, "SELECT version, applied_at, applied_by FROM schema_version ORDER BY version DESC LIMIT 1").Scan(&out.Version, &out.AppliedAt, &out.AppliedBy)
+	if err != nil {
+		var me *mysql.MySQLError
+		if errors.Is(err, sql.ErrNoRows) || (errors.As(err, &me) && me.Number == 1146) {
+			return SchemaInfo{}, nil
+		}
+		return SchemaInfo{}, err
+	}
+	return out, nil
+}
+
 // Migrate applies every migration above the current version and returns
 // the version now in place. Safe to run concurrently (server-side lock)
 // and to re-run after a failure.
@@ -262,7 +289,7 @@ func (d *DB) Migrate(ctx context.Context) (int, error) {
 				return cur, fmt.Errorf("mariadb: migration %s: %w\n%s", m.name, err, stmt)
 			}
 		}
-		if _, err := conn.ExecContext(ctx, "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)", m.version, d.Now().UTC()); err != nil {
+		if _, err := conn.ExecContext(ctx, "INSERT INTO schema_version (version, applied_at, applied_by) VALUES (?, ?, ?)", m.version, d.Now().UTC(), d.ProductVersion); err != nil {
 			return cur, err
 		}
 		cur = m.version

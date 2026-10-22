@@ -120,7 +120,7 @@ func runVersion(args []string) error {
 	if err := setOutput(*of); err != nil {
 		return err
 	}
-	return emit(map[string]string{"version": app.Version}, func() { fmt.Println("kittiwake", app.Version) })
+	return emit(map[string]string{"version": app.Version, "release": app.Release, "commit": app.Commit}, func() { fmt.Println("kittiwake", app.Version) })
 }
 
 func runCheckConfig(args []string) error {
@@ -259,6 +259,7 @@ func runMigrate(args []string) error {
 		return err
 	}
 	defer db.Close()
+	db.ProductVersion = app.Version
 	ctx := context.Background()
 	before, err := db.SchemaVersion(ctx)
 	if err != nil {
@@ -268,10 +269,11 @@ func runMigrate(args []string) error {
 	if err != nil {
 		return err
 	}
+	info, _ := db.Schema(ctx)
 	if after == before {
-		fmt.Printf("schema version %d, up to date\n", after)
+		fmt.Printf("schema version %d, up to date (applied by %s on %s)\n", after, info.AppliedBy, info.AppliedAt.Format(time.RFC3339))
 	} else {
-		fmt.Printf("schema version %d -> %d\n", before, after)
+		fmt.Printf("schema version %d -> %d (applied by %s)\n", before, after, app.Version)
 	}
 	return nil
 }

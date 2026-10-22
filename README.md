@@ -1037,6 +1037,25 @@ URL and token from flags, environment (`KITTIWAKE_ADMIN_URL`, `KITTIWAKE_ADMIN_T
 The admin listener serves its own OpenAPI document at `/openapi.yaml` (unauthenticated) so
 other clients can be generated from the exact contract the running version implements.
 
+## Versioning and releases
+
+Kittiwake has rolling releases numbered `<two-digit year>.<release within the year>`: 26.0
+is the first release of 2026; the second number counts up with every release of that year
+and the first release of 2027 is 27.1. The release number lives in one place,
+`app/version.go` (`Release`); cutting a release is bumping it and committing.
+
+Every build embeds the commit: the version a binary reports is `<release>+<short commit>`,
+e.g. `26.0+2b4ab79`, with `-dirty` appended when the tree had uncommitted changes
+(`make build` sets it; `make version` prints it). That string appears in `kittiwake
+version`, `kittiwake-admin version`, the startup log line, `/v1/admin/status`, the node
+registry (`kittiwake-admin node list` shows which build runs where) and the User-Agent of the
+admin CLI.
+
+The database records it too: `schema_version` keeps, per schema version, when it was applied
+and by which product version (`applied_by`), so `kittiwake-admin status` can say "schema 2,
+applied by 26.0+2b4ab79 on …" and an operator sees at once whether a box runs a build older
+than the schema it talks to (a daemon refuses to start on a schema version it does not know).
+
 ## Key dependencies
 
 - `github.com/ceph/go-ceph` for librados (cgo)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/http"
 
@@ -17,6 +18,9 @@ func restServer(a *app.App) (*rest.Server, []net.IPNet) {
 		a.Log.Error("proxy.trusted_addresses invalid; ignoring", "error", err.Error())
 	}
 	rest.Version = app.Version
+	if a.DB != nil {
+		rest.Schema = func(ctx context.Context) (any, error) { return a.DB.Schema(ctx) }
+	}
 	srv := rest.New(rest.Config{
 		Realm: "kittiwake", TrustedProxies: trusted, DefaultQuota: a.DefaultQuota(),
 		MaxBody: 1 << 20, Identity: a.Stores.Identity,
