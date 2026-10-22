@@ -84,8 +84,7 @@ func newFixture(t *testing.T) *fixture {
 	h, _ := cryptoauth.HashPassword("correct horse")
 	f.user, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Enabled: true, Roles: []string{"read", "write", "send"}, Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}}})
 	_, f.userTk, _ = f.ids.CreateToken(ctx, f.user.ID, nil, f.now.Add(24*time.Hour), "user token")
-	admin, _ := f.ids.CreateAccount(ctx, identity.Account{Username: "admin@example.org", Roles: []string{"admin"}, Enabled: true})
-	_, f.adminTk, _ = f.ids.CreateToken(ctx, admin.ID, nil, f.now.Add(24*time.Hour), "test admin")
+	_, f.adminTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdmin, f.now.Add(24*time.Hour), "test admin")
 	f.c = New(f.ts.URL, f.adminTk, WithTimeout(10*time.Second), WithUserAgent("test"))
 	return f
 }
@@ -285,7 +284,7 @@ func TestMailboxesAccountsAliasesTokens(t *testing.T) {
 		t.Fatalf("accounts all: %v", all)
 	}
 	all, _ = f.c.ListAccountsAll(ctx, "example.org", "")
-	if len(all) != 6 {
+	if len(all) != 5 {
 		t.Fatalf("all accounts: %v", all)
 	}
 	must(t, f.c.DeleteAccount(ctx, "bob@example.org"))
@@ -307,7 +306,7 @@ func TestHoldAuditQueuesKeysIdentity(t *testing.T) {
 	no := false
 	mb, err := f.c.HoldMailbox(ctx, f.mb.ID.String(), HoldRequest{Reason: "subpoena", CaseRef: "42", AcceptDelivery: &no, Sealed: true})
 	must(t, err)
-	if mb.Hold == nil || mb.Hold.AcceptDelivery || !mb.Hold.Sealed || mb.Hold.SetBy != "admin@example.org" {
+	if mb.Hold == nil || mb.Hold.AcceptDelivery || !mb.Hold.Sealed || mb.Hold.SetBy != "admin:test admin" {
 		t.Fatalf("hold: %+v", mb.Hold)
 	}
 	if _, err := f.c.HoldMailbox(ctx, f.mb.ID.String(), HoldRequest{Reason: "again"}); !IsConflict(err) {

@@ -488,6 +488,15 @@ func (s *Service) VerifyAPIToken(ctx context.Context, token string) (actor.Actor
 	if t.Expired(s.Now()) {
 		return actor.Actor{}, ErrTokenExpired
 	}
+	if t.IsAdmin() {
+		if s.Now().Sub(t.LastUsed) > time.Minute {
+			s.ids.TouchToken(ctx, v)
+		}
+		return actor.Actor{
+			Username: "admin:" + t.Comment, Roles: append([]string(nil), t.Roles...),
+			Credential: "admin-token", TokenID: t.ID, TokenNote: t.Comment,
+		}, nil
+	}
 	av, err := s.ids.GetAccount(ctx, t.AccountID)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {

@@ -59,7 +59,7 @@ ssh root@2a14:9b80::3143 'cd /root/dovetail && E2E_ATTACH=1 BIN=/usr/local/bin/d
 
 `/usr/local/bin/dovetail-admin` talks to the admin listener; its token is in
 `/root/.config/dovetail/admin.yaml` (minted with `dovetail admin -c /etc/dovetail/dovetail.yaml
-token --account <admin>`). The OpenAPI document of the running version is at
+bootstrap`, or `... token --comment x [--read-only]` later). The OpenAPI document of the running version is at
 `http://[::1]:8081/openapi.yaml`.
 
 ```

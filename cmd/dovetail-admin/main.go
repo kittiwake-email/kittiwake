@@ -63,6 +63,7 @@ commands:
   alias     create|list|get|set|delete
   audit     query the audit log
   queue     stats|dead|retry
+  token     create|list|delete     admin tokens (full or --read-only)
   keys      rotate
   identity  export|import
   openapi   fetch the OpenAPI spec
@@ -131,6 +132,8 @@ func run(args []string) error {
 		return app.audit(sub)
 	case "queue":
 		return app.queue(sub)
+	case "token":
+		return app.token(sub)
 	case "keys":
 		return app.keys(sub)
 	case "identity":

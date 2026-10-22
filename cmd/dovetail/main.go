@@ -99,11 +99,11 @@ func seedAccount(a *app.App, spec string) error {
 	if err != nil {
 		return err
 	}
-	res, err := adm.Bootstrap(ctx, "admin@"+domain, pw, "dev", 24*time.Hour)
+	tok, secret, err := adm.Bootstrap(ctx, "dev", 24*time.Hour)
 	if err != nil {
 		return err
 	}
-	a.Log.Warn("development seed created", "account", acct.Username, "mailbox", mb.ID.String(), "admin", res.Account.Username, "admin_token", res.Secret)
+	a.Log.Warn("development seed created", "account", acct.Username, "mailbox", mb.ID.String(), "admin_token_id", tok.ID, "admin_token", secret)
 	return nil
 }
 

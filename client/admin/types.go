@@ -201,6 +201,13 @@ type TokenRequest struct {
 	Comment   string    `json:"comment"`
 }
 
+// AdminTokenRequest mints an admin token. ReadOnly selects role admin-ro.
+type AdminTokenRequest struct {
+	ReadOnly  bool      `json:"read_only,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Comment   string    `json:"comment"`
+}
+
 // TokenCreated carries the one-time secret.
 type TokenCreated struct {
 	Token  Token  `json:"token"`

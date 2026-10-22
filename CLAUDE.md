@@ -25,7 +25,7 @@ make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (l
 make deploy           # build here, push binary to the lab box, restart its systemd instances
                       # (dovetail@<mode>, one process per mode; see contrib/systemd, TESTENV.md)
 bin/dovetail check-config -c examples/dovetail.yaml
-bin/dovetail admin -c <cfg> bootstrap --username root@example.org   # only bootstrap + token live here
+bin/dovetail admin -c <cfg> bootstrap                 # first admin token; `admin token --read-only` for more
 bin/dovetail-admin -u http://[::1]:8081 -t dvt_... mailbox list       # everything else: the API client
 bin/dovetail-admin ... -o json ...                                   # -o plain|json everywhere
 ```
@@ -139,7 +139,10 @@ These are settled. Do not design around them.
   (many-to-one), have roles (`read`, `write`, `send`, `admin`), passwords marked `primary`
   or `application` (Dovecot-style scheme prefixes; argon2id for new ones), optional TOTP
   secret, and API tokens (stored as SHA-256, prefixed `dvt_`, expiry and comment mandatory,
-  may only narrow the account's roles). Admin accounts have `admin` and no mailbox.
+  may only narrow the account's roles). **Admins are tokens, not accounts:** admin tokens
+  (`tokens/<hash>` with zero AccountID, listed in `tokens/_admin`) carry `admin` or
+  `admin-ro`; accounts can never have admin roles. Every GET on the admin API accepts
+  `admin-ro`; services use `authorizeRead`/`IsAdminReader` for reads and `IsAdmin` for writes.
 - **Sessions (OAuth 2.0 shaped, RFC 9700):** `POST /v1/oauth/token` with password gives a
   15-minute Ed25519-signed JWT access token (verified locally, no lookup) plus an opaque
   refresh token stored hashed in RADOS (`sessions/<account-id>`), rotated on every use with

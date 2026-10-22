@@ -142,14 +142,31 @@ func (s *Server) AccountHandler() http.Handler {
 func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	adminAuth := httpx.Auth(s.auth, audit.ProtoAdmin, s.cfg.TrustedProxies, s.cfg.Realm)
-	adminRole := httpx.RequireRole(identity.RoleAdmin)
-	adm := func(h http.Handler) http.Handler { return adminAuth(adminRole(h)) }
+	// Mutations need a full admin token; reads accept read-only admin tokens.
+	adm := func(h http.Handler) http.Handler { return adminAuth(httpx.RequireRole(identity.RoleAdmin)(h)) }
+	admRead := func(h http.Handler) http.Handler {
+		return adminAuth(httpx.RequireAnyRole(identity.RoleAdmin, identity.RoleAdminRead)(h))
+	}
 	public := func(h http.Handler) http.Handler { return h }
-	reg := func(wrap func(http.Handler) http.Handler, rs ...route) { s.register(mux, wrap, rs...) }
-	// The contract itself, unauthenticated at the root of the admin listener
-	// and authenticated under the API prefix.
-	reg(public, route{"GET /openapi.yaml", s.openAPI}, route{"GET /{$}", s.root})
-	reg(adm, route{"GET /v1/admin/openapi.yaml", s.openAPI})
+	reg := func(wrap func(http.Handler) http.Handler, rs ...route) {
+		// Every GET is a read: read-only admins may use it.
+		for _, r := range rs {
+			w := wrap
+			if strings.HasPrefix(r.pattern, "GET ") && isAdminWrap(wrap, adm) {
+				w = admRead
+			}
+			s.register(mux, w, r)
+		}
+	}
+	// The contract itself and the banner are public: the operations need a
+	// token, the description of them does not.
+	reg(public, route{"GET /openapi.yaml", s.openAPI}, route{"GET /{$}", s.root}, route{"GET /v1/admin/openapi.yaml", s.openAPI})
+	// Admin tokens (admins are tokens, not accounts).
+	reg(adm,
+		route{"POST /v1/admin/tokens", s.adminTokenCreate},
+		route{"GET /v1/admin/tokens", s.adminTokenList},
+		route{"DELETE /v1/admin/tokens/{tid}", s.adminTokenDelete},
+	)
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
 		route{"POST /v1/admin/domains", s.domainCreate},
@@ -196,6 +213,54 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"POST /v1/admin/import", s.importIdentity},
 	)
 	return mux
+}
+
+// isAdminWrap reports whether wrap is the full-admin wrapper (func values
+// cannot be compared, so the registration passes a marker through the
+// wrapper identity via reflect-free trick: compare pointers of a sentinel).
+func isAdminWrap(wrap, adm func(http.Handler) http.Handler) bool {
+	return fmt.Sprintf("%p", wrap) == fmt.Sprintf("%p", adm)
+}
+
+type adminTokenRequest struct {
+	ReadOnly  bool      `json:"read_only"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Comment   string    `json:"comment"`
+}
+
+func (s *Server) adminTokenCreate(w http.ResponseWriter, r *http.Request) {
+	var req adminTokenRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	t, secret, err := s.admin.CreateAdminToken(r.Context(), req.ReadOnly, req.ExpiresAt, req.Comment)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"token": viewToken(t), "secret": secret})
+}
+
+func (s *Server) adminTokenList(w http.ResponseWriter, r *http.Request) {
+	list, err := s.admin.ListAdminTokens(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := make([]tokenView, 0, len(list))
+	for _, t := range list {
+		out = append(out, viewToken(t))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (s *Server) adminTokenDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.admin.DeleteAdminToken(r.Context(), r.PathValue("tid")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // openAPI serves the embedded specification.

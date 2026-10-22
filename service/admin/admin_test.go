@@ -139,20 +139,46 @@ func TestAuthorizationAndCRUD(t *testing.T) {
 	}
 }
 
-func TestBootstrap(t *testing.T) {
-	s, ids, _, _, user := newSvc(t)
+func TestBootstrapAndAdminTokens(t *testing.T) {
+	s, ids, _, adm, user := newSvc(t)
 	cli := actor.With(context.Background(), actor.System("cli"))
-	if _, err := s.Bootstrap(user, "root@example.org", "", "", 0); !errors.Is(err, ErrForbidden) {
+	if _, _, err := s.Bootstrap(user, "", 0); !errors.Is(err, ErrForbidden) {
 		t.Fatal("user bootstrap")
 	}
-	res, err := s.Bootstrap(cli, "root@example.org", "adminpassword", "", 0)
-	if err != nil || !res.Account.IsAdmin() || res.Secret == "" || res.Token.Comment != "bootstrap" {
-		t.Fatalf("bootstrap: %+v %v", res, err)
+	tok, secret, err := s.Bootstrap(cli, "", 0)
+	if err != nil || secret == "" || tok.Comment != "bootstrap" || tok.Roles[0] != identity.RoleAdmin || !tok.IsAdmin() {
+		t.Fatalf("bootstrap: %+v %v", tok, err)
 	}
-	if _, err := ids.GetDomain(context.Background(), "example.org"); err != nil {
-		t.Fatal("domain not created")
+	// No account, no domain was created.
+	if names, _, _ := ids.ListDomains(context.Background(), "", 0); len(names) != 0 {
+		t.Fatalf("bootstrap created domains: %v", names)
 	}
-	if _, err := s.Bootstrap(cli, "root@example.org", "", "", 0); !errors.Is(err, ErrExists) {
+	if _, _, err := s.Bootstrap(cli, "", 0); !errors.Is(err, ErrExists) {
 		t.Fatalf("double bootstrap: %v", err)
+	}
+	// Read-only tokens via the API path.
+	ro, _, err := s.CreateAdminToken(adm, true, time.Time{}, "monitoring")
+	if err != nil || ro.Roles[0] != identity.RoleAdminRead {
+		t.Fatal(err)
+	}
+	roCtx := actor.With(context.Background(), actor.Actor{Username: "admin:monitoring", Roles: ro.Roles, Protocol: "admin"})
+	if _, err := s.ListAdminTokens(roCtx); err != nil {
+		t.Fatalf("read-only list: %v", err)
+	}
+	if _, _, err := s.CreateAdminToken(roCtx, false, time.Time{}, "escalate"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("read-only must not mint tokens: %v", err)
+	}
+	if _, err := s.CreateDomain(roCtx, identity.Domain{Name: "x.example"}); !errors.Is(err, ErrForbidden) {
+		t.Fatal("read-only must not create domains")
+	}
+	if _, _, err := s.ListDomains(roCtx, "", 0); err != nil {
+		t.Fatal("read-only may list domains")
+	}
+	list, _ := s.ListAdminTokens(adm)
+	if len(list) != 2 {
+		t.Fatalf("tokens: %d", len(list))
+	}
+	if err := s.DeleteAdminToken(adm, ro.ID); err != nil {
+		t.Fatal(err)
 	}
 }

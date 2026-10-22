@@ -355,17 +355,11 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.ID == uuid.Nil {
 		a.ID = uuid.New()
 	}
-	if a.IsAdmin() {
-		if a.MailboxID != uuid.Nil {
-			return Account{}, fmt.Errorf("%w: admin accounts cannot have a mailbox", ErrInvalid)
-		}
-	} else {
-		if a.MailboxID == uuid.Nil {
-			return Account{}, fmt.Errorf("%w: account needs a mailbox", ErrInvalid)
-		}
-		if _, err := s.GetMailbox(ctx, a.MailboxID); err != nil {
-			return Account{}, fmt.Errorf("mailbox %s: %w", a.MailboxID, err)
-		}
+	if a.MailboxID == uuid.Nil {
+		return Account{}, fmt.Errorf("%w: account needs a mailbox", ErrInvalid)
+	}
+	if _, err := s.GetMailbox(ctx, a.MailboxID); err != nil {
+		return Account{}, fmt.Errorf("mailbox %s: %w", a.MailboxID, err)
 	}
 	if _, err := s.GetDomain(ctx, domain); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -399,10 +393,8 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if _, err := s.domains.Write(ctx, domain, rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"account/" + username: []byte(a.ID.String())})); err != nil {
 		return Account{}, mapErr(err)
 	}
-	if a.MailboxID != uuid.Nil {
-		if _, err := s.mailboxes.Write(ctx, a.MailboxID.String(), rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"account/" + a.ID.String(): []byte(username)})); err != nil {
-			return Account{}, mapErr(err)
-		}
+	if _, err := s.mailboxes.Write(ctx, a.MailboxID.String(), rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{"account/" + a.ID.String(): []byte(username)})); err != nil {
+		return Account{}, mapErr(err)
 	}
 	return a, nil
 }
@@ -451,9 +443,6 @@ func (s *Store) UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*Accoun
 		if err := validateRoles(a.Roles); err != nil {
 			return Account{}, err
 		}
-		if a.IsAdmin() && a.MailboxID != uuid.Nil {
-			return Account{}, fmt.Errorf("%w: admin accounts cannot have a mailbox", ErrInvalid)
-		}
 		a.ID = id
 		a.Updated = s.Now().UTC()
 		for i := range a.Passwords {
@@ -486,9 +475,6 @@ func (s *Store) RelinkAccount(ctx context.Context, id, mailboxID uuid.UUID) (Acc
 	cur, err := getJSON[Account](ctx, s.accounts, id.String())
 	if err != nil {
 		return Account{}, err
-	}
-	if cur.Value.IsAdmin() {
-		return Account{}, fmt.Errorf("%w: admin accounts cannot have a mailbox", ErrInvalid)
 	}
 	a := cur.Value
 	old := a.MailboxID
@@ -809,6 +795,73 @@ func (s *Store) CreateToken(ctx context.Context, accountID uuid.UUID, roles []st
 		return Token{}, "", mapErr(err)
 	}
 	return t, secret, nil
+}
+
+const adminTokensObject = "_admin"
+
+// CreateAdminToken creates an admin API token (full or read-only). Admins
+// are not accounts: the token is the whole identity.
+func (s *Store) CreateAdminToken(ctx context.Context, role string, expiresAt time.Time, comment string) (Token, string, error) {
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return Token{}, "", fmt.Errorf("%w: token comment is required", ErrInvalid)
+	}
+	if !AdminRoles[role] {
+		return Token{}, "", fmt.Errorf("%w: admin role %q", ErrInvalid, role)
+	}
+	now := s.Now().UTC()
+	if !expiresAt.After(now) {
+		return Token{}, "", fmt.Errorf("%w: token expiration must be in the future", ErrInvalid)
+	}
+	secret, err := NewTokenSecret()
+	if err != nil {
+		return Token{}, "", err
+	}
+	t := Token{ID: uuid.NewString(), Hash: HashToken(secret), Roles: []string{role}, ExpiresAt: expiresAt.UTC(), Comment: comment, Created: now}
+	if _, err := createJSON(ctx, s.tokens, t.Hash, t); err != nil {
+		return Token{}, "", err
+	}
+	if _, err := s.tokens.Write(ctx, adminTokensObject, rados.NewWriteTx().OmapSet(map[string][]byte{"token/" + t.ID: []byte(t.Hash)})); err != nil {
+		return Token{}, "", mapErr(err)
+	}
+	return t, secret, nil
+}
+
+// ListAdminTokens lists admin tokens (without secrets).
+func (s *Store) ListAdminTokens(ctx context.Context) ([]Token, error) {
+	kv, _, err := listOmap(ctx, s.tokens, adminTokensObject, "token/", "", 0)
+	if err != nil {
+		return nil, err
+	}
+	out := []Token{}
+	for _, e := range kv {
+		t, err := getJSON[Token](ctx, s.tokens, string(e.Value))
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, t.Value)
+	}
+	return out, nil
+}
+
+// DeleteAdminToken revokes an admin token by id.
+func (s *Store) DeleteAdminToken(ctx context.Context, tokenID string) error {
+	m, err := s.tokens.OmapGet(ctx, adminTokensObject, []string{"token/" + tokenID})
+	if err != nil {
+		return mapErr(err)
+	}
+	hash, ok := m["token/"+tokenID]
+	if !ok {
+		return ErrNotFound
+	}
+	if err := s.tokens.Delete(ctx, string(hash)); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		return mapErr(err)
+	}
+	_, err = s.tokens.Write(ctx, adminTokensObject, rados.NewWriteTx().OmapRemove("token/"+tokenID))
+	return mapErr(err)
 }
 
 // LookupToken resolves a presented token to its record. It does not check

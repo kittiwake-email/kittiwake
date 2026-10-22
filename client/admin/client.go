@@ -442,6 +442,27 @@ func (c *Client) DeleteToken(ctx context.Context, idOrUsername, tokenID string) 
 	return c.do(ctx, http.MethodDelete, "/v1/admin/accounts/"+pathEscape(idOrUsername)+"/tokens/"+pathEscape(tokenID), nil, nil, "", nil)
 }
 
+// ---- admin tokens (admins are tokens, not accounts) ----
+
+// CreateAdminToken mints an admin token; the secret is returned once.
+func (c *Client) CreateAdminToken(ctx context.Context, req AdminTokenRequest) (TokenCreated, error) {
+	var out TokenCreated
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/tokens", nil, req, "", &out)
+}
+
+// ListAdminTokens lists admin tokens (no secrets).
+func (c *Client) ListAdminTokens(ctx context.Context) ([]Token, error) {
+	var out struct {
+		Items []Token `json:"items"`
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/tokens", nil, nil, "", &out)
+}
+
+// DeleteAdminToken revokes an admin token.
+func (c *Client) DeleteAdminToken(ctx context.Context, tokenID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/admin/tokens/"+pathEscape(tokenID), nil, nil, "", nil)
+}
+
 // ---- aliases ----
 
 // CreateAlias creates an alias ("@domain" address = catch-all).

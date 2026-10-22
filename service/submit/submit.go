@@ -104,7 +104,7 @@ type Identity struct {
 // of its accounts and the aliases that deliver to it (catch-alls excluded).
 func (s *Service) Identities(ctx context.Context, mb uuid.UUID) ([]Identity, error) {
 	a := actor.From(ctx)
-	if !(a.MailboxID == mb || a.IsAdmin()) {
+	if !(a.MailboxID == mb || a.IsAdminReader()) {
 		return nil, ErrForbidden
 	}
 	var out []Identity

@@ -54,9 +54,20 @@ func New(ids *identity.Store, idx *index.Store, q *queue.Store, aud *auditor.Aud
 	return &Service{ids: ids, idx: idx, queue: q, audit: aud, Now: time.Now}
 }
 
+// authorize guards mutating operations: full admin (or the CLI system actor).
 func (s *Service) authorize(ctx context.Context, action, target string) error {
 	a := actor.From(ctx)
-	if a.IsAdmin() || (a.Protocol == audit.ProtoCLI && a.Username == "system") {
+	if a.IsAdmin() || (a.Protocol == audit.ProtoCLI && a.IsSystem()) {
+		return nil
+	}
+	s.audit.Log(ctx, auditor.Event{Action: action, Target: target, Result: audit.ResultDenied, Detail: "admin role required"})
+	return ErrForbidden
+}
+
+// authorizeRead guards read-only operations: full or read-only admin.
+func (s *Service) authorizeRead(ctx context.Context, action, target string) error {
+	a := actor.From(ctx)
+	if a.IsAdminReader() || (a.Protocol == audit.ProtoCLI && a.IsSystem()) {
 		return nil
 	}
 	s.audit.Log(ctx, auditor.Event{Action: action, Target: target, Result: audit.ResultDenied, Detail: "admin role required"})
@@ -89,7 +100,7 @@ func (s *Service) CreateDomain(ctx context.Context, d identity.Domain) (identity
 
 // GetDomain returns a domain.
 func (s *Service) GetDomain(ctx context.Context, name string) (identity.Domain, error) {
-	if err := s.authorize(ctx, "domain-get", name); err != nil {
+	if err := s.authorizeRead(ctx, "domain-get", name); err != nil {
 		return identity.Domain{}, err
 	}
 	v, err := s.ids.GetDomain(ctx, name)
@@ -123,7 +134,7 @@ func (s *Service) DeleteDomain(ctx context.Context, name string) error {
 
 // ListDomains lists domains.
 func (s *Service) ListDomains(ctx context.Context, after string, max int) ([]string, bool, error) {
-	if err := s.authorize(ctx, "domain-list", ""); err != nil {
+	if err := s.authorizeRead(ctx, "domain-list", ""); err != nil {
 		return nil, false, err
 	}
 	return s.ids.ListDomains(ctx, after, max)
@@ -146,7 +157,7 @@ func (s *Service) CreateMailbox(ctx context.Context, m identity.Mailbox) (identi
 
 // GetMailbox returns a mailbox.
 func (s *Service) GetMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbox, error) {
-	if err := s.authorize(ctx, "mailbox-get", id.String()); err != nil {
+	if err := s.authorizeRead(ctx, "mailbox-get", id.String()); err != nil {
 		return identity.Mailbox{}, err
 	}
 	v, err := s.ids.GetMailbox(ctx, id)
@@ -187,7 +198,7 @@ type MailboxInfo struct {
 
 // InspectMailbox returns usage, folders and accounts.
 func (s *Service) InspectMailbox(ctx context.Context, id uuid.UUID, defaults identity.QuotaLimits) (MailboxInfo, error) {
-	if err := s.authorize(ctx, "mailbox-inspect", id.String()); err != nil {
+	if err := s.authorizeRead(ctx, "mailbox-inspect", id.String()); err != nil {
 		return MailboxInfo{}, err
 	}
 	v, err := s.ids.GetMailbox(ctx, id)
@@ -224,7 +235,7 @@ func (s *Service) InspectMailbox(ctx context.Context, id uuid.UUID, defaults ide
 
 // ListMailboxAccounts lists the usernames linked to a mailbox.
 func (s *Service) ListMailboxAccounts(ctx context.Context, id uuid.UUID) ([]string, bool, error) {
-	if err := s.authorize(ctx, "mailbox-accounts", id.String()); err != nil {
+	if err := s.authorizeRead(ctx, "mailbox-accounts", id.String()); err != nil {
 		return nil, false, err
 	}
 	return s.ids.ListMailboxAccounts(ctx, id, "", 1000)
@@ -232,7 +243,7 @@ func (s *Service) ListMailboxAccounts(ctx context.Context, id uuid.UUID) ([]stri
 
 // ListMailboxes walks all mailbox ids.
 func (s *Service) ListMailboxes(ctx context.Context, fn func(uuid.UUID) error) error {
-	if err := s.authorize(ctx, "mailbox-list", ""); err != nil {
+	if err := s.authorizeRead(ctx, "mailbox-list", ""); err != nil {
 		return err
 	}
 	return s.ids.ListMailboxes(ctx, fn)
@@ -333,7 +344,7 @@ func (s *Service) Release(ctx context.Context, id uuid.UUID, note string) (ident
 
 // ListHolds returns the ids of mailboxes on hold.
 func (s *Service) ListHolds(ctx context.Context) ([]identity.Mailbox, error) {
-	if err := s.authorize(ctx, "hold-list", ""); err != nil {
+	if err := s.authorizeRead(ctx, "hold-list", ""); err != nil {
 		return nil, err
 	}
 	var out []identity.Mailbox
@@ -390,7 +401,7 @@ func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (
 
 // GetAccount returns an account by id.
 func (s *Service) GetAccount(ctx context.Context, id uuid.UUID) (identity.Account, error) {
-	if err := s.authorize(ctx, "account-get", id.String()); err != nil {
+	if err := s.authorizeRead(ctx, "account-get", id.String()); err != nil {
 		return identity.Account{}, err
 	}
 	v, err := s.ids.GetAccount(ctx, id)
@@ -399,7 +410,7 @@ func (s *Service) GetAccount(ctx context.Context, id uuid.UUID) (identity.Accoun
 
 // GetAccountByUsername returns an account by username.
 func (s *Service) GetAccountByUsername(ctx context.Context, username string) (identity.Account, error) {
-	if err := s.authorize(ctx, "account-get", username); err != nil {
+	if err := s.authorizeRead(ctx, "account-get", username); err != nil {
 		return identity.Account{}, err
 	}
 	v, err := s.ids.GetAccountByUsername(ctx, username)
@@ -457,7 +468,7 @@ func (s *Service) DeleteAccount(ctx context.Context, id uuid.UUID) error {
 
 // ListAccounts lists usernames in a domain with an optional prefix.
 func (s *Service) ListAccounts(ctx context.Context, domain, prefix, after string, max int) ([]string, bool, error) {
-	if err := s.authorize(ctx, "account-list", domain); err != nil {
+	if err := s.authorizeRead(ctx, "account-list", domain); err != nil {
 		return nil, false, err
 	}
 	return s.ids.ListDomainAccounts(ctx, domain, prefix, after, max)
@@ -480,7 +491,7 @@ func (s *Service) CreateAlias(ctx context.Context, al identity.Alias) (identity.
 
 // GetAlias returns an alias.
 func (s *Service) GetAlias(ctx context.Context, address string) (identity.Alias, error) {
-	if err := s.authorize(ctx, "alias-get", address); err != nil {
+	if err := s.authorizeRead(ctx, "alias-get", address); err != nil {
 		return identity.Alias{}, err
 	}
 	v, err := s.ids.GetAlias(ctx, address)
@@ -514,7 +525,7 @@ func (s *Service) DeleteAlias(ctx context.Context, address string) error {
 
 // ListAliases lists alias addresses in a domain.
 func (s *Service) ListAliases(ctx context.Context, domain, after string, max int) ([]string, bool, error) {
-	if err := s.authorize(ctx, "alias-list", domain); err != nil {
+	if err := s.authorizeRead(ctx, "alias-list", domain); err != nil {
 		return nil, false, err
 	}
 	return s.ids.ListDomainAliases(ctx, domain, after, max)
@@ -537,7 +548,7 @@ func (s *Service) CreateToken(ctx context.Context, accountID uuid.UUID, roles []
 
 // ListTokens lists an account's tokens.
 func (s *Service) ListTokens(ctx context.Context, accountID uuid.UUID) ([]identity.Token, error) {
-	if err := s.authorize(ctx, "token-list", accountID.String()); err != nil {
+	if err := s.authorizeRead(ctx, "token-list", accountID.String()); err != nil {
 		return nil, err
 	}
 	return s.ids.ListTokens(ctx, accountID)
@@ -555,57 +566,75 @@ func (s *Service) DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID 
 	return nil
 }
 
-// ---- bootstrap ----
+// ---- admin tokens ----
 
-// BootstrapResult is what the operator gets once.
-type BootstrapResult struct {
-	Account identity.Account
-	Token   identity.Token
-	Secret  string
+// CreateAdminToken mints an admin API token. readOnly selects the admin-ro
+// role. The secret is returned once.
+func (s *Service) CreateAdminToken(ctx context.Context, readOnly bool, expiresAt time.Time, comment string) (identity.Token, string, error) {
+	if err := s.authorize(ctx, "admin-token-create", comment); err != nil {
+		return identity.Token{}, "", err
+	}
+	role := identity.RoleAdmin
+	if readOnly {
+		role = identity.RoleAdminRead
+	}
+	if expiresAt.IsZero() {
+		expiresAt = s.Now().Add(24 * time.Hour)
+	}
+	t, secret, err := s.ids.CreateAdminToken(ctx, role, expiresAt, comment)
+	if err != nil {
+		return identity.Token{}, "", s.fail(ctx, uuid.Nil, "admin-token-create", comment, err)
+	}
+	s.ok(ctx, uuid.Nil, "admin-token-create", t.ID, fmt.Sprintf("role=%s expires=%s comment=%q", role, t.ExpiresAt.Format(time.RFC3339), comment))
+	return t, secret, nil
 }
 
-// Bootstrap creates the domain (if missing), the first admin account and
-// an API token. It refuses if any admin account already exists in the
-// domain. Meant for the CLI's system actor.
-func (s *Service) Bootstrap(ctx context.Context, username, password, comment string, tokenLifetime time.Duration) (BootstrapResult, error) {
-	if err := s.authorize(ctx, "bootstrap", username); err != nil {
-		return BootstrapResult{}, err
+// ListAdminTokens lists admin tokens.
+func (s *Service) ListAdminTokens(ctx context.Context) ([]identity.Token, error) {
+	if err := s.authorizeRead(ctx, "admin-token-list", ""); err != nil {
+		return nil, err
 	}
-	_, domain, err := identity.NormalizeAddress(username)
+	return s.ids.ListAdminTokens(ctx)
+}
+
+// DeleteAdminToken revokes an admin token.
+func (s *Service) DeleteAdminToken(ctx context.Context, id string) error {
+	if err := s.authorize(ctx, "admin-token-delete", id); err != nil {
+		return err
+	}
+	if err := s.ids.DeleteAdminToken(ctx, id); err != nil {
+		return s.fail(ctx, uuid.Nil, "admin-token-delete", id, err)
+	}
+	s.ok(ctx, uuid.Nil, "admin-token-delete", id, "")
+	return nil
+}
+
+// Bootstrap mints the first full admin token. It refuses when admin tokens
+// already exist, so it cannot be used to sneak in a token later (use
+// `dovetail admin token`, which is also audited, for recovery).
+func (s *Service) Bootstrap(ctx context.Context, comment string, lifetime time.Duration) (identity.Token, string, error) {
+	if err := s.authorize(ctx, "bootstrap", comment); err != nil {
+		return identity.Token{}, "", err
+	}
+	existing, err := s.ids.ListAdminTokens(ctx)
 	if err != nil {
-		return BootstrapResult{}, err
+		return identity.Token{}, "", err
 	}
-	if _, err := s.ids.GetDomain(ctx, domain); errors.Is(err, identity.ErrNotFound) {
-		if _, err := s.ids.CreateDomain(ctx, identity.Domain{Name: domain, Enabled: true}); err != nil {
-			return BootstrapResult{}, err
-		}
-	} else if err != nil {
-		return BootstrapResult{}, err
-	}
-	a := identity.Account{Username: username, Roles: []string{identity.RoleAdmin}, Enabled: true}
-	if password != "" {
-		h, err := cryptoauth.HashPassword(password)
-		if err != nil {
-			return BootstrapResult{}, err
-		}
-		a.Passwords = []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}}
-	}
-	acct, err := s.ids.CreateAccount(ctx, a)
-	if err != nil {
-		return BootstrapResult{}, err
+	if len(existing) > 0 {
+		return identity.Token{}, "", fmt.Errorf("%w: %d admin token(s) already exist; use `dovetail admin token`", ErrExists, len(existing))
 	}
 	if comment == "" {
 		comment = "bootstrap"
 	}
-	if tokenLifetime <= 0 {
-		tokenLifetime = 24 * time.Hour
+	if lifetime <= 0 {
+		lifetime = 24 * time.Hour
 	}
-	t, secret, err := s.ids.CreateToken(ctx, acct.ID, nil, s.Now().Add(tokenLifetime), comment)
+	t, secret, err := s.ids.CreateAdminToken(ctx, identity.RoleAdmin, s.Now().Add(lifetime), comment)
 	if err != nil {
-		return BootstrapResult{}, err
+		return identity.Token{}, "", err
 	}
-	s.ok(ctx, uuid.Nil, "bootstrap", acct.Username, "admin account and token created")
-	return BootstrapResult{Account: acct, Token: t, Secret: secret}, nil
+	s.ok(ctx, uuid.Nil, "bootstrap", t.ID, "first admin token created")
+	return t, secret, nil
 }
 
 // ---- export / import of identity data ----
@@ -619,11 +648,12 @@ type Export struct {
 	Accounts  []identity.Account `json:"accounts"`
 	Aliases   []identity.Alias   `json:"aliases"`
 	Tokens    []identity.Token   `json:"tokens"`
+	Admins    []identity.Token   `json:"admin_tokens"`
 }
 
 // ExportIdentity dumps all identity data (hashes included, no plaintext).
 func (s *Service) ExportIdentity(ctx context.Context) (Export, error) {
-	if err := s.authorize(ctx, "export-identity", ""); err != nil {
+	if err := s.authorizeRead(ctx, "export-identity", ""); err != nil {
 		return Export{}, err
 	}
 	out := Export{Version: 1, Exported: s.Now().UTC()}
@@ -671,6 +701,9 @@ func (s *Service) ExportIdentity(ctx context.Context) (Export, error) {
 		return nil
 	})
 	if err != nil {
+		return Export{}, err
+	}
+	if out.Admins, err = s.ids.ListAdminTokens(ctx); err != nil {
 		return Export{}, err
 	}
 	s.ok(ctx, uuid.Nil, "export-identity", "", fmt.Sprintf("domains=%d mailboxes=%d accounts=%d aliases=%d", len(out.Domains), len(out.Mailboxes), len(out.Accounts), len(out.Aliases)))
@@ -721,7 +754,7 @@ func (s *Service) ImportIdentity(ctx context.Context, data []byte) (string, erro
 	}
 	// Tokens carry only hashes; they cannot be recreated through CreateToken
 	// (which generates a new secret). They are intentionally not imported.
-	summary := fmt.Sprintf("created=%d skipped=%d tokens-ignored=%d", created, skipped, len(in.Tokens))
+	summary := fmt.Sprintf("created=%d skipped=%d tokens-ignored=%d", created, skipped, len(in.Tokens)+len(in.Admins))
 	s.ok(ctx, uuid.Nil, "import-identity", "", summary)
 	return summary, nil
 }

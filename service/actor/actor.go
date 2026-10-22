@@ -38,8 +38,23 @@ func (a Actor) HasRole(role string) bool {
 	return false
 }
 
-// IsAdmin reports whether the actor carries the admin role.
-func (a Actor) IsAdmin() bool { return a.HasRole("admin") }
+// Admin roles (mirrors store/identity).
+const (
+	RoleAdmin     = "admin"
+	RoleAdminRead = "admin-ro"
+)
+
+// IsAdmin reports whether the actor is a full administrator.
+func (a Actor) IsAdmin() bool { return a.HasRole(RoleAdmin) }
+
+// IsAdminReader reports whether the actor may perform read-only
+// administration (full admins included).
+func (a Actor) IsAdminReader() bool { return a.HasRole(RoleAdmin) || a.HasRole(RoleAdminRead) }
+
+// IsSystem reports the CLI/worker system actor.
+func (a Actor) IsSystem() bool {
+	return a.Username == "system" && a.AccountID == uuid.Nil && a.Credential == "none"
+}
 
 // Anonymous reports whether no account is attached.
 func (a Actor) Anonymous() bool { return a.AccountID == uuid.Nil }

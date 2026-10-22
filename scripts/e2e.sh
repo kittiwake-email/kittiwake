@@ -27,8 +27,8 @@ IMAP=$(python3 -c "import yaml;print(yaml.safe_load(open('$CFG'))['listen']['ima
 POP3=$(python3 -c "import yaml;print(yaml.safe_load(open('$CFG'))['listen']['pop3']['address'])" 2>/dev/null || echo "[::1]:1110")
 
 echo "== config check"; $BIN check-config --config "$CFG"
-echo "== bootstrap admin (idempotent: existing admin is reused via a fresh token)"
-BOOT=$($BIN admin --config "$CFG" bootstrap --username "admin@$DOMAIN" --token-lifetime 1h 2>&1) || { echo "$BOOT"; exit 1; }
+echo "== mint an admin token (admins are tokens, not accounts)"
+BOOT=$($BIN admin --config "$CFG" token --comment "e2e-$STAMP" --expires "$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)" 2>&1) || { echo "$BOOT"; exit 1; }
 TOKEN=$(echo "$BOOT" | awk '/token secret/ {print $3}')
 [ -n "$TOKEN" ] || { echo "no token in: $BOOT"; exit 1; }
 

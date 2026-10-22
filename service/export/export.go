@@ -70,7 +70,7 @@ func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attac
 
 func (s *Service) authorize(ctx context.Context) error {
 	a := actor.From(ctx)
-	if a.IsAdmin() || (a.Protocol == audit.ProtoCLI && a.Username == "system") {
+	if a.IsAdmin() || (a.Protocol == audit.ProtoCLI && a.IsSystem()) {
 		return nil
 	}
 	return ErrForbidden

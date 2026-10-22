@@ -45,6 +45,7 @@ type fixture struct {
 	user    identity.Account
 	admin   identity.Account
 	adminTk string
+	roTk    string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -80,8 +81,8 @@ func newFixture(t *testing.T) *fixture {
 		Username: "wido@example.org", MailboxID: f.mb.ID, Enabled: true,
 		Roles: []string{"read", "write", "send"}, Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}},
 	})
-	f.admin, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "admin@example.org", Roles: []string{"admin"}, Enabled: true, Passwords: []identity.Password{{Hash: h}}})
-	_, f.adminTk, _ = f.ids.CreateToken(ctx, f.admin.ID, nil, f.now.Add(24*time.Hour), "test admin")
+	_, f.adminTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdmin, f.now.Add(24*time.Hour), "test admin")
+	_, f.roTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdminRead, f.now.Add(24*time.Hour), "test read-only")
 	return f
 }
 
@@ -508,7 +509,7 @@ func TestHoldAndAudit(t *testing.T) {
 	r := f.do("POST", "/v1/admin/mailboxes/"+mb+"/hold", a, map[string]any{"reason": "subpoena", "case_ref": "42", "sealed": true}, "")
 	f.expect(r, 200, "hold")
 	hold := r.body["hold"].(map[string]any)
-	if hold["set_by"] != "admin@example.org" || hold["accept_delivery"] != true || hold["sealed"] != true {
+	if hold["set_by"] != "admin:test admin" || hold["accept_delivery"] != true || hold["sealed"] != true {
 		t.Fatalf("hold: %v", hold)
 	}
 	f.expect(f.do("POST", "/v1/admin/mailboxes/"+mb+"/hold", a, map[string]any{"reason": "again"}, ""), 409, "double hold")
@@ -532,7 +533,7 @@ func TestHoldAndAudit(t *testing.T) {
 	for _, it := range r.body["items"].([]any) {
 		rec := it.(map[string]any)
 		actions[rec["action"].(string)] = true
-		if rec["account"] != "admin@example.org" || rec["protocol"] != "admin" {
+		if rec["account"] != "admin:test admin" || rec["protocol"] != "admin" {
 			t.Fatalf("audit actor: %v", rec)
 		}
 	}
@@ -584,5 +585,41 @@ func TestSpecMatchesRoutes(t *testing.T) {
 	sort.Strings(routes)
 	if strings.Join(routes, "\n") != strings.Join(specRoutes, "\n") {
 		t.Fatalf("routes and spec differ:\nmux:\n%s\nspec:\n%s", strings.Join(routes, "\n"), strings.Join(specRoutes, "\n"))
+	}
+}
+
+func TestReadOnlyAdminAndPublicSpec(t *testing.T) {
+	f := newFixture(t)
+	// Spec and banner are public on the admin handler.
+	f.expect(f.do("GET", "/openapi.yaml", "", nil, ""), 200, "public spec")
+	f.expect(f.do("GET", "/v1/admin/openapi.yaml", "", nil, ""), 200, "public spec under prefix")
+	f.expect(f.do("GET", "/", "", nil, ""), 200, "banner")
+	// Read-only token: GETs work, mutations are 403.
+	f.expect(f.do("GET", "/v1/admin/status", f.bearer(f.roTk), nil, ""), 200, "ro status")
+	f.expect(f.do("GET", "/v1/admin/domains", f.bearer(f.roTk), nil, ""), 200, "ro list")
+	f.expect(f.do("GET", "/v1/admin/tokens", f.bearer(f.roTk), nil, ""), 200, "ro token list")
+	f.expect(f.do("POST", "/v1/admin/domains", f.bearer(f.roTk), map[string]any{"name": "ro.example"}, ""), 403, "ro create")
+	f.expect(f.do("POST", "/v1/admin/tokens", f.bearer(f.roTk), map[string]any{"comment": "x", "expires_at": f.now.Add(time.Hour)}, ""), 403, "ro mint")
+	f.expect(f.do("DELETE", "/v1/admin/domains/example.org", f.bearer(f.roTk), nil, ""), 403, "ro delete")
+	// Full admin manages admin tokens; a user token is never an admin.
+	r := f.do("POST", "/v1/admin/tokens", f.bearer(f.adminTk), map[string]any{"comment": "ci", "expires_at": f.now.Add(time.Hour), "read_only": true}, "")
+	f.expect(r, 201, "mint ro")
+	id := r.body["token"].(map[string]any)["id"].(string)
+	secret := r.body["secret"].(string)
+	f.expect(f.do("GET", "/v1/admin/mailboxes", f.bearer(secret), nil, ""), 200, "new ro token works")
+	r = f.do("GET", "/v1/admin/tokens", f.bearer(f.adminTk), nil, "")
+	f.expect(r, 200, "list")
+	if n := len(r.body["items"].([]any)); n != 3 {
+		t.Fatalf("admin tokens: %d", n)
+	}
+	f.expect(f.do("DELETE", "/v1/admin/tokens/"+id, f.bearer(f.adminTk), nil, ""), 204, "revoke")
+	f.expect(f.do("GET", "/v1/admin/mailboxes", f.bearer(secret), nil, ""), 401, "revoked token")
+	// Accounts cannot be given admin roles.
+	f.expect(f.do("POST", "/v1/admin/accounts", f.bearer(f.adminTk), map[string]any{"username": "x@example.org", "mailbox_id": f.mb.ID, "roles": []string{"admin"}}, ""), 400, "admin role on account")
+	// Audit shows the token actor.
+	r = f.do("GET", "/v1/admin/audit?from="+f.now.Format("2006-01-02")+"&action=admin-token-create", f.bearer(f.adminTk), nil, "")
+	f.expect(r, 200, "audit")
+	if items := r.body["items"].([]any); len(items) != 1 || items[0].(map[string]any)["account"] != "admin:test admin" {
+		t.Fatalf("audit actor: %v", items)
 	}
 }

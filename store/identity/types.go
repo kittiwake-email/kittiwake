@@ -20,16 +20,25 @@ var (
 	ErrInUse         = errors.New("identity: still in use")
 )
 
-// Roles.
+// Account roles.
 const (
 	RoleRead  = "read"
 	RoleWrite = "write"
 	RoleSend  = "send"
-	RoleAdmin = "admin"
 )
 
-// ValidRoles is the set of known roles.
-var ValidRoles = map[string]bool{RoleRead: true, RoleWrite: true, RoleSend: true, RoleAdmin: true}
+// Admin token roles. Admins are not accounts: an admin is an API token with
+// a comment, an expiry and one of these roles.
+const (
+	RoleAdmin     = "admin"    // full administration
+	RoleAdminRead = "admin-ro" // read-only: queries, inspection, audit
+)
+
+// ValidRoles is the set of roles an account may carry.
+var ValidRoles = map[string]bool{RoleRead: true, RoleWrite: true, RoleSend: true}
+
+// AdminRoles is the set of roles an admin token may carry (exactly one).
+var AdminRoles = map[string]bool{RoleAdmin: true, RoleAdminRead: true}
 
 // Password kinds.
 const (
@@ -100,7 +109,7 @@ type Account struct {
 	ID        uuid.UUID  `json:"id"`
 	Username  string     `json:"username"` // lowercase, usually user@domain
 	Domain    string     `json:"domain"`
-	MailboxID uuid.UUID  `json:"mailbox_id"` // zero for admin accounts
+	MailboxID uuid.UUID  `json:"mailbox_id"`
 	Roles     []string   `json:"roles"`
 	Passwords []Password `json:"passwords"`
 	TOTP      *TOTP      `json:"totp,omitempty"`
@@ -118,9 +127,6 @@ func (a *Account) HasRole(r string) bool {
 	}
 	return false
 }
-
-// IsAdmin reports whether the account carries the admin role.
-func (a *Account) IsAdmin() bool { return a.HasRole(RoleAdmin) }
 
 // Destination is one target of an alias: a mailbox or another address.
 type Destination struct {
@@ -142,6 +148,7 @@ type Alias struct {
 func (a *Alias) IsCatchAll() bool { return len(a.Address) > 0 && a.Address[0] == '@' }
 
 // Token is a long-lived API token. The object name is the SHA-256 of the token.
+// An admin token has a zero AccountID and an admin role.
 type Token struct {
 	ID        string    `json:"id"`
 	Hash      string    `json:"hash"`
@@ -155,6 +162,9 @@ type Token struct {
 
 // Expired reports whether the token has expired at t.
 func (t *Token) Expired(at time.Time) bool { return !at.Before(t.ExpiresAt) }
+
+// IsAdmin reports whether this is an admin token (not bound to an account).
+func (t *Token) IsAdmin() bool { return t.AccountID == uuid.Nil }
 
 // Versioned pairs an object with the RADOS version it was read at, for
 // optimistic concurrency.

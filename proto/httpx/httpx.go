@@ -181,6 +181,22 @@ func RequireRole(role string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireAnyRole returns middleware that rejects actors lacking all roles.
+func RequireAnyRole(roles ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			a := actor.From(r.Context())
+			for _, role := range roles {
+				if a.HasRole(role) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			WriteProblem(w, http.StatusForbidden, "about:blank", "one of roles "+strings.Join(roles, ", ")+" required")
+		})
+	}
+}
+
 // MaxBody limits request bodies.
 func MaxBody(n int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

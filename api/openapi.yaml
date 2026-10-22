@@ -41,8 +41,9 @@ paths:
             text/plain: { schema: { type: string } }
   /v1/admin/openapi.yaml:
     get:
-      tags: [admin]
-      summary: This specification (authenticated)
+      tags: [meta]
+      summary: This specification (unauthenticated; the operations need a token, their description does not)
+      security: []
       responses:
         "200":
           description: OpenAPI document
@@ -189,6 +190,54 @@ paths:
         "204": { description: TOTP enabled }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/admin/tokens:
+    get:
+      tags: [admin]
+      summary: List admin tokens (admins are tokens, not accounts; secrets are never shown)
+      description: Every GET on the admin API also accepts a read-only admin token (role admin-ro).
+      responses:
+        "200":
+          description: Admin tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Token" } }
+    post:
+      tags: [admin]
+      summary: Mint an admin token (full, or read-only with read_only=true); the secret is returned once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expires_at, comment]
+              properties:
+                read_only: { type: boolean, default: false, description: "role admin-ro: GET-only access" }
+                expires_at: { type: string, format: date-time }
+                comment: { type: string }
+      responses:
+        "201":
+          description: Token and secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { $ref: "#/components/schemas/Token" }
+                  secret: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/admin/tokens/{tid}:
+    parameters:
+      - { name: tid, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [admin]
+      summary: Revoke an admin token
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/status:
     get:
       tags: [admin]

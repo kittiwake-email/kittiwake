@@ -566,9 +566,8 @@ Accounts and API tokens carry a set of roles. The role set is:
 - `write` – change flags, move/copy/delete messages, manage folders, import messages (JMAP
   set)
 - `send` – submit outbound mail (JMAP `EmailSubmission`)
-- `admin` – admin API (never combined with a mailbox)
-
-A normal full-access account has `read`, `write` and `send`. A token's roles may only narrow
+A normal full-access account has `read`, `write` and `send`. Accounts cannot carry admin
+roles; see "Admin tokens". A token's roles may only narrow
 the account's roles; a token claiming a role the account lacks is rejected.
 
 ## Self-service
@@ -587,15 +586,21 @@ purpose; tokens without either cannot be created. Expired tokens are rejected. T
 random, prefixed `dvt_` so they are recognisable in logs and secret scanners, and stored only
 as a SHA-256 hash (`tokens/<hash>`); the plaintext is shown once at creation.
 
-## Admin accounts
+## Admin tokens
 
-Admin accounts are regular accounts that carry the `admin` role. They are not linked to a
-mailbox. An admin account authenticates to the admin API with one of its API tokens (same
-rules: expiration date and comment required), so an admin can hold multiple tokens for
-different tools.
+Admins are not accounts and are never mixed with mail users. An admin is an **API token**
+with a comment, an expiration date and one role:
 
-The first admin account and token are created with `dovetail admin bootstrap`, which talks to
-RADOS directly, since the admin API cannot be used before an admin exists.
+- `admin` – full administration
+- `admin-ro` – read-only: every `GET` on the admin API (listings, inspection, audit, queue
+  status), for monitoring and reporting jobs that must never change anything
+
+Admin tokens live in the meta pool next to account tokens but belong to no account and no
+domain; they are managed through the admin API (`/v1/admin/tokens`) or `dovetail-admin token`.
+The first one is minted with `dovetail admin bootstrap`, which talks to RADOS directly and
+refuses once admin tokens exist; `dovetail admin token` mints further ones (including
+read-only) for recovery. The admin API accepts bearer tokens only; there are no admin
+passwords or sessions.
 
 ## Password hashing
 
@@ -805,8 +810,8 @@ startup, so a developer can speak LMTP, JMAP and the admin API to a fresh proces
 ## `dovetail admin` and `dovetail-admin`
 
 `dovetail admin` talks to RADOS directly with the daemon's config file and does only what
-cannot be done through the API because no token exists yet: `bootstrap` (first admin account
-and token) and `token` (mint a token for an existing account). Everything else is done over
+cannot be done through the API because no token exists yet: `bootstrap` (first admin token)
+and `token` (mint a full or read-only admin token). Everything else is done over
 the admin API so the daemon's code base stays small.
 
 `dovetail-admin` is the operator's tool: a Go client for the admin API (also importable as the

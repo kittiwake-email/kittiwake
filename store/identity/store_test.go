@@ -132,13 +132,12 @@ func TestAccountsAndMailboxes(t *testing.T) {
 	if _, err := s.UpdateAccount(ctx, a.ID, func(x *Account) error { x.Username = "other@example.org"; return nil }); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected invalid rename, got %v", err)
 	}
-	// Admin accounts cannot have a mailbox; must have no mailbox.
+	// Accounts cannot carry admin roles and always need a mailbox.
 	if _, err := s.CreateAccount(ctx, Account{Username: "admin@example.org", MailboxID: mb.ID, Roles: []string{RoleAdmin}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected invalid, got %v", err)
 	}
-	adm, err := s.CreateAccount(ctx, Account{Username: "admin@example.org", Roles: []string{RoleAdmin}, Enabled: true})
-	if err != nil || !adm.IsAdmin() {
-		t.Fatal(err)
+	if _, err := s.CreateAccount(ctx, Account{Username: "admin@example.org", Roles: []string{RoleRead}, Enabled: true}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expected invalid without mailbox, got %v", err)
 	}
 	// Relink.
 	mb2, _ := s.CreateMailbox(ctx, Mailbox{Enabled: true})
@@ -158,7 +157,7 @@ func TestAccountsAndMailboxes(t *testing.T) {
 	if _, err := s.GetAccountByUsername(ctx, "wido@example.org"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}
-	if objs := c.Objects("meta", nsNames); len(objs) != 1 || objs[0] != "admin@example.org" {
+	if objs := c.Objects("meta", nsNames); len(objs) != 0 {
 		t.Fatalf("name pointers: %v", objs)
 	}
 	if err := s.DeleteMailbox(ctx, mb.ID); err != nil {
@@ -309,6 +308,46 @@ func TestTokens(t *testing.T) {
 	list, err = s.ListTokens(ctx, a.ID)
 	if err != nil || len(list) != 0 {
 		t.Fatalf("tokens after account delete: %v %v", list, err)
+	}
+}
+
+func TestAdminTokens(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	exp := s.Now().Add(time.Hour)
+	if _, _, err := s.CreateAdminToken(ctx, RoleAdmin, exp, ""); !errors.Is(err, ErrInvalid) {
+		t.Fatal("comment required")
+	}
+	if _, _, err := s.CreateAdminToken(ctx, "read", exp, "x"); !errors.Is(err, ErrInvalid) {
+		t.Fatal("account role rejected as admin role")
+	}
+	full, secret, err := s.CreateAdminToken(ctx, RoleAdmin, exp, "ops")
+	if err != nil || !full.IsAdmin() || full.Roles[0] != RoleAdmin {
+		t.Fatalf("%+v %v", full, err)
+	}
+	ro, _, err := s.CreateAdminToken(ctx, RoleAdminRead, exp, "monitoring")
+	if err != nil || ro.Roles[0] != RoleAdminRead {
+		t.Fatal(err)
+	}
+	got, err := s.LookupToken(ctx, secret)
+	if err != nil || got.Value.ID != full.ID || !got.Value.IsAdmin() {
+		t.Fatalf("lookup: %+v %v", got, err)
+	}
+	list, _ := s.ListAdminTokens(ctx)
+	if len(list) != 2 {
+		t.Fatalf("list: %d", len(list))
+	}
+	if err := s.DeleteAdminToken(ctx, full.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupToken(ctx, secret); !errors.Is(err, ErrNotFound) {
+		t.Fatal("not revoked")
+	}
+	if err := s.DeleteAdminToken(ctx, full.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("double delete")
+	}
+	if list, _ = s.ListAdminTokens(ctx); len(list) != 1 || list[0].ID != ro.ID {
+		t.Fatalf("after delete: %+v", list)
 	}
 }
 

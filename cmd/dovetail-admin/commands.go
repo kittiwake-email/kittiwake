@@ -802,6 +802,64 @@ func (a *cli) queue(args []string) error {
 	return fmt.Errorf("unknown queue subcommand %q\nusage: dovetail-admin %s", args[0], u)
 }
 
+// token manages admin tokens (admins are tokens, not accounts).
+func (a *cli) token(args []string) error {
+	const u = `token create --comment text --expires YYYY-MM-DD|RFC3339 [--read-only]
+       token list
+       token delete <token-id>`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("usage: dovetail-admin " + u)
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		fs := newFlagSet("token create")
+		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (required)")
+		comment := fs.String("comment", "", "purpose of the token (required)")
+		readOnly := fs.Bool("read-only", false, "mint a read-only token (role admin-ro: GET-only)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *expires == "" || *comment == "" {
+			return errors.New("--expires and --comment are required")
+		}
+		exp, err := parseDate(*expires)
+		if err != nil {
+			return fmt.Errorf("--expires: %w", err)
+		}
+		tk, err := a.c.CreateAdminToken(a.ctx, admin.AdminTokenRequest{ReadOnly: *readOnly, ExpiresAt: exp, Comment: *comment})
+		if err != nil {
+			return err
+		}
+		return emit(tk, func() {
+			fmt.Printf("token id:     %s (%s, expires %s)\n", tk.Token.ID, strings.Join(tk.Token.Roles, ","), tk.Token.ExpiresAt.Format(time.RFC3339))
+			fmt.Printf("token secret: %s\n", tk.Secret)
+			fmt.Println("The secret is shown once.")
+		})
+	case "list":
+		list, err := a.c.ListAdminTokens(a.ctx)
+		if err != nil {
+			return err
+		}
+		return emit(list, func() {
+			var rows [][]string
+			for _, t := range list {
+				rows = append(rows, []string{t.ID, t.Comment, strings.Join(t.Roles, ","), fmtTime(t.ExpiresAt), fmtTime(t.Created), fmtTime(t.LastUsed)})
+			}
+			table([]string{"ID", "COMMENT", "ROLE", "EXPIRES", "CREATED", "LAST USED"}, rows)
+		})
+	case "delete":
+		if len(args) != 2 {
+			return errors.New("usage: dovetail-admin token delete <token-id>")
+		}
+		if err := a.c.DeleteAdminToken(a.ctx, args[1]); err != nil {
+			return err
+		}
+		return ok("revoked " + args[1])
+	}
+	return fmt.Errorf("unknown token subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
 func (a *cli) keys(args []string) error {
 	if len(args) != 1 || args[0] != "rotate" {
 		return errors.New("usage: dovetail-admin keys rotate")

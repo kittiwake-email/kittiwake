@@ -19,13 +19,12 @@ import (
 )
 
 type fixture struct {
-	svc   *Service
-	ids   *identity.Store
-	aud   *audit.Store
-	now   time.Time
-	acct  identity.Account
-	mb    identity.Mailbox
-	admin identity.Account
+	svc  *Service
+	ids  *identity.Store
+	aud  *audit.Store
+	now  time.Time
+	acct identity.Account
+	mb   identity.Mailbox
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -55,7 +54,6 @@ func newFixture(t *testing.T) *fixture {
 		Roles:     []string{identity.RoleRead, identity.RoleWrite, identity.RoleSend},
 		Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}, {Hash: apph, Kind: identity.PasswordApplication, Comment: "phone"}},
 	})
-	f.admin, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "admin@example.org", Roles: []string{identity.RoleAdmin}, Enabled: true, Passwords: []identity.Password{{Hash: h}}})
 	return f
 }
 
