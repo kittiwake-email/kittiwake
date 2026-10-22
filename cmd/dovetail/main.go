@@ -204,7 +204,11 @@ func runServe(args []string) error {
 	a.ExtraModes = protocolModes()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Info("dovetail starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend)
+	clusters := 0
+	if a.Clusters != nil {
+		clusters = len(a.Clusters.Statuses())
+	}
+	log.Info("dovetail starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend, "clusters", clusters)
 	return a.Run(ctx)
 }
 

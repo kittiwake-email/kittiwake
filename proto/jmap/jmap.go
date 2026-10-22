@@ -19,6 +19,7 @@ import (
 	"dovetail/service/delivery"
 	"dovetail/service/mailbox"
 	"dovetail/service/submit"
+	"dovetail/store/cluster"
 )
 
 // Capability URNs.
@@ -273,6 +274,8 @@ func mapErr(err error) *methodError {
 		return &methodError{Type: "forbidden", Description: "mailbox is on legal hold and read-only"}
 	case errors.Is(err, delivery.ErrNoFolder):
 		return &methodError{Type: "notFound", Description: "mailbox not found"}
+	case errors.Is(err, cluster.ErrUnavailable), errors.Is(err, delivery.ErrUnavailable):
+		return &methodError{Type: "serverUnavailable", Description: "mailbox storage temporarily unavailable"}
 	}
 	return &methodError{Type: "serverFail", Description: err.Error()}
 }

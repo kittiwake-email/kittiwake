@@ -23,6 +23,7 @@ import (
 	"dovetail/service/auditor"
 	"dovetail/store/attach"
 	"dovetail/store/audit"
+	"dovetail/store/cluster"
 	"dovetail/store/identity"
 	"dovetail/store/index"
 	"dovetail/store/message"
@@ -35,11 +36,14 @@ var (
 	ErrUnknownRecipient = errors.New("delivery: no such recipient")
 	ErrMailboxDisabled  = errors.New("delivery: mailbox disabled")
 	ErrMailboxSuspended = errors.New("delivery: mailbox suspended")
-	ErrHold             = errors.New("delivery: mailbox on hold, delivery suspended")
-	ErrOverQuota        = errors.New("delivery: mailbox over quota")
-	ErrTooLarge         = errors.New("delivery: message too large")
-	ErrAliasLoop        = errors.New("delivery: alias loop or too deep")
-	ErrNoFolder         = errors.New("delivery: folder not found")
+	// ErrUnavailable: the mailbox's Ceph cluster is not reachable from this
+	// process (LMTP defers, the MTA retries).
+	ErrUnavailable = errors.New("delivery: mailbox temporarily unavailable")
+	ErrHold        = errors.New("delivery: mailbox on hold, delivery suspended")
+	ErrOverQuota   = errors.New("delivery: mailbox over quota")
+	ErrTooLarge    = errors.New("delivery: message too large")
+	ErrAliasLoop   = errors.New("delivery: alias loop or too deep")
+	ErrNoFolder    = errors.New("delivery: folder not found")
 )
 
 // Config for the service.
@@ -58,6 +62,9 @@ type Config struct {
 	// RootTTL: how old a cached mailbox root may be for the quota check
 	// (identity lookups are cached by the identity store, see its CacheTTL).
 	RootTTL time.Duration
+	// ClusterAvailable reports whether the mailbox's cluster is connected
+	// (no I/O: a registry lookup on the cached mailbox record). nil = always.
+	ClusterAvailable func(ctx context.Context, mailbox uuid.UUID) error
 }
 
 // Task types this service enqueues.
@@ -245,6 +252,11 @@ func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (iden
 	case identity.StateDisabled:
 		return m, ErrMailboxDisabled
 	}
+	if s.cfg.ClusterAvailable != nil {
+		if err := s.cfg.ClusterAvailable(ctx, mb); err != nil {
+			return m, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
+	}
 	if m.Hold != nil && !m.Hold.AcceptDelivery {
 		return m, ErrHold
 	}
@@ -345,6 +357,8 @@ func resultLabel(err error) string {
 		return "hold"
 	case errors.Is(err, ErrTooLarge):
 		return "too-large"
+	case errors.Is(err, ErrUnavailable), errors.Is(err, cluster.ErrUnavailable):
+		return "unavailable"
 	}
 	return "error"
 }
@@ -572,6 +586,8 @@ func (s *Service) Status(err error) (code int, enhanced, text string) {
 		return 450, "4.2.1", "Mailbox temporarily suspended, try again later"
 	case errors.Is(err, ErrHold):
 		return 450, "4.2.1", "Mailbox temporarily not accepting mail"
+	case errors.Is(err, ErrUnavailable), errors.Is(err, cluster.ErrUnavailable):
+		return 451, "4.3.2", "Mailbox storage temporarily unavailable, try again later"
 	case errors.Is(err, ErrOverQuota):
 		if s.cfg.OverQuotaTempFail {
 			return 452, "4.2.2", "Mailbox full, try again later"

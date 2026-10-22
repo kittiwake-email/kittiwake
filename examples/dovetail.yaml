@@ -10,17 +10,14 @@ modes: [lmtp, jmap, admin, postfix]
 database:
   dsn: "dovetail:${DOVETAIL_DB_PASSWORD}@tcp(db.example.org:3306)/dovetail"
 
+# Ceph clusters are NOT configured here: they are registered in the database
+# (dovetail-admin cluster add --name ams1 --mon-host ... --user dovetail --keyring ...
+# --pools messages,attachments,index) and every daemon connects to all of them.
 ceph:
   backend: librados            # librados | memory (volatile, development only)
-  # config_file: /etc/ceph/ceph.conf
-  monitors: ["[2001:db8::10]:6789", "[2001:db8::11]:6789", "[2001:db8::12]:6789"]
-  user: dovetail               # CephX user without "client."
-  key: ${DOVETAIL_CEPH_KEY}    # or keyring: /etc/ceph/ceph.client.dovetail.keyring
-  pools:
-    messages: dovetail.messages
-    attachments: dovetail.attachments
-    index: dovetail.index
-    # meta: dovetail.meta     # only used without database.dsn (memory backend, development)
+  # config_file: /etc/ceph/ceph.conf   # librados defaults applied to every cluster connection
+  # options: {ms_bind_ipv6: "true"}
+  # pools: {messages: ..., attachments: ..., index: ..., meta: ...}   # memory backend only
 
 listen:
   # proxy_protocol: off | optional | required. HAProxy sends PROXY on every

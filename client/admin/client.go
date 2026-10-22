@@ -599,3 +599,36 @@ func (c *Client) ImportIdentity(ctx context.Context, dump []byte) (string, error
 	}
 	return out.Summary, c.do(ctx, http.MethodPost, "/v1/admin/import", nil, bytes.NewReader(dump), "application/json", &out)
 }
+
+// ---- clusters ----
+
+// AddCluster registers a Ceph cluster; the server verifies it and records its fsid.
+func (c *Client) AddCluster(ctx context.Context, req ClusterRequest) (Cluster, error) {
+	var out Cluster
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/clusters", nil, req, "", &out)
+}
+
+// ListClusters lists the registry.
+func (c *Client) ListClusters(ctx context.Context) ([]Cluster, error) {
+	var out struct {
+		Items []Cluster `json:"items"`
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/clusters", nil, nil, "", &out)
+}
+
+// GetCluster returns one cluster.
+func (c *Client) GetCluster(ctx context.Context, id int64) (Cluster, error) {
+	var out Cluster
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, nil, "", &out)
+}
+
+// UpdateCluster changes connection details or placement.
+func (c *Client) UpdateCluster(ctx context.Context, id int64, req ClusterRequest) (Cluster, error) {
+	var out Cluster
+	return out, c.do(ctx, http.MethodPatch, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, req, "", &out)
+}
+
+// DeleteCluster removes a cluster no mailbox refers to.
+func (c *Client) DeleteCluster(ctx context.Context, id int64) error {
+	return c.do(ctx, http.MethodDelete, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, nil, "", nil)
+}

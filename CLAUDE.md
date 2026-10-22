@@ -34,6 +34,7 @@ bin/dovetail check-config -c examples/dovetail.yaml
 bin/dovetail migrate -c <cfg>                          # create/upgrade the MariaDB schema (store/mariadb/migrations)
 bin/dovetail admin -c <cfg> bootstrap                 # first admin token; `admin token --read-only` for more
 bin/dovetail-admin -u http://[::1]:8081 -t dvt_... mailbox list       # everything else: the API client
+bin/dovetail-admin cluster add|list|enable|disable|remove            # Ceph cluster registry (mailbox placement)
 bin/dovetail-admin ... -o json ...                                   # -o plain|json everywhere
 ```
 

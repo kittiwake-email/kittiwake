@@ -30,6 +30,7 @@ import (
 	"dovetail/service/export"
 	"dovetail/service/submit"
 	"dovetail/store/audit"
+	"dovetail/store/cluster"
 	"dovetail/store/identity"
 	"dovetail/store/index"
 	"dovetail/store/queue"
@@ -173,6 +174,11 @@ func (s *Server) AdminHandler() http.Handler {
 	)
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
+		route{"POST /v1/admin/clusters", s.clusterAdd},
+		route{"GET /v1/admin/clusters", s.clusterList},
+		route{"GET /v1/admin/clusters/{cid}", s.clusterGet},
+		route{"PATCH /v1/admin/clusters/{cid}", s.clusterPatch},
+		route{"DELETE /v1/admin/clusters/{cid}", s.clusterDelete},
 		route{"POST /v1/admin/domains", s.domainCreate},
 		route{"GET /v1/admin/domains", s.domainList},
 		route{"GET /v1/admin/domains/{name}", s.domainGet},
@@ -328,6 +334,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusUnauthorized
 	case errors.Is(err, auth.ErrAccountDisabled), errors.Is(err, auth.ErrServiceDisabled):
 		status = http.StatusForbidden
+	case errors.Is(err, cluster.ErrUnavailable), errors.Is(err, cluster.ErrNoPlacement):
+		status = http.StatusServiceUnavailable
 	default:
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -814,6 +822,9 @@ type mailboxRequest struct {
 	State       *string               `json:"state,omitempty"`
 	StateReason string                `json:"state_reason,omitempty"`
 	Quota       *identity.QuotaLimits `json:"quota,omitempty"`
+	// ClusterID pins the Ceph cluster on create (default: random among
+	// clusters open for placement). Not changeable afterwards.
+	ClusterID int64 `json:"cluster_id,omitempty"`
 }
 
 func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
@@ -824,7 +835,7 @@ func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m := identity.Mailbox{State: identity.StateActive}
+	m := identity.Mailbox{State: identity.StateActive, ClusterID: req.ClusterID}
 	if req.State != nil {
 		m.State, m.StateReason = *req.State, req.StateReason
 	}
@@ -862,6 +873,10 @@ func (s *Server) mailboxPatch(w http.ResponseWriter, r *http.Request) {
 	var req mailboxRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if req.ClusterID != 0 {
+		s.fail(w, r, badRequest("cluster_id cannot be changed (mailbox moves are a worker task)"))
 		return
 	}
 	var out identity.Mailbox
@@ -1050,13 +1065,14 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 // operator tool, not a hot path.
 func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 	type item struct {
-		ID       uuid.UUID            `json:"id"`
-		State    string               `json:"state"`
-		Reason   string               `json:"state_reason,omitempty"`
-		OnHold   bool                 `json:"on_hold"`
-		Quota    identity.QuotaLimits `json:"quota"`
-		Accounts []string             `json:"accounts"`
-		Created  time.Time            `json:"created"`
+		ID        uuid.UUID            `json:"id"`
+		ClusterID int64                `json:"cluster_id"`
+		State     string               `json:"state"`
+		Reason    string               `json:"state_reason,omitempty"`
+		OnHold    bool                 `json:"on_hold"`
+		Quota     identity.QuotaLimits `json:"quota"`
+		Accounts  []string             `json:"accounts"`
+		Created   time.Time            `json:"created"`
 	}
 	orphaned := r.URL.Query().Get("orphaned") == "true"
 	items := []item{}
@@ -1072,7 +1088,7 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 		if orphaned && len(accts) > 0 {
 			return nil
 		}
-		items = append(items, item{ID: id, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
+		items = append(items, item{ID: id, ClusterID: m.ClusterID, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
 		return nil
 	})
 	if err != nil {
@@ -1492,3 +1508,120 @@ func (s *Server) importIdentity(w http.ResponseWriter, r *http.Request) {
 
 // ensure context import is used for interface satisfaction in tests.
 var _ = context.Background
+
+// ---- admin: clusters ----
+
+type clusterRequest struct {
+	Name      string          `json:"name,omitempty"`
+	MonHost   string          `json:"mon_host,omitempty"`
+	User      string          `json:"user,omitempty"`
+	Key       string          `json:"key,omitempty"`
+	Pools     *identity.Pools `json:"pools,omitempty"`
+	Placement *bool           `json:"placement,omitempty"`
+}
+
+func (r clusterRequest) toAdmin() admin.ClusterRequest {
+	out := admin.ClusterRequest{Name: r.Name, MonHost: r.MonHost, User: r.User, Key: r.Key, Placement: r.Placement}
+	if r.Pools != nil {
+		out.Pools = *r.Pools
+	}
+	return out
+}
+
+// clusterView never shows the key.
+type clusterView struct {
+	ID        int64          `json:"id"`
+	FSID      uuid.UUID      `json:"fsid"`
+	Name      string         `json:"name"`
+	MonHost   string         `json:"mon_host"`
+	User      string         `json:"user"`
+	Pools     identity.Pools `json:"pools"`
+	Placement bool           `json:"placement"`
+	Created   time.Time      `json:"created"`
+	Updated   time.Time      `json:"updated"`
+}
+
+func viewCluster(c identity.Cluster) clusterView {
+	return clusterView{ID: c.ID, FSID: c.FSID, Name: c.Name, MonHost: c.MonHost, User: c.User, Pools: c.Pools, Placement: c.Placement, Created: c.Created, Updated: c.Updated}
+}
+
+func pathClusterID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("cid"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, badRequest("cluster id must be a positive integer")
+	}
+	return id, nil
+}
+
+func (s *Server) clusterAdd(w http.ResponseWriter, r *http.Request) {
+	var req clusterRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := s.admin.AddCluster(r.Context(), req.toAdmin())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, viewCluster(out))
+}
+
+func (s *Server) clusterList(w http.ResponseWriter, r *http.Request) {
+	list, err := s.admin.ListClusters(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := make([]clusterView, 0, len(list))
+	for _, c := range list {
+		out = append(out, viewCluster(c))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (s *Server) clusterGet(w http.ResponseWriter, r *http.Request) {
+	id, err := pathClusterID(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	c, err := s.admin.GetCluster(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, viewCluster(c))
+}
+
+func (s *Server) clusterPatch(w http.ResponseWriter, r *http.Request) {
+	id, err := pathClusterID(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var req clusterRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := s.admin.UpdateCluster(r.Context(), id, req.toAdmin())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, viewCluster(out))
+}
+
+func (s *Server) clusterDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := pathClusterID(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.admin.DeleteCluster(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

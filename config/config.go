@@ -36,17 +36,22 @@ type Config struct {
 type Ceph struct {
 	// Backend is "librados" (default) or "memory" (in-process, volatile;
 	// for development and tests only).
-	Backend    string            `yaml:"backend"`
+	Backend string `yaml:"backend"`
+	// ConfigFile and Options apply to every cluster connection (librados
+	// defaults such as ms_bind_ipv6). Monitors, credentials and pools of a
+	// cluster live in the registry (database), not here; with the memory
+	// backend Pools names the pools of the one in-memory cluster.
 	ConfigFile string            `yaml:"config_file"`
+	Options    map[string]string `yaml:"options"`
 	Monitors   []string          `yaml:"monitors"`
 	User       string            `yaml:"user"`
 	Key        Secret            `yaml:"key"`
 	Keyring    string            `yaml:"keyring"`
-	Options    map[string]string `yaml:"options"`
 	Pools      Pools             `yaml:"pools"`
 }
 
-// Pools names the four RADOS pools.
+// Pools names the RADOS pools of the memory backend's single cluster.
+// With librados every cluster's pools are in its registry record.
 type Pools struct {
 	Messages    string `yaml:"messages"`
 	Attachments string `yaml:"attachments"`
@@ -197,7 +202,6 @@ func Default() Config {
 	return Config{
 		Ceph: Ceph{
 			Backend: "librados",
-			User:    "dovetail",
 			Pools: Pools{
 				Messages:    "dovetail.messages",
 				Attachments: "dovetail.attachments",
@@ -278,12 +282,16 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.Ceph.Backend {
-	case "librados", "memory":
+	case "librados":
+		if len(c.Ceph.Monitors) > 0 || c.Ceph.User != "" || c.Ceph.Key != "" || c.Ceph.Keyring != "" {
+			return errors.New("config: ceph.monitors/user/key/keyring are not used with librados: clusters are registered in the database (dovetail-admin cluster add); only ceph.config_file and ceph.options apply to every connection")
+		}
+	case "memory":
+		if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" {
+			return errors.New("config: ceph pools messages, attachments and index must be named")
+		}
 	default:
 		return fmt.Errorf("config: ceph.backend %q must be librados or memory", c.Ceph.Backend)
-	}
-	if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" {
-		return errors.New("config: ceph pools messages, attachments and index must be named")
 	}
 	if c.Ceph.Backend == "librados" && c.Database.DSN == "" {
 		return errors.New("config: database.dsn is required with the librados backend (metadata lives in MariaDB)")

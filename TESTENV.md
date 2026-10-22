@@ -38,6 +38,16 @@ ssh root@2a14:9b80::3143 'cd /root/dovetail && make integration'   # RADOS confo
 ssh root@2a14:9b80::3143 'cd /root/dovetail && make e2e'           # daemon on librados, LMTP/JMAP/IMAP/POP3/export
 ```
 
+The lab cluster is registered in the metadata database (clusters are not in the config):
+
+```
+ssh root@2a14:9b80::3143 'dovetail-admin cluster add --name lab \
+  --mon-host "$(sed -n "s/^\s*mon_host\s*=\s*//p" /etc/ceph/ceph.conf)" \
+  --user dovetail --keyring /etc/ceph/ceph.client.dovetail.keyring \
+  --pools dovetail.messages,dovetail.attachments,dovetail.index'
+ssh root@2a14:9b80::3143 'dovetail-admin cluster list; curl -s http://[::1]:9090/clusters'
+```
+
 `make integration` uses `/etc/ceph/ceph.conf`, user `dovetail` and pool `dovetail.index`
 (override with `DOVETAIL_TEST_CEPH_CONF`, `DOVETAIL_TEST_CEPH_USER`, `DOVETAIL_TEST_CEPH_POOL`);
 it works in its own RADOS namespaces and cleans up. `make e2e` runs `examples/lab.yaml` and

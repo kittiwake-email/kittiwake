@@ -253,6 +253,78 @@ paths:
                   token: { $ref: "#/components/schemas/Token" }
                   secret: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/admin/clusters:
+    get:
+      tags: [admin]
+      summary: List the Ceph cluster registry (keys are never shown)
+      responses:
+        "200":
+          description: Clusters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Cluster" } }
+    post:
+      tags: [admin]
+      summary: Register a Ceph cluster
+      description: >-
+        The admin daemon connects once with the given details, verifies the pools exist and
+        records the cluster's fsid. Every daemon picks the new cluster up within its registry
+        reload interval. Placement defaults to enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterRequest" }
+      responses:
+        "201":
+          description: Cluster
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cluster" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/clusters/{cid}:
+    parameters:
+      - { name: cid, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [admin]
+      summary: Get a cluster
+      responses:
+        "200":
+          description: Cluster
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cluster" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Change connection details or placement
+      description: >-
+        placement=false stops new mailboxes from being placed on the cluster; existing
+        mailboxes keep working. New connection details are verified against the recorded fsid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterRequest" }
+      responses:
+        "200":
+          description: Cluster
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cluster" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Remove a cluster that no mailbox refers to
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /v1/admin/tokens/{tid}:
     parameters:
       - { name: tid, in: path, required: true, schema: { type: string } }
@@ -343,6 +415,7 @@ paths:
                       type: object
                       properties:
                         id: { type: string, format: uuid }
+                        cluster_id: { type: integer, format: int64 }
                         state: { type: string, enum: [active, suspended, disabled] }
                         state_reason: { type: string }
                         on_hold: { type: boolean }
@@ -988,9 +1061,38 @@ components:
       properties:
         bytes: { type: integer }
         messages: { type: integer }
+    Pools:
+      type: object
+      required: [messages, attachments, index]
+      properties:
+        messages: { type: string }
+        attachments: { type: string }
+        index: { type: string }
+    ClusterRequest:
+      type: object
+      properties:
+        name: { type: string, maxLength: 64 }
+        mon_host: { type: string, description: "mon_host as in ceph.conf, e.g. \"[2001:db8::1]:6789,[2001:db8::2]:6789\"" }
+        user: { type: string, description: CephX user without "client." }
+        key: { type: string, description: CephX secret of user (write-only) }
+        pools: { $ref: "#/components/schemas/Pools" }
+        placement: { type: boolean, description: Accepts new mailboxes }
+    Cluster:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        fsid: { type: string, format: uuid }
+        name: { type: string }
+        mon_host: { type: string }
+        user: { type: string }
+        pools: { $ref: "#/components/schemas/Pools" }
+        placement: { type: boolean }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
     MailboxRequest:
       type: object
       properties:
+        cluster_id: { type: integer, format: int64, description: "Create only: pin the Ceph cluster (default random among clusters open for placement)" }
         state:
           type: string
           enum: [active, suspended, disabled]
@@ -1023,6 +1125,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        cluster_id: { type: integer, format: int64, description: Ceph cluster holding the mailbox data }
         state: { type: string, enum: [active, suspended, disabled] }
         state_reason: { type: string }
         state_since: { type: string, format: date-time }

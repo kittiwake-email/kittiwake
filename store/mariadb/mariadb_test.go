@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"dovetail/store/audit"
 	"dovetail/store/identity"
 	"dovetail/store/identity/identitytest"
 	"dovetail/store/mariadb"
@@ -39,7 +40,7 @@ func open(t *testing.T) *mariadb.DB {
 		"SET FOREIGN_KEY_CHECKS = 0",
 		"TRUNCATE alias_destinations", "TRUNCATE aliases", "TRUNCATE account_passwords", "TRUNCATE tokens", "TRUNCATE accounts",
 		"TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE clusters", "TRUNCATE signing_keys", "TRUNCATE sessions",
-		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease",
+		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin",
 		"SET FOREIGN_KEY_CHECKS = 1",
 	} {
 		if _, err := db.SQL().ExecContext(ctx, stmt); err != nil {
@@ -80,4 +81,43 @@ func TestSessionConformance(t *testing.T) {
 
 func TestQueueConformance(t *testing.T) {
 	queuetest.Run(t, func(t *testing.T, now *time.Time) queue.Store { return open(t) })
+}
+
+func TestAdminAuditLog(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	db.Now = func() time.Time { return now }
+	recs := []audit.Record{
+		{Time: now, Account: "admin:ops", Admin: "admin:ops", Protocol: audit.ProtoAdmin, Action: "domain-create", Target: "example.org", Result: audit.ResultOK, ClientIP: "::1"},
+		{Time: now.Add(time.Minute), Protocol: audit.ProtoCLI, Action: "token-create", Result: audit.ResultOK},
+		{Time: now.Add(-48 * time.Hour), Protocol: audit.ProtoAdmin, Action: "domain-create", Result: audit.ResultOK},
+	}
+	if err := db.WriteAdmin(ctx, recs); err != nil {
+		t.Fatal(err)
+	}
+	got, next, err := db.ReadAdmin(ctx, audit.Query{From: now, Max: 10})
+	if err != nil || len(got) != 2 || next != "" || got[0].Action != "domain-create" || got[1].Action != "token-create" {
+		t.Fatalf("read today: %+v %q %v", got, next, err)
+	}
+	got, next, _ = db.ReadAdmin(ctx, audit.Query{From: now, Max: 1})
+	if len(got) != 1 || next == "" {
+		t.Fatalf("page 1: %+v %q", got, next)
+	}
+	got, next, _ = db.ReadAdmin(ctx, audit.Query{From: now, Max: 1, After: next})
+	if len(got) != 1 || got[0].Action != "token-create" || next != "" {
+		t.Fatalf("page 2: %+v %q", got, next)
+	}
+	got, _, _ = db.ReadAdmin(ctx, audit.Query{From: now, Action: "domain-create", Account: "ADMIN:ops", Max: 10})
+	if len(got) != 1 {
+		t.Fatalf("filters: %+v", got)
+	}
+	got, _, _ = db.ReadAdmin(ctx, audit.Query{From: now.Add(-72 * time.Hour), To: now, Max: 10})
+	if len(got) != 3 {
+		t.Fatalf("range: %+v", got)
+	}
+	n, err := db.PurgeAdminBefore(ctx, now.Add(-24*time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("purge: %d %v", n, err)
+	}
 }

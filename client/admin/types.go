@@ -59,6 +59,7 @@ type Hold struct {
 // Mailbox is the identity record of a mailbox.
 type Mailbox struct {
 	ID          string      `json:"id"`
+	ClusterID   int64       `json:"cluster_id"`
 	State       string      `json:"state"` // active | suspended | disabled
 	StateReason string      `json:"state_reason,omitempty"`
 	StateSince  time.Time   `json:"state_since"`
@@ -76,6 +77,40 @@ type MailboxRequest struct {
 	State       *string      `json:"state,omitempty"`
 	StateReason string       `json:"state_reason,omitempty"`
 	Quota       *QuotaLimits `json:"quota,omitempty"`
+	// ClusterID pins the Ceph cluster on create (default: random among
+	// clusters open for placement).
+	ClusterID int64 `json:"cluster_id,omitempty"`
+}
+
+// Pools are the data pools of a cluster.
+type Pools struct {
+	Messages    string `json:"messages"`
+	Attachments string `json:"attachments"`
+	Index       string `json:"index"`
+}
+
+// Cluster is a registered Ceph cluster (the key is never returned).
+type Cluster struct {
+	ID        int64     `json:"id"`
+	FSID      string    `json:"fsid"`
+	Name      string    `json:"name"`
+	MonHost   string    `json:"mon_host"`
+	User      string    `json:"user"`
+	Pools     Pools     `json:"pools"`
+	Placement bool      `json:"placement"`
+	Created   time.Time `json:"created"`
+	Updated   time.Time `json:"updated"`
+}
+
+// ClusterRequest registers or changes a cluster; empty fields are left
+// unchanged on PATCH.
+type ClusterRequest struct {
+	Name      string `json:"name,omitempty"`
+	MonHost   string `json:"mon_host,omitempty"`
+	User      string `json:"user,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Pools     *Pools `json:"pools,omitempty"`
+	Placement *bool  `json:"placement,omitempty"`
 }
 
 // Usage is quota usage.
@@ -116,6 +151,7 @@ type MailboxInfo struct {
 // MailboxListItem is one entry of GET /v1/admin/mailboxes.
 type MailboxListItem struct {
 	ID          string      `json:"id"`
+	ClusterID   int64       `json:"cluster_id"`
 	State       string      `json:"state"`
 	StateReason string      `json:"state_reason,omitempty"`
 	OnHold      bool        `json:"on_hold"`

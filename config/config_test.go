@@ -23,8 +23,8 @@ func TestParseDefaults(t *testing.T) {
 func TestParseOverridesAndValidation(t *testing.T) {
 	y := `
 modes: [worker]
-database: {dsn: "dovetail:x@tcp(db:3306)/dovetail"}
 ceph:
+  backend: memory
   monitors: ["[2001:db8::1]:6789"]
   user: mail
   key: ${DOVETAIL_TEST_KEY}
@@ -65,6 +65,13 @@ log: {level: debug, format: text}
 	// librados needs a database; memory does not.
 	if _, err := Parse([]byte("modes: [imap]\n")); err == nil || !strings.Contains(err.Error(), "database.dsn") {
 		t.Fatalf("expected dsn error, got %v", err)
+	}
+	// With librados the clusters come from the registry, not the config.
+	if _, err := Parse([]byte("modes: [imap]\ndatabase: {dsn: x}\nceph: {monitors: [\"[::1]:6789\"]}\n")); err == nil || !strings.Contains(err.Error(), "registered in the database") {
+		t.Fatalf("expected cluster-in-config error, got %v", err)
+	}
+	if _, err := Parse([]byte("modes: [imap]\ndatabase: {dsn: x}\nceph: {config_file: /etc/ceph/ceph.conf, options: {ms_bind_ipv6: \"true\"}}\n")); err != nil {
+		t.Fatalf("librados with registry: %v", err)
 	}
 	if _, err := Parse([]byte("modes: [imap]\nceph: {backend: memory}\n")); err != nil {
 		t.Fatalf("memory backend without dsn: %v", err)

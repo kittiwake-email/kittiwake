@@ -130,10 +130,11 @@ func (a *cli) mailbox(args []string) error {
 	case "create":
 		fs := newFlagSet("mailbox create")
 		sb, hb, sm, hm := quotaFlags(fs)
+		clusterID := fs.Int64("cluster", 0, "pin the Ceph cluster by registry id (default: random among clusters open for placement)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm)}
+		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm), ClusterID: *clusterID}
 		m, err := a.c.CreateMailbox(a.ctx, req)
 		if err != nil {
 			return err
@@ -165,9 +166,9 @@ func (a *cli) mailbox(args []string) error {
 				if m.StateReason != "" {
 					st += " (" + m.StateReason + ")"
 				}
-				rows = append(rows, []string{m.ID, st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
+				rows = append(rows, []string{m.ID, strconv.FormatInt(m.ClusterID, 10), st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
 			}
-			table([]string{"MAILBOX", "STATE", "HOLD", "ACCOUNTS"}, rows)
+			table([]string{"MAILBOX", "CLUSTER", "STATE", "HOLD", "ACCOUNTS"}, rows)
 		})
 	case "holds":
 		items, err := a.c.ListHolds(a.ctx)
@@ -925,6 +926,160 @@ func (a *cli) token(args []string) error {
 		return ok("revoked " + args[1])
 	}
 	return fmt.Errorf("unknown token subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+func (a *cli) cluster(args []string) error {
+	const u = `cluster add --name text --mon-host "[addr]:6789,..." --user cephx-user --key-stdin|--keyring file --pools messages,attachments,index [--no-placement]
+       cluster list | get <id>
+       cluster set <id> [--name text] [--mon-host ...] [--user ...] [--key-stdin|--keyring file] [--pools m,a,i]
+       cluster enable <id> | disable <id>      placement of new mailboxes (existing ones keep working)
+       cluster remove <id>                     only when no mailbox refers to it`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("usage: dovetail-admin " + u)
+		return nil
+	}
+	clusterFlags := func(fs *flag.FlagSet) (name, mon, user, pools *string, keyStdin *bool, keyring *string) {
+		name = fs.String("name", "", "cluster name (unique)")
+		mon = fs.String("mon-host", "", "mon_host as in ceph.conf")
+		user = fs.String("user", "", "CephX user without \"client.\"")
+		pools = fs.String("pools", "", "messages,attachments,index pool names")
+		keyStdin = fs.Bool("key-stdin", false, "read the CephX key from stdin")
+		keyring = fs.String("keyring", "", "read the CephX key from this keyring file")
+		return
+	}
+	readKey := func(stdin bool, keyring string) (string, error) {
+		switch {
+		case stdin && keyring != "":
+			return "", errors.New("use either --key-stdin or --keyring")
+		case stdin:
+			return readPasswordStdin()
+		case keyring != "":
+			return keyFromKeyring(keyring)
+		}
+		return "", nil
+	}
+	buildReq := func(name, mon, user, pools string, key string) admin.ClusterRequest {
+		req := admin.ClusterRequest{Name: name, MonHost: mon, User: user, Key: key}
+		if pools != "" {
+			p := splitList(pools)
+			if len(p) == 3 {
+				req.Pools = &admin.Pools{Messages: p[0], Attachments: p[1], Index: p[2]}
+			}
+		}
+		return req
+	}
+	printCluster := func(c admin.Cluster) {
+		fmt.Printf("id:        %d\nname:      %s\nfsid:      %s\nmon_host:  %s\nuser:      %s\npools:     %s, %s, %s\nplacement: %v\n",
+			c.ID, c.Name, c.FSID, c.MonHost, c.User, c.Pools.Messages, c.Pools.Attachments, c.Pools.Index, c.Placement)
+	}
+	switch args[0] {
+	case "add":
+		fs := newFlagSet("cluster add")
+		name, mon, user, pools, keyStdin, keyring := clusterFlags(fs)
+		noPlacement := fs.Bool("no-placement", false, "register without accepting new mailboxes")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" || *mon == "" || *user == "" || *pools == "" || (!*keyStdin && *keyring == "") {
+			return errors.New("--name, --mon-host, --user, --pools and a key (--key-stdin or --keyring) are required")
+		}
+		key, err := readKey(*keyStdin, *keyring)
+		if err != nil {
+			return err
+		}
+		req := buildReq(*name, *mon, *user, *pools, key)
+		if req.Pools == nil {
+			return errors.New("--pools needs exactly three names: messages,attachments,index")
+		}
+		if *noPlacement {
+			req.Placement = boolPtr(false)
+		}
+		c, err := a.c.AddCluster(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return emit(c, func() { printCluster(c) })
+	case "list":
+		list, err := a.c.ListClusters(a.ctx)
+		if err != nil {
+			return err
+		}
+		if list == nil {
+			list = []admin.Cluster{}
+		}
+		return emit(list, func() {
+			var rows [][]string
+			for _, c := range list {
+				rows = append(rows, []string{strconv.FormatInt(c.ID, 10), c.Name, c.FSID, c.MonHost, fmt.Sprint(c.Placement)})
+			}
+			table([]string{"ID", "NAME", "FSID", "MON_HOST", "PLACEMENT"}, rows)
+		})
+	case "get", "set", "enable", "disable", "remove":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dovetail-admin cluster %s <id>", args[0])
+		}
+		id, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("cluster id %q is not a number", args[1])
+		}
+		switch args[0] {
+		case "get":
+			c, err := a.c.GetCluster(a.ctx, id)
+			if err != nil {
+				return err
+			}
+			return emit(c, func() { printCluster(c) })
+		case "set":
+			fs := newFlagSet("cluster set")
+			name, mon, user, pools, keyStdin, keyring := clusterFlags(fs)
+			if err := fs.Parse(args[2:]); err != nil {
+				return err
+			}
+			key, err := readKey(*keyStdin, *keyring)
+			if err != nil {
+				return err
+			}
+			req := buildReq(*name, *mon, *user, *pools, key)
+			if *pools != "" && req.Pools == nil {
+				return errors.New("--pools needs exactly three names: messages,attachments,index")
+			}
+			if req.Name == "" && req.MonHost == "" && req.User == "" && req.Key == "" && req.Pools == nil {
+				return errors.New("nothing to change")
+			}
+			c, err := a.c.UpdateCluster(a.ctx, id, req)
+			if err != nil {
+				return err
+			}
+			return emit(c, func() { printCluster(c) })
+		case "enable", "disable":
+			c, err := a.c.UpdateCluster(a.ctx, id, admin.ClusterRequest{Placement: boolPtr(args[0] == "enable")})
+			if err != nil {
+				return err
+			}
+			return emit(c, func() { fmt.Printf("cluster %d (%s): placement %v\n", c.ID, c.Name, c.Placement) })
+		case "remove":
+			if err := a.c.DeleteCluster(a.ctx, id); err != nil {
+				return err
+			}
+			return ok(fmt.Sprintf("removed cluster %d", id))
+		}
+	}
+	return fmt.Errorf("unknown cluster subcommand %q\nusage: dovetail-admin %s", args[0], u)
+}
+
+// keyFromKeyring extracts the first "key = ..." of a Ceph keyring file.
+func keyFromKeyring(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && strings.TrimSpace(k) == "key" {
+			return strings.TrimSpace(v), nil
+		}
+	}
+	return "", fmt.Errorf("%s: no key found", path)
 }
 
 func (a *cli) keys(args []string) error {

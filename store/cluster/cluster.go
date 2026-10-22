@@ -128,6 +128,9 @@ type Registry struct {
 	// ReloadMinInterval bounds on-demand reloads triggered by an unknown
 	// cluster id (a mailbox placed on a cluster added since the last reload).
 	ReloadMinInterval time.Duration
+	// RetryInterval: how long a cluster whose connection failed is left
+	// alone before the next attempt.
+	RetryInterval time.Duration
 
 	mu       sync.RWMutex
 	conns    map[int64]*conn
@@ -138,7 +141,8 @@ type conn struct {
 	rec    identity.Cluster
 	client rados.Client
 	pools  [3]rados.IOContext
-	err    error // why the cluster is not connected
+	err    error     // why the cluster is not connected
+	tried  time.Time // last connection attempt
 }
 
 // Status describes one cluster for health output.
@@ -156,44 +160,90 @@ func NewRegistry(ids *identity.Store, connect Connector, log *slog.Logger) *Regi
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Registry{ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, conns: map[int64]*conn{}}
+	return &Registry{ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, RetryInterval: time.Minute, conns: map[int64]*conn{}}
 }
 
 // Reload reads the registry, connects to new clusters (verifying the fsid
 // when the record has one, recording it when it has none), applies
-// changed placement flags, and closes removed clusters. Connection
-// failures are kept as the cluster's status, not returned.
+// changed placement flags, and closes removed clusters. Connecting
+// happens outside the lock, so a slow or unreachable cluster never stalls
+// lookups for the others; a cluster whose last attempt failed is retried
+// no more often than RetryInterval. Connection failures are kept as the
+// cluster's status, not returned.
 func (r *Registry) Reload(ctx context.Context) error {
 	recs, err := r.ids.ListClusters(ctx)
 	if err != nil {
 		return err
 	}
+	now := r.Now()
+	// 1. Decide under the lock.
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastLoad = r.Now()
+	r.lastLoad = now
 	seen := map[int64]bool{}
+	var todo []identity.Cluster
+	var closing []rados.Client
 	for _, rec := range recs {
 		seen[rec.ID] = true
 		c, ok := r.conns[rec.ID]
-		if ok && c.client != nil && c.rec.MonHost == rec.MonHost && c.rec.User == rec.User && c.rec.Key == rec.Key && c.rec.Pools == rec.Pools {
+		switch {
+		case ok && c.client != nil && sameConn(c.rec, rec):
 			c.rec = rec // placement/name changes need no reconnect
-			continue
+		case ok && c.client == nil && sameConn(c.rec, rec) && now.Sub(c.tried) < r.RetryInterval:
+			c.rec = rec // failed recently with the same details: wait
+		default:
+			if ok && c.client != nil {
+				closing = append(closing, c.client)
+			}
+			todo = append(todo, rec)
+			r.conns[rec.ID] = &conn{rec: rec, tried: now, err: errConnecting}
 		}
-		if ok && c.client != nil {
-			_ = c.client.Close()
-		}
-		r.conns[rec.ID] = r.open(ctx, rec)
 	}
 	for id, c := range r.conns {
 		if !seen[id] {
 			if c.client != nil {
-				_ = c.client.Close()
+				closing = append(closing, c.client)
 			}
 			delete(r.conns, id)
 			r.log.Info("cluster removed from registry", slog.Int64("cluster", id), slog.String("name", c.rec.Name))
 		}
 	}
+	r.mu.Unlock()
+	for _, cl := range closing {
+		_ = cl.Close()
+	}
+	// 2. Connect outside the lock, all candidates in parallel.
+	results := make([]*conn, len(todo))
+	var wg sync.WaitGroup
+	for i, rec := range todo {
+		wg.Add(1)
+		go func(i int, rec identity.Cluster) {
+			defer wg.Done()
+			results[i] = r.open(ctx, rec)
+		}(i, rec)
+	}
+	wg.Wait()
+	// 3. Install.
+	r.mu.Lock()
+	for i, rec := range todo {
+		c := results[i]
+		c.tried = now
+		if cur, ok := r.conns[rec.ID]; !ok || cur.err != errConnecting {
+			// Removed or replaced while we were connecting.
+			if c.client != nil {
+				_ = c.client.Close()
+			}
+			continue
+		}
+		r.conns[rec.ID] = c
+	}
+	r.mu.Unlock()
 	return nil
+}
+
+var errConnecting = errors.New("connecting")
+
+func sameConn(a, b identity.Cluster) bool {
+	return a.MonHost == b.MonHost && a.User == b.User && a.Key == b.Key && a.Pools == b.Pools
 }
 
 func (r *Registry) open(ctx context.Context, rec identity.Cluster) *conn {
@@ -219,19 +269,19 @@ func (r *Registry) open(ctx context.Context, rec identity.Cluster) *conn {
 	switch {
 	case rec.FSID == uuid.Nil:
 		// First contact: record the fsid so later reloads verify it.
-		if upd, err := r.ids.UpdateCluster(ctx, rec.ID, func(x *identity.Cluster) error {
+		upd, err := r.ids.UpdateCluster(ctx, rec.ID, func(x *identity.Cluster) error {
 			if x.FSID != uuid.Nil && x.FSID != got {
 				return fmt.Errorf("%w: cluster %s now reports fsid %s, registry has %s", identity.ErrConflict, x.Name, got, x.FSID)
 			}
 			x.FSID = got
 			return nil
-		}); err != nil {
+		})
+		if err != nil {
 			_ = client.Close()
 			c.err = err
 			return c
-		} else {
-			c.rec = upd
 		}
+		c.rec = upd
 	case rec.FSID != got:
 		_ = client.Close()
 		c.err = fmt.Errorf("fsid mismatch: registry says %s, cluster reports %s", rec.FSID, got)
@@ -367,18 +417,34 @@ var ErrNoPlacement = errors.New("cluster: no cluster accepts new mailboxes")
 // Pick chooses a cluster for a new mailbox: random among connected
 // clusters with placement enabled.
 func (r *Registry) Pick(ctx context.Context) (int64, error) {
+	ids := r.placeable()
+	if len(ids) == 0 {
+		// A cluster registered since the last reload: look again, bounded.
+		r.mu.RLock()
+		last := r.lastLoad
+		r.mu.RUnlock()
+		if r.Now().Sub(last) >= r.ReloadMinInterval {
+			if err := r.Reload(ctx); err == nil {
+				ids = r.placeable()
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return 0, ErrNoPlacement
+	}
+	return ids[rand.IntN(len(ids))], nil
+}
+
+func (r *Registry) placeable() []int64 {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var ids []int64
 	for id, c := range r.conns {
 		if c.client != nil && c.rec.Placement {
 			ids = append(ids, id)
 		}
 	}
-	r.mu.RUnlock()
-	if len(ids) == 0 {
-		return 0, ErrNoPlacement
-	}
-	return ids[rand.IntN(len(ids))], nil
+	return ids
 }
 
 // Statuses lists every registered cluster with its connection state.
@@ -390,6 +456,9 @@ func (r *Registry) Statuses() []Status {
 		st := Status{ID: id, Name: c.rec.Name, FSID: c.rec.FSID, Placement: c.rec.Placement, Connected: c.client != nil}
 		if c.err != nil {
 			st.Error = c.err.Error()
+		}
+		if c.err == errConnecting {
+			st.Error = "connecting"
 		}
 		out = append(out, st)
 	}

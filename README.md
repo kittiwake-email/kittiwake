@@ -64,6 +64,43 @@ The RADOS backend (the RGW-style design: one object per record, exclusive create
 uniqueness, omap for listings) remains for development and tests on the memory backend, and
 both run the same conformance suites. Nothing else is stateful: no Redis, no memcached.
 
+## Multiple Ceph clusters
+
+One Ceph cluster is a bottleneck long before a million mailboxes: the object count and the
+omap load of 150k-message mailboxes have to be spread. Dovetail therefore places **each
+mailbox on one of several Ceph clusters**, all equal, and can grow by adding clusters, also
+in other datacenters within a few milliseconds of each other.
+
+- **Registry, not config.** Clusters are rows in the metadata database: name, `mon_host`,
+  CephX user and key, the three data pools, and a placement flag. `dovetail-admin cluster
+  add` hands the details to the admin daemon, which connects once, checks the pools exist,
+  reads the cluster's **fsid** and stores it. The daemon config carries no cluster at all
+  (only `ceph.config_file` and `ceph.options` as librados defaults for every connection).
+- **Fsid is the identity.** Mailboxes reference the cluster by its integer registry id;
+  the fsid guards the registry entry: a daemon that connects and finds another fsid than
+  recorded refuses that cluster, so a mistyped `mon_host` can never serve the wrong data.
+- **Every daemon connects to every cluster** it finds in the registry, re-reads the
+  registry every 30 seconds (and at once when it meets a cluster id it does not know), so a
+  cluster added or closed for placement is picked up without a restart. The management
+  listener's `/clusters` shows each cluster's connection state.
+- **Placement** of a new mailbox is random among connected clusters whose placement flag
+  is on; `dovetail-admin mailbox create --cluster <id>` pins one. `cluster disable` stops
+  new placement on a cluster, existing mailboxes keep working; a cluster can only be removed
+  when no mailbox refers to it (a foreign key enforces it).
+- **Where things live.** Every data store resolves a mailbox to its cluster's pools
+  through a cached identity read (the same cached record the state check already loads).
+  Index, messages, attachments and the per-mailbox audit log sit on the mailbox's cluster.
+  Attachment deduplication is per cluster. Garbage collection and sweeps walk every
+  connected cluster; a removal task for a deleted mailbox carries the cluster id, since the
+  record it would look up is gone. Platform-wide admin audit records live in the database.
+- **Unavailable cluster.** A mailbox whose cluster is not connected from this process is
+  served as temporarily unavailable: LMTP answers 4xx so the MTA queues, users get a clear
+  error, the log names the cluster.
+- **Latency.** Serving a mailbox in another datacenter costs one round trip per sequential
+  RADOS write; the write path is three. Reads on the hot path are cached or session-local.
+- **Not yet:** moving a mailbox between clusters (a worker task: suspend soft, copy, flip,
+  delete), per-domain default clusters.
+
 ## One binary, multiple modes
 
 The platform ships as a single Go binary, `dovetail`, that can run in one of several modes.
@@ -871,10 +908,8 @@ The daemon takes a single YAML file as configuration:
 - Mode(s) to run and listen addresses (one listener per mode; JMAP and the admin API are
   separate listeners and separate code paths)
 - Metadata database DSN (MariaDB)
-- Ceph cluster connection information
-  - Monitors
-  - Credentials
-  - RADOS pools (messages, attachments, index)
+- Ceph: `config_file` and `options` applied to every cluster connection (clusters
+  themselves are registered in the database); pool names only for the memory backend
 - Outbound SMTP relay host (and optional SASL credentials)
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
@@ -934,9 +969,11 @@ other clients can be generated from the exact contract the running version imple
 - Configuration loading, single YAML file, `memory` backend for development
 - RADOS abstraction with librados (cgo) and in-memory implementations
 - Metadata in MariaDB (domains, mailboxes, accounts with services, aliases, catch-all,
-  tokens, sessions, signing keys, queue, cluster registry) with embedded migrations and
-  `dovetail migrate`; RADOS backend for development; shared conformance suites;
-  `dovetail admin bootstrap`, identity export/import
+  tokens, sessions, signing keys, queue, cluster registry, admin audit) with embedded
+  migrations and `dovetail migrate`; RADOS backend for development; shared conformance
+  suites; `dovetail admin bootstrap`, identity export/import
+- Multiple Ceph clusters: registry with fsid verification, per-mailbox placement, periodic
+  reload, per-cluster stores and sweeps, `dovetail-admin cluster` and `/v1/admin/clusters`
 - Admin service, REST admin API (domains, mailboxes, accounts, aliases, tokens, sessions,
   hold/release, audit queries, queue inspection, key rotation, export/import) with an
   OpenAPI spec that is tested against the registered routes
@@ -965,7 +1002,7 @@ other clients can be generated from the exact contract the running version imple
 
 - IMAP CONDSTORE/QRESYNC (modseq is tracked; capability not advertised yet), JMAP over
   WebSocket, `Email/queryChanges`
-- Identity reconciliation worker (listings are repaired only by the explicit tools)
+- Moving a mailbox between Ceph clusters; per-domain default cluster
 - Full-text search backend (events are published; no consumer yet)
 - Self-service API token management (tokens are admin-managed)
 - Real integration tests against a Ceph cluster

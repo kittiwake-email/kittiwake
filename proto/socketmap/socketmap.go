@@ -134,7 +134,7 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 			case errors.Is(err, delivery.ErrUnknownDomain), errors.Is(err, delivery.ErrUnknownRecipient),
 				errors.Is(err, delivery.ErrAliasLoop), errors.Is(err, delivery.ErrMailboxDisabled):
 				return "NOTFOUND "
-			case errors.Is(err, delivery.ErrMailboxSuspended), errors.Is(err, delivery.ErrOverQuota), errors.Is(err, delivery.ErrHold):
+			case errors.Is(err, delivery.ErrMailboxSuspended), errors.Is(err, delivery.ErrOverQuota), errors.Is(err, delivery.ErrHold), errors.Is(err, delivery.ErrUnavailable):
 				targets, err = s.del.Resolve(ctx, key)
 				if err != nil {
 					return "TEMP " + err.Error()

@@ -5,6 +5,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"dovetail/config"
 	"dovetail/metrics"
@@ -31,6 +34,7 @@ import (
 	"dovetail/service/submit"
 	"dovetail/store/attach"
 	"dovetail/store/audit"
+	"dovetail/store/cluster"
 	"dovetail/store/identity"
 	"dovetail/store/index"
 	"dovetail/store/mariadb"
@@ -89,8 +93,10 @@ type Services struct {
 type App struct {
 	Cfg      config.Config
 	Log      *slog.Logger
-	Client   rados.Client
-	DB       *mariadb.DB // nil with the memory backend and no DSN
+	Client   rados.Client      // the memory backend's cluster; nil with librados
+	DB       *mariadb.DB       // nil with the memory backend and no DSN
+	Clusters *cluster.Registry // nil with the memory backend
+	Resolver cluster.Resolver
 	Stores   Stores
 	Services Services
 	// JMAPHandler and AdminHandler are mounted by the jmap and admin modes;
@@ -126,19 +132,29 @@ func NewLogger(cfg config.Log) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stderr, opts))
 }
 
-// Connect opens the RADOS client described by the config.
+// Connect opens the single in-memory cluster of the memory backend. With
+// librados there is no client from the config: clusters come from the
+// registry in the database and are connected by New.
 func Connect(cfg config.Ceph) (rados.Client, error) {
 	if cfg.Backend == "memory" {
 		return rados.NewMemoryClient(), nil
 	}
-	key, err := cfg.Key.Resolve()
-	if err != nil {
-		return nil, fmt.Errorf("ceph key: %w", err)
+	return nil, nil
+}
+
+// Connector returns the function that opens a registered cluster with
+// librados, applying the config's ceph.config_file and ceph.options to
+// every connection.
+func Connector(cfg config.Ceph) cluster.Connector {
+	return func(c identity.Cluster) (rados.Client, error) {
+		// An unreachable cluster must fail fast, not hang a reload for the
+		// librados default of five minutes; ceph.options can override.
+		opts := map[string]string{"client_mount_timeout": "10", "rados_mon_op_timeout": "10"}
+		for k, v := range cfg.Options {
+			opts[k] = v
+		}
+		return rados.Connect(rados.Config{ConfigFile: cfg.ConfigFile, Monitors: c.MonHost, User: c.User, Key: c.Key, Options: opts})
 	}
-	return rados.Connect(rados.Config{
-		ConfigFile: cfg.ConfigFile, Monitors: strings.Join(cfg.Monitors, ","), User: cfg.User,
-		Key: key, Keyring: cfg.Keyring, Options: cfg.Options,
-	})
 }
 
 // OpenDatabase opens the metadata database when one is configured and
@@ -172,35 +188,64 @@ func OpenDatabase(ctx context.Context, cfg config.Database) (*mariadb.DB, error)
 	return db, nil
 }
 
-// New builds stores and services on an open client. db may be nil only
-// with the memory backend (then metadata, sessions and the queue live in
-// the memory client too).
+// New builds stores and services. client is the memory backend's single
+// cluster (nil with librados, where the cluster registry connects); db is
+// the metadata database (nil only with the memory backend).
 func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logger) (*App, error) {
 	pools := cfg.Ceph.Pools
-	if db == nil && cfg.Ceph.Backend != "memory" {
+	memory := cfg.Ceph.Backend == "memory"
+	if db == nil && !memory {
 		return nil, errors.New("app: a metadata database is required with the librados backend")
 	}
-	idxp, err := client.Pool(pools.Index)
-	if err != nil {
-		return nil, fmt.Errorf("pool %s: %w", pools.Index, err)
+	if client == nil && memory {
+		return nil, errors.New("app: the memory backend needs a memory client")
 	}
-	msgp, err := client.Pool(pools.Messages)
-	if err != nil {
-		return nil, fmt.Errorf("pool %s: %w", pools.Messages, err)
-	}
-	attp, err := client.Pool(pools.Attachments)
-	if err != nil {
-		return nil, fmt.Errorf("pool %s: %w", pools.Attachments, err)
-	}
-	st := Stores{Index: index.New(idxp), Messages: message.New(msgp), Attachments: attach.New(attp), Audit: audit.New(idxp)}
+	a := &App{Cfg: cfg, Log: log, Client: client, DB: db}
+	st := Stores{}
+	var resolver cluster.Resolver
+	var adminLog audit.AdminLog
 	if db != nil {
 		st.Identity, st.Sessions, st.Queue = identity.NewWith(db), db, db
+		adminLog = db
 	} else {
 		meta, err := client.Pool(pools.Meta)
 		if err != nil {
 			return nil, fmt.Errorf("pool %s: %w", pools.Meta, err)
 		}
+		idxp, err := client.Pool(pools.Index)
+		if err != nil {
+			return nil, fmt.Errorf("pool %s: %w", pools.Index, err)
+		}
 		st.Identity, st.Sessions, st.Queue = identity.New(meta), session.New(idxp), queue.New(idxp)
+		adminLog = audit.RadosAdminLog(idxp)
+	}
+	if memory {
+		fixed, err := cluster.NewFixed(client, pools.Index, pools.Messages, pools.Attachments)
+		if err != nil {
+			return nil, err
+		}
+		resolver = fixed
+	} else {
+		reg := cluster.NewRegistry(st.Identity, Connector(cfg.Ceph), log)
+		if err := reg.Reload(context.Background()); err != nil {
+			return nil, fmt.Errorf("cluster registry: %w", err)
+		}
+		if len(reg.Statuses()) == 0 {
+			log.Warn("no Ceph clusters registered; mailboxes cannot be placed or served until one is added (dovetail-admin cluster add)")
+		}
+		a.Clusters = reg
+		resolver = reg
+	}
+	a.Resolver = resolver
+	st.Index, st.Messages, st.Attachments, st.Audit = index.NewMulti(resolver), message.NewMulti(resolver), attach.NewMulti(resolver), audit.NewMulti(resolver, adminLog)
+	// LMTP defers at RCPT when the recipient's cluster is not connected
+	// (no I/O: the registry and the cached mailbox record).
+	var clusterAvailable func(context.Context, uuid.UUID) error
+	if a.Clusters != nil {
+		clusterAvailable = func(ctx context.Context, mb uuid.UUID) error {
+			_, _, err := a.Clusters.Pool(ctx, mb, cluster.RoleIndex)
+			return err
+		}
 	}
 	st.Identity.CacheTTL = cfg.Cache.Identity
 	aud := auditor.New(st.Audit, log, cfg.Audit.Detail)
@@ -215,10 +260,15 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 			MaxMessageSize: cfg.Mail.MaxMessageSize, InlineMax: cfg.Mail.InlineAttachmentMax, KeepRaw: cfg.Mail.KeepRaw,
 			SpamHeader: cfg.Mail.SpamHeader, SpamValue: cfg.Mail.SpamValue, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
 			DefaultQuota: dq, OverQuotaTempFail: cfg.Mail.OverQuotaTempFail,
-			RootTTL: cfg.Cache.Root,
+			RootTTL: cfg.Cache.Root, ClusterAvailable: clusterAvailable,
 		}),
 		Mailbox: mailbox.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Queue, aud, log, mailbox.Config{TrashRetention: cfg.Mail.TrashRetention, DefaultQuota: dq, RootTTL: cfg.Cache.Root}),
 		Admin:   admin.New(st.Identity, st.Index, st.Queue, aud),
+	}
+	if a.Clusters != nil {
+		sv.Admin.Clusters = registryControl{reg: a.Clusters, connect: Connector(cfg.Ceph)}
+	} else {
+		sv.Admin.Clusters = memoryControl{}
 	}
 	smtpPass, err := cfg.SMTP.Password.Resolve()
 	if err != nil {
@@ -229,12 +279,30 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 		Hostname: hostname(), MaxMessageSize: cfg.Mail.MaxMessageSize,
 	}, st.Identity, st.Index, sv.Delivery, aud, nil, log)
 	sv.Export = export.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Audit, sv.Delivery, aud, log)
-	a := &App{Cfg: cfg, Log: log, Client: client, DB: db, Stores: st, Services: sv}
+	a.Stores, a.Services = st, sv
 	if db != nil {
 		a.addCloser(func(context.Context) error { return db.Close() })
 	}
 	return a, nil
 }
+
+// registryControl adapts the cluster registry for the admin service.
+type registryControl struct {
+	reg     *cluster.Registry
+	connect cluster.Connector
+}
+
+func (r registryControl) Pick(ctx context.Context) (int64, error) { return r.reg.Pick(ctx) }
+func (r registryControl) Verify(c identity.Cluster) (uuid.UUID, error) {
+	return cluster.Verify(r.connect, c)
+}
+
+// memoryControl: the memory backend has one implicit cluster (id 0);
+// registry entries can be created for tests but nothing connects to them.
+type memoryControl struct{}
+
+func (memoryControl) Pick(context.Context) (int64, error)        { return 0, nil }
+func (memoryControl) Verify(identity.Cluster) (uuid.UUID, error) { return uuid.New(), nil }
 
 // DefaultQuota returns the configured default limits.
 func (a *App) DefaultQuota() identity.QuotaLimits {
@@ -292,11 +360,27 @@ func (a *App) Run(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		if _, _, err := a.Stores.Identity.ListDomains(ctx, "", 1); err != nil {
-			http.Error(w, "ceph: "+err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "metadata: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte("ready\n"))
 	})
+	// Cluster registry: state of every connection, and periodic reloads so
+	// clusters added or closed for placement are picked up without restart.
+	mgmt.HandleFunc("/clusters", func(w http.ResponseWriter, _ *http.Request) {
+		var out []cluster.Status
+		if a.Clusters != nil {
+			out = a.Clusters.Statuses()
+		}
+		if out == nil {
+			out = []cluster.Status{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	if a.Clusters != nil {
+		go a.Clusters.Run(ctx, 30*time.Second)
+	}
 	if err := a.serveHTTP("management", a.Cfg.Listen.Management, mgmt, start); err != nil {
 		return err
 	}
@@ -398,4 +482,12 @@ func hostname() string {
 }
 
 // Close releases the RADOS client.
-func (a *App) Close() error { return a.Client.Close() }
+func (a *App) Close() error {
+	if a.Clusters != nil {
+		a.Clusters.Close()
+	}
+	if a.Client != nil {
+		return a.Client.Close()
+	}
+	return nil
+}

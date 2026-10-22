@@ -631,3 +631,60 @@ func TestReadOnlyAdminAndPublicSpec(t *testing.T) {
 		t.Fatalf("audit actor: %v", items)
 	}
 }
+
+func TestClusterRegistry(t *testing.T) {
+	f := newFixture(t)
+	a := f.adminAuth()
+	pools := map[string]string{"messages": "m", "attachments": "a", "index": "i"}
+	f.expect(f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "[2001:db8::1]:6789", "user": "dovetail", "key": "AQ==", "pools": map[string]string{"messages": "m"}}, ""), 400, "cluster add incomplete pools")
+	r := f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "[2001:db8::1]:6789", "user": "dovetail", "key": "AQ==", "pools": pools}, "")
+	f.expect(r, 201, "cluster add")
+	if _, hasKey := r.body["key"]; hasKey || r.body["name"] != "ams1" || r.body["placement"] != true || r.body["id"] == nil {
+		t.Fatalf("cluster view: %v", r.body)
+	}
+	id := fmt.Sprint(int64(r.body["id"].(float64)))
+	f.expect(f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "x", "user": "u", "key": "k", "pools": pools}, ""), 409, "cluster dup name")
+	r = f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "rtd1", "mon_host": "[2001:db8::2]:6789", "user": "dovetail", "key": "AQ==", "pools": pools, "placement": false}, "")
+	f.expect(r, 201, "cluster add closed")
+	id2 := fmt.Sprint(int64(r.body["id"].(float64)))
+	r = f.do("GET", "/v1/admin/clusters", a, nil, "")
+	f.expect(r, 200, "cluster list")
+	if items := r.body["items"].([]any); len(items) != 2 || items[1].(map[string]any)["placement"] != false {
+		t.Fatalf("cluster list: %v", r.body)
+	}
+	// A mailbox pinned to a cluster, and one placed by the service (memory: cluster 0).
+	r = f.do("POST", "/v1/admin/mailboxes", a, map[string]any{"cluster_id": json.Number(id2)}, "")
+	f.expect(r, 201, "mailbox on cluster")
+	if fmt.Sprint(r.body["cluster_id"]) != id2 {
+		t.Fatalf("mailbox cluster: %v", r.body)
+	}
+	mb := r.body["id"].(string)
+	f.expect(f.do("POST", "/v1/admin/mailboxes", a, map[string]any{"cluster_id": 999}, ""), 404, "mailbox on unknown cluster")
+	f.expect(f.do("PATCH", "/v1/admin/mailboxes/"+mb, a, map[string]any{"cluster_id": json.Number(id)}, ""), 400, "mailbox cluster change refused")
+	r = f.do("GET", "/v1/admin/mailboxes", a, nil, "")
+	f.expect(r, 200, "mailbox list")
+	found := false
+	for _, it := range r.body["items"].([]any) {
+		m := it.(map[string]any)
+		if m["id"] == mb && fmt.Sprint(m["cluster_id"]) == id2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("mailbox list lacks cluster: %v", r.body)
+	}
+	// Placement toggle and removal rules.
+	r = f.do("PATCH", "/v1/admin/clusters/"+id, a, map[string]any{"placement": false}, "")
+	f.expect(r, 200, "cluster close")
+	if r.body["placement"] != false {
+		t.Fatalf("placement not changed: %v", r.body)
+	}
+	f.expect(f.do("DELETE", "/v1/admin/clusters/"+id2, a, nil, ""), 409, "cluster in use")
+	f.expect(f.do("DELETE", "/v1/admin/clusters/"+id, a, nil, ""), 204, "cluster remove")
+	f.expect(f.do("GET", "/v1/admin/clusters/"+id, a, nil, ""), 404, "cluster gone")
+	f.expect(f.do("GET", "/v1/admin/clusters/abc", a, nil, ""), 400, "bad cluster id")
+	// Read-only admins may list but not change.
+	ro := f.bearer(f.roTk)
+	f.expect(f.do("GET", "/v1/admin/clusters", ro, nil, ""), 200, "ro list")
+	f.expect(f.do("PATCH", "/v1/admin/clusters/"+id2, ro, map[string]any{"placement": true}, ""), 403, "ro patch")
+}

@@ -21,6 +21,7 @@ import (
 	authsvc "dovetail/service/auth"
 	"dovetail/service/delivery"
 	"dovetail/service/mailbox"
+	"dovetail/store/cluster"
 )
 
 // Config for the server.
@@ -136,6 +137,9 @@ func (s *Server) mapErr(err error, what string) error {
 		return noErr(imap.ResponseCodeNoPerm, "Mailbox disabled")
 	case errors.Is(err, delivery.ErrNoFolder):
 		return noErr(imap.ResponseCodeTryCreate, "No such mailbox")
+	case errors.Is(err, cluster.ErrUnavailable), errors.Is(err, delivery.ErrUnavailable):
+		s.log.Warn("imap: mailbox storage unavailable", slog.String("op", what), slog.String("error", err.Error()))
+		return noErr(imap.ResponseCodeUnavailable, "Mailbox storage temporarily unavailable, try again later")
 	}
 	s.log.Error("imap: internal error", slog.String("op", what), slog.String("error", err.Error()))
 	return noErr(imap.ResponseCodeServerBug, what+" failed")
