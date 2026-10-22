@@ -222,6 +222,28 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /v1/admin/mailboxes:
+    get:
+      tags: [admin]
+      summary: List all mailboxes with their accounts (walks the meta pool; operator tool)
+      responses:
+        "200":
+          description: Mailboxes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        enabled: { type: boolean }
+                        on_hold: { type: boolean }
+                        quota: { $ref: "#/components/schemas/Quota" }
+                        accounts: { type: array, items: { type: string } }
+                        created: { type: string, format: date-time }
     post:
       tags: [admin]
       summary: Create a mailbox

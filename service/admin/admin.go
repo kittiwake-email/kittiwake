@@ -222,6 +222,14 @@ func (s *Service) InspectMailbox(ctx context.Context, id uuid.UUID, defaults ide
 	return info, nil
 }
 
+// ListMailboxAccounts lists the usernames linked to a mailbox.
+func (s *Service) ListMailboxAccounts(ctx context.Context, id uuid.UUID) ([]string, bool, error) {
+	if err := s.authorize(ctx, "mailbox-accounts", id.String()); err != nil {
+		return nil, false, err
+	}
+	return s.ids.ListMailboxAccounts(ctx, id, "", 1000)
+}
+
 // ListMailboxes walks all mailbox ids.
 func (s *Service) ListMailboxes(ctx context.Context, fn func(uuid.UUID) error) error {
 	if err := s.authorize(ctx, "mailbox-list", ""); err != nil {

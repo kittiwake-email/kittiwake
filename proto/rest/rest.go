@@ -151,6 +151,7 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"PATCH /v1/admin/domains/{name}", s.domainPatch},
 		route{"DELETE /v1/admin/domains/{name}", s.domainDelete},
 		route{"POST /v1/admin/mailboxes", s.mailboxCreate},
+		route{"GET /v1/admin/mailboxes", s.mailboxList},
 		route{"GET /v1/admin/mailboxes/{id}", s.mailboxGet},
 		route{"PATCH /v1/admin/mailboxes/{id}", s.mailboxPatch},
 		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
@@ -873,6 +874,39 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusCreated, viewAccount(out))
+}
+
+// mailboxList lists every mailbox with its accounts, enabled flag and hold
+// state. RADOS has no ordered listing, so this walks the meta pool; it is an
+// operator tool, not a hot path.
+func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
+	type item struct {
+		ID       uuid.UUID            `json:"id"`
+		Enabled  bool                 `json:"enabled"`
+		OnHold   bool                 `json:"on_hold"`
+		Quota    identity.QuotaLimits `json:"quota"`
+		Accounts []string             `json:"accounts"`
+		Created  time.Time            `json:"created"`
+	}
+	items := []item{}
+	err := s.admin.ListMailboxes(r.Context(), func(id uuid.UUID) error {
+		m, err := s.admin.GetMailbox(r.Context(), id)
+		if err != nil {
+			return nil
+		}
+		accts, _, _ := s.admin.ListMailboxAccounts(r.Context(), id)
+		if accts == nil {
+			accts = []string{}
+		}
+		items = append(items, item{ID: id, Enabled: m.Enabled, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Created.Before(items[j].Created) })
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) accountList(w http.ResponseWriter, r *http.Request) {

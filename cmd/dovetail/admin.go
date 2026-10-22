@@ -28,8 +28,9 @@ subcommands:
   export      dump all identity data (domains, mailboxes, accounts, aliases, tokens) as JSON to stdout
   import      <file.json>  load an identity dump (existing objects are skipped)
   domain      create <name> | list | enable <name> | disable <name> | delete <name>
-  mailbox     create | inspect <uuid> | recalc <uuid> | delete <uuid>
-  account     create --username u@d --mailbox <uuid> [--roles read,write,send] [--password-stdin] | get <username|uuid> | delete <uuid>
+  mailbox     create | list | inspect <uuid> | recalc <uuid> | delete <uuid>
+  account     create --username u@d --mailbox <uuid> [--roles read,write,send] [--password-stdin]
+              | list [--domain example.org] [--prefix x] | get <username|uuid> | delete <uuid>
   alias       create <address> --to <uuid|address>[,...] | delete <address>
   token       create --account <uuid> --expires 2027-01-01 --comment text [--roles read]
   hold        <mailbox-uuid> --reason text [--case ref] [--no-delivery] [--allow-send] [--sealed]
@@ -222,6 +223,17 @@ func cmdMailbox(ctx context.Context, a *app.App, args []string) error {
 			return err
 		}
 		return printJSON(m)
+	case "list":
+		fmt.Printf("%-36s  %-8s  %-5s  %s\n", "MAILBOX", "ENABLED", "HOLD", "ACCOUNTS")
+		return adm.ListMailboxes(ctx, func(id uuid.UUID) error {
+			m, err := adm.GetMailbox(ctx, id)
+			if err != nil {
+				return nil
+			}
+			accts, _, _ := adm.ListMailboxAccounts(ctx, id)
+			fmt.Printf("%-36s  %-8v  %-5v  %s\n", id, m.Enabled, m.Hold != nil, strings.Join(accts, ","))
+			return nil
+		})
 	case "inspect":
 		id, err := parse()
 		if err != nil {
@@ -254,9 +266,49 @@ func cmdMailbox(ctx context.Context, a *app.App, args []string) error {
 
 func cmdAccount(ctx context.Context, adm *admin.Service, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("account: create|get|delete")
+		return fmt.Errorf("account: create|list|get|delete")
 	}
 	switch args[0] {
+	case "list":
+		fs := newFlagSet("account list")
+		domain := fs.String("domain", "", "only this domain (default: all domains)")
+		prefix := fs.String("prefix", "", "username prefix")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		domains := []string{*domain}
+		if *domain == "" {
+			var err error
+			if domains, _, err = adm.ListDomains(ctx, "", 0); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("%-40s  %-36s  %-8s  %s\n", "USERNAME", "MAILBOX", "ENABLED", "ROLES")
+		for _, d := range domains {
+			after := ""
+			for {
+				names, more, err := adm.ListAccounts(ctx, d, *prefix, after, 500)
+				if err != nil {
+					return err
+				}
+				for _, n := range names {
+					after = n
+					a, err := adm.GetAccountByUsername(ctx, n)
+					if err != nil {
+						continue
+					}
+					mb := "-"
+					if a.MailboxID != uuid.Nil {
+						mb = a.MailboxID.String()
+					}
+					fmt.Printf("%-40s  %-36s  %-8v  %s\n", a.Username, mb, a.Enabled, strings.Join(a.Roles, ","))
+				}
+				if !more {
+					break
+				}
+			}
+		}
+		return nil
 	case "create":
 		fs := newFlagSet("account create")
 		username := fs.String("username", "", "username (e-mail address)")
