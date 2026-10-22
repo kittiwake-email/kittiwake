@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/service/submit"
+	"kittiwake/service/submit"
 )
 
 // CapSubmission is the JMAP submission capability (RFC 8621 §7).

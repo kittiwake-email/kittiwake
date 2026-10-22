@@ -13,8 +13,8 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-message/textproto"
 
-	"dovetail/service/mailbox"
-	"dovetail/store/index"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/index"
 )
 
 // selected is the session's view of the selected folder: a snapshot of UIDs

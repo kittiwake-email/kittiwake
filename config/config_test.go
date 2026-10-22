@@ -8,14 +8,14 @@ import (
 )
 
 func TestParseDefaults(t *testing.T) {
-	cfg, err := Parse([]byte("modes: [lmtp, jmap]\ndatabase: {dsn: \"dovetail:x@tcp(db:3306)/dovetail\"}\n"))
+	cfg, err := Parse([]byte("modes: [lmtp, jmap]\ndatabase: {dsn: \"kittiwake:x@tcp(db:3306)/kittiwake\"}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.HasMode("lmtp") || cfg.HasMode("imap") {
 		t.Fatal("modes")
 	}
-	if cfg.Ceph.Pools.Meta != "dovetail.meta" || cfg.Mail.TrashRetention != 30*24*time.Hour || cfg.Cache.Credentials != 5*time.Second || cfg.Cache.Identity != 5*time.Second || cfg.Cache.Root != 5*time.Second {
+	if cfg.Ceph.Pools.Meta != "kittiwake.meta" || cfg.Mail.TrashRetention != 30*24*time.Hour || cfg.Cache.Credentials != 5*time.Second || cfg.Cache.Identity != 5*time.Second || cfg.Cache.Root != 5*time.Second {
 		t.Fatal("defaults not applied")
 	}
 }
@@ -27,7 +27,7 @@ ceph:
   backend: memory
   monitors: ["[2001:db8::1]:6789"]
   user: mail
-  key: ${DOVETAIL_TEST_KEY}
+  key: ${KITTIWAKE_TEST_KEY}
   pools: {messages: m, attachments: a, index: i, meta: x}
 mail:
   trash_retention: 72h
@@ -37,7 +37,7 @@ listen:
   lmtp: {address: "[::1]:2424", proxy_protocol: required}
 log: {level: debug, format: text}
 `
-	t.Setenv("DOVETAIL_TEST_KEY", "sekrit")
+	t.Setenv("KITTIWAKE_TEST_KEY", "sekrit")
 	cfg, err := Parse([]byte(y))
 	if err != nil {
 		t.Fatal(err)

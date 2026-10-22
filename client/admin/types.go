@@ -1,4 +1,4 @@
-// Package admin is a Go client for the Dovetail admin REST API
+// Package admin is a Go client for the Kittiwake admin REST API
 // (api/openapi.yaml). It is a plain HTTP client: it imports nothing from
 // the server packages so third parties can use it.
 package admin

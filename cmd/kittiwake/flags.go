@@ -14,7 +14,7 @@ func newFlagSet(name string) *flag.FlagSet {
 // configFlag registers --config and its short form -c on the flag set.
 func configFlag(fs *flag.FlagSet) *string {
 	var path string
-	const usage = "path to the YAML config (default $DOVETAIL_CONFIG or /etc/dovetail/dovetail.yaml)"
+	const usage = "path to the YAML config (default $KITTIWAKE_CONFIG or /etc/kittiwake/kittiwake.yaml)"
 	fs.StringVar(&path, "config", "", usage)
 	fs.StringVar(&path, "c", "", "shorthand for --config")
 	return &path

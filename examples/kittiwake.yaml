@@ -1,4 +1,4 @@
-# Dovetail configuration. All keys shown with their defaults unless noted.
+# Kittiwake configuration. All keys shown with their defaults unless noted.
 # Secrets may be given inline, as "file:/path", or with ${ENV_VAR} substitution.
 
 # Modes this process runs. Split modes over processes to scale each one.
@@ -6,12 +6,12 @@ modes: [lmtp, jmap, admin, postfix]
 
 # Metadata database (MariaDB 10.6+): domains, mailboxes, accounts, aliases,
 # tokens, sessions, the worker queue and the Ceph cluster registry. Create or
-# upgrade the schema with `dovetail migrate -c <config>` before starting.
+# upgrade the schema with `kittiwake migrate -c <config>` before starting.
 database:
-  dsn: "dovetail:${DOVETAIL_DB_PASSWORD}@tcp(db.example.org:3306)/dovetail"
+  dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@tcp(db.example.org:3306)/kittiwake"
 
 # Ceph clusters are NOT configured here: they are registered in the database
-# (dovetail-admin cluster add --name ams1 --mon-host ... --user dovetail --keyring ...
+# (kittiwake-admin cluster add --name ams1 --mon-host ... --user kittiwake --keyring ...
 # --pools messages,attachments,index) and every daemon connects to all of them.
 ceph:
   backend: librados            # librados | memory (volatile, development only)
@@ -73,7 +73,7 @@ audit:
   detail: {}                   # per protocol: full (default) | session, e.g. {imap: session}
 
 export:
-  directory: /var/lib/dovetail/exports
+  directory: /var/lib/kittiwake/exports
 
 log:
   level: info                  # debug | info | warn | error

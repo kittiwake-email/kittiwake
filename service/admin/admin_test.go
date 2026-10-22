@@ -11,13 +11,13 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/queue"
+	"kittiwake/rados"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/queue"
 )
 
 func newSvc(t *testing.T) (*Service, *identity.Store, queue.Store, context.Context, context.Context) {

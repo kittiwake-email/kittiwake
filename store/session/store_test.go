@@ -3,9 +3,9 @@ package session_test
 import (
 	"testing"
 
-	"dovetail/rados"
-	"dovetail/store/session"
-	"dovetail/store/session/sessiontest"
+	"kittiwake/rados"
+	"kittiwake/store/session"
+	"kittiwake/store/session/sessiontest"
 )
 
 func TestRadosStore(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/store/queue"
+	"kittiwake/store/queue"
 )
 
 const taskCols = "id, type, payload, run_after, attempts, last_error, created"

@@ -17,13 +17,13 @@ import (
 
 	"github.com/google/uuid"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/metrics"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/session"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/metrics"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/session"
 )
 
 // Errors returned to protocol adapters. They are deliberately coarse so
@@ -163,7 +163,7 @@ func New(ids *identity.Store, sessions session.Store, aud *auditor.Auditor, cfg 
 		cfg.RefreshTokenLifetime = 30 * 24 * time.Hour
 	}
 	if cfg.Issuer == "" {
-		cfg.Issuer = "dovetail"
+		cfg.Issuer = "kittiwake"
 	}
 	return &Service{ids: ids, sessions: sessions, audit: aud, cfg: cfg, Now: time.Now}
 }
@@ -299,7 +299,7 @@ func serviceAllowed(acct *identity.Account, proto string) bool {
 
 // dummyHash is an argon2id hash of a random string, used to equalise timing.
 var dummyHash = func() string {
-	h, _ := cryptoauth.HashPassword("dovetail-dummy-" + uuid.NewString())
+	h, _ := cryptoauth.HashPassword("kittiwake-dummy-" + uuid.NewString())
 	return h
 }()
 
@@ -373,14 +373,14 @@ func (s *Service) actorFor(a *identity.Account, roles []string, cred, tokenID, s
 	}
 }
 
-// refresh token wire format: "dvr1.<session-id>.<account-id>.<secret>"
+// refresh token wire format: "kwr1.<session-id>.<account-id>.<secret>"
 func encodeRefresh(sess session.Session, secret string) string {
-	return "dvr1." + sess.ID + "." + sess.AccountID.String() + "." + secret
+	return "kwr1." + sess.ID + "." + sess.AccountID.String() + "." + secret
 }
 
 func decodeRefresh(tok string) (sessionID string, acct uuid.UUID, secret string, err error) {
 	parts := strings.SplitN(tok, ".", 4)
-	if len(parts) != 4 || parts[0] != "dvr1" {
+	if len(parts) != 4 || parts[0] != "kwr1" {
 		return "", uuid.Nil, "", ErrInvalidToken
 	}
 	id, err := uuid.Parse(parts[2])
@@ -644,7 +644,7 @@ func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor
 // VerifyBearer dispatches on the token form: API token or JWT.
 func (s *Service) VerifyBearer(ctx context.Context, token string) (actor.Actor, error) {
 	token = strings.TrimSpace(token)
-	if strings.HasPrefix(token, "dvt_") {
+	if strings.HasPrefix(token, "kwt_") {
 		return s.VerifyAPIToken(ctx, token)
 	}
 	return s.VerifyAccessToken(ctx, token)

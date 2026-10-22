@@ -1,4 +1,4 @@
-// Package rados is Dovetail's narrow abstraction over Ceph RADOS.
+// Package rados is Kittiwake's narrow abstraction over Ceph RADOS.
 //
 // Everything above this package (stores, services, protocols) talks to RADOS
 // only through the Client and IOContext interfaces. There are two

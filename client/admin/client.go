@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Client talks to the Dovetail admin API with a long-lived admin API token.
+// Client talks to the Kittiwake admin API with a long-lived admin API token.
 type Client struct {
 	base      string
 	token     string
@@ -46,7 +46,7 @@ func WithUserAgent(ua string) Option { return func(c *Client) { c.userAgent = ua
 // New returns a client for the admin listener at baseURL (e.g.
 // "http://[::1]:8081") authenticating with token.
 func New(baseURL, token string, opts ...Option) *Client {
-	c := &Client{base: strings.TrimRight(baseURL, "/"), token: token, http: &http.Client{Timeout: 60 * time.Second}, userAgent: "dovetail-admin-client"}
+	c := &Client{base: strings.TrimRight(baseURL, "/"), token: token, http: &http.Client{Timeout: 60 * time.Second}, userAgent: "kittiwake-admin-client"}
 	for _, o := range opts {
 		o(c)
 	}

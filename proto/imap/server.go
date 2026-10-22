@@ -16,12 +16,12 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 
-	"dovetail/metrics"
-	"dovetail/proto/proxyproto"
-	authsvc "dovetail/service/auth"
-	"dovetail/service/delivery"
-	"dovetail/service/mailbox"
-	"dovetail/store/cluster"
+	"kittiwake/metrics"
+	"kittiwake/proto/proxyproto"
+	authsvc "kittiwake/service/auth"
+	"kittiwake/service/delivery"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/cluster"
 )
 
 // Config for the server.
@@ -44,7 +44,7 @@ type Server struct {
 // New returns a server.
 func New(cfg Config, authSvc *authsvc.Service, mb *mailbox.Service, del *delivery.Service, log *slog.Logger) *Server {
 	if cfg.Hostname == "" {
-		cfg.Hostname = "dovetail"
+		cfg.Hostname = "kittiwake"
 	}
 	if cfg.MaxLiteralSize <= 0 {
 		cfg.MaxLiteralSize = 50 << 20

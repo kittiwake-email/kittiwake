@@ -11,16 +11,16 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/service/delivery"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
+	"kittiwake/rados"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/service/delivery"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
 )
 
 type fakeRelay struct {
@@ -117,7 +117,7 @@ func TestSendHappyPath(t *testing.T) {
 		t.Fatalf("relay envelope: %s %v", f.relay.from, f.relay.to)
 	}
 	data := string(f.relay.data)
-	if !strings.HasPrefix(data, "Received: from [2001:db8::7] by mx.test (Dovetail) with JMAP id sess1 for <wido@example.org>;") {
+	if !strings.HasPrefix(data, "Received: from [2001:db8::7] by mx.test (Kittiwake) with JMAP id sess1 for <wido@example.org>;") {
 		t.Fatalf("received header: %q", data[:80])
 	}
 	if strings.Contains(data, "Bcc:") {

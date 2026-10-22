@@ -5,10 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"dovetail/mail"
 	"encoding/json"
 	"errors"
 	"io"
+	"kittiwake/mail"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,18 +18,18 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/service/actor"
-	"dovetail/service/admin"
-	"dovetail/service/auditor"
-	"dovetail/service/delivery"
-	"dovetail/service/mailbox"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
+	"kittiwake/rados"
+	"kittiwake/service/actor"
+	"kittiwake/service/admin"
+	"kittiwake/service/auditor"
+	"kittiwake/service/delivery"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
 )
 
 type fixture struct {
@@ -124,7 +124,7 @@ func TestExportAndReimport(t *testing.T) {
 		t.Fatalf("export: %+v %v", sum, err)
 	}
 	files := readTar(t, buf.Bytes(), true)
-	prefix := "dovetail-" + f.mb.ID.String() + "/"
+	prefix := "kittiwake-" + f.mb.ID.String() + "/"
 	var man Manifest
 	if err := json.Unmarshal(files[prefix+"manifest.json"], &man); err != nil {
 		t.Fatal(err)
@@ -230,7 +230,7 @@ func TestImportPlainMaildir(t *testing.T) {
 	}
 }
 
-// rendered returns what Dovetail serves for a raw message: the document
+// rendered returns what Kittiwake serves for a raw message: the document
 // rendered back to RFC 5322 (the original bytes are not kept).
 func rendered(t *testing.T, raw string) string {
 	t.Helper()

@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/store/session"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/store/session"
 )
 
 const sessionCols = "id, account_uuid, refresh_hash, prev_refresh_hash, roles, client, created, last_used, last_ip, expires_at"

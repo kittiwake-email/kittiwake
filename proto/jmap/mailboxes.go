@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/store/index"
+	"kittiwake/store/index"
 )
 
 // mailboxObject converts a folder to a JMAP Mailbox object.

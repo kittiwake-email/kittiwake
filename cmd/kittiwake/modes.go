@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"dovetail/app"
-	"dovetail/proto/imap"
-	"dovetail/proto/pop3"
+	"kittiwake/app"
+	"kittiwake/proto/imap"
+	"kittiwake/proto/pop3"
 )
 
 // protocolModes registers the IMAP and POP3 servers with the app.

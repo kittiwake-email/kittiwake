@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"dovetail/service/actor"
+	"kittiwake/service/actor"
 )
 
 // methodError is a JMAP method-level error (RFC 8620 §3.6.2).

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"dovetail/rados"
-	"dovetail/store/identity"
-	"dovetail/store/identity/identitytest"
+	"kittiwake/rados"
+	"kittiwake/store/identity"
+	"kittiwake/store/identity/identitytest"
 )
 
 func memoryStore(t *testing.T) *identity.Store {

@@ -17,7 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
+	"kittiwake/rados"
 )
 
 // Namespaces in the meta pool.
@@ -32,7 +32,7 @@ const (
 
 	allDomainsObject = "_all"
 	schemaVersion    = "1"
-	tokenPrefix      = "dvt_"
+	tokenPrefix      = "kwt_"
 )
 
 // Rados is the identity backend on a RADOS meta pool: one object per

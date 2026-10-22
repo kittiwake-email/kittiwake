@@ -20,13 +20,13 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
 
-	"dovetail/metrics"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/service/delivery"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
+	"kittiwake/metrics"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/service/delivery"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
 )
 
 // Errors.
@@ -82,7 +82,7 @@ func New(cfg Config, ids *identity.Store, idx *index.Store, del *delivery.Servic
 		cfg.MaxRecipients = 100
 	}
 	if cfg.Hostname == "" {
-		cfg.Hostname = "dovetail"
+		cfg.Hostname = "kittiwake"
 	}
 	if log == nil {
 		log = slog.Default()
@@ -277,7 +277,7 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 	// Strip Bcc from what leaves the building; prepend our Received header.
 	outgoing := stripHeader(req.Raw, "Bcc")
 	now := s.Now().UTC()
-	received := fmt.Sprintf("Received: from [%s] by %s (Dovetail) with %s id %s for <%s>; %s\r\n",
+	received := fmt.Sprintf("Received: from [%s] by %s (Kittiwake) with %s id %s for <%s>; %s\r\n",
 		a.ClientIP, s.cfg.Hostname, strings.ToUpper(a.Protocol), a.SessionID, from, now.Format(time.RFC1123Z))
 	outgoing = append([]byte(received), outgoing...)
 

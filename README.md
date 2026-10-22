@@ -1,11 +1,12 @@
-# Dovetail
+# Kittiwake
 
-Dovetail is a new, massively scalable and modern mail platform built to replace Dovecot. The
-name is the joint that fits two pieces of wood together: Dovetail fits onto Postfix, and it is
-the successor of Dovecot.
+Kittiwake is a new, massively scalable and modern mail platform built to replace Dovecot. The
+kittiwake is a small sea-going gull that nests on cliffs in colonies of hundreds of thousands:
+a bird, like the dove it succeeds, that lives at sea (Ceph) and at scale. Kittiwake fits onto
+Postfix and is the successor of Dovecot. Home: https://kittiwake.email
 
 It is **not** an MTA and does not replace Postfix: Postfix receives and filters mail from the
-internet and hands it to Dovetail over LMTP. Outbound mail is handed back to a configurable
+internet and hands it to Kittiwake over LMTP. Outbound mail is handed back to a configurable
 SMTP relay host.
 
 License: none for now, internal use only.
@@ -14,7 +15,7 @@ License: none for now, internal use only.
 
 ## Scalability is the governing principle
 
-Dovetail is designed for a million mailboxes, each of which may hold 150k messages and
+Kittiwake is designed for a million mailboxes, each of which may hold 150k messages and
 10+ GB spanning decades. Every design decision is weighed against that: the number of RADOS
 objects per message, the number of omap keys per object (Ceph warns above 200k and one
 object means one OSD serialising all of it), round trips per delivery, and whether any
@@ -39,7 +40,8 @@ write per object per second. Notifications and search events are off the critica
 search events are not written at all until a search backend consumes them. Protocol
 adapters apply what they just wrote themselves instead of reading it back.
 
-Measure on the lab cluster (see `TESTENV.md`) before and after storage changes. Reference
+Measure on the lab cluster (see the `kittiwake-labs` repository) before and after storage
+changes. Reference
 numbers on the lab cluster (3 small OSDs): one LMTP delivery or IMAP APPEND costs about 15 ms
 sequentially, an mbsync push of 3000 messages (60 MB) takes under a minute.
 
@@ -56,7 +58,7 @@ state is split by its nature:
   accounts, aliases, API and admin tokens, JWT signing keys, sessions, the worker queue and
   the registry of Ceph clusters. This is small, global and read-heavy; it needs uniqueness,
   transactions and listings, which a relational database gives for free. The schema is
-  versioned: numbered migrations are embedded in the binary and applied by `dovetail
+  versioned: numbered migrations are embedded in the binary and applied by `kittiwake
   migrate`; a daemon refuses to start on a schema it does not know.
 
 The identity store is an interface with two backends. MariaDB is the production backend.
@@ -67,12 +69,12 @@ both run the same conformance suites. Nothing else is stateful: no Redis, no mem
 ## Multiple Ceph clusters
 
 One Ceph cluster is a bottleneck long before a million mailboxes: the object count and the
-omap load of 150k-message mailboxes have to be spread. Dovetail therefore places **each
+omap load of 150k-message mailboxes have to be spread. Kittiwake therefore places **each
 mailbox on one of several Ceph clusters**, all equal, and can grow by adding clusters, also
 in other datacenters within a few milliseconds of each other.
 
 - **Registry, not config.** Clusters are rows in the metadata database: name, `mon_host`,
-  CephX user and key, the three data pools, and a placement flag. `dovetail-admin cluster
+  CephX user and key, the three data pools, and a placement flag. `kittiwake-admin cluster
   add` hands the details to the admin daemon, which connects once, checks the pools exist,
   reads the cluster's **fsid** and stores it. The daemon config carries no cluster at all
   (only `ceph.config_file` and `ceph.options` as librados defaults for every connection).
@@ -84,7 +86,7 @@ in other datacenters within a few milliseconds of each other.
   cluster added or closed for placement is picked up without a restart. The management
   listener's `/clusters` shows each cluster's connection state.
 - **Placement** of a new mailbox is random among connected clusters whose placement flag
-  is on; `dovetail-admin mailbox create --cluster <id>` pins one. `cluster disable` stops
+  is on; `kittiwake-admin mailbox create --cluster <id>` pins one. `cluster disable` stops
   new placement on a cluster, existing mailboxes keep working; a cluster can only be removed
   when no mailbox refers to it (a foreign key enforces it).
 - **Where things live.** Every data store resolves a mailbox to its cluster's pools
@@ -103,7 +105,7 @@ in other datacenters within a few milliseconds of each other.
 
 ## One binary, multiple modes
 
-The platform ships as a single Go binary, `dovetail`, that can run in one of several modes.
+The platform ships as a single Go binary, `kittiwake`, that can run in one of several modes.
 Each mode is a separately scalable component:
 
 - `lmtp` – inbound delivery from the MTA
@@ -128,7 +130,7 @@ Ceph release.
 
 ## Internal architecture: a Go core with protocols on top
 
-Dovetail is built as a **library first, daemon second**. All functionality lives in Go
+Kittiwake is built as a **library first, daemon second**. All functionality lives in Go
 packages with clean interfaces, and every protocol is a thin adapter that translates wire
 format into calls on those packages. Nothing that matters is implemented inside a protocol
 handler, so new protocols and tools (a CLI, a migration tool, a future JMAP extension, DAV,
@@ -152,7 +154,7 @@ Layers, from the bottom up:
 4. **Protocol adapters** – LMTP, IMAP, POP3, JMAP, the REST endpoints (OAuth, self-service,
    admin), Postfix socketmap, and the `admin` CLI. Each is a separate package that depends only
    on the service interfaces.
-5. **`cmd/dovetail`** – wires config, stores, services and the selected modes together.
+5. **`cmd/kittiwake`** – wires config, stores, services and the selected modes together.
 
 Rules that follow from this:
 
@@ -172,7 +174,7 @@ mock of RADOS; real integration tests against a live Ceph cluster come later.
 
 Structured logging and metrics everywhere. Every component exposes Prometheus metrics and logs
 structured (JSON) output. Every log line and audit record about a message carries its
-`Message-ID` header (delivery, submission, purge, raw fetch), next to Dovetail's own message
+`Message-ID` header (delivery, submission, purge, raw fetch), next to Kittiwake's own message
 uuid, so a message can be followed from the MTA logs through the platform. Each process serves `/metrics`, `/healthz` (process up) and `/readyz`
 (Ceph reachable) on a dedicated management listener.
 
@@ -197,20 +199,20 @@ Supported protocols:
 
 IMAP and POP3 must work but are not the primary target; they serve legacy clients. Each
 mailbox is fully accessible through JMAP, which is the basis for a modern webmail and a mobile
-app. Dovetail does not invent its own mailbox API: JMAP already covers mailboxes, messages,
+app. Kittiwake does not invent its own mailbox API: JMAP already covers mailboxes, messages,
 threads, search, flags, blobs, sending, quotas and push, and its newer extensions cover
 contacts and calendars.
 
 ## Postfix integration
 
-Postfix must know which domains and recipients Dovetail accepts so it can reject unknown
+Postfix must know which domains and recipients Kittiwake accepts so it can reject unknown
 recipients at SMTP time instead of bouncing after LMTP. Since there is no SQL database for
-Postfix to query, Dovetail's `postfix` mode serves a **Sendmail-style socketmap server**, which
+Postfix to query, Kittiwake's `postfix` mode serves a **Sendmail-style socketmap server**, which
 Postfix supports natively (`socketmap:inet:host:port:name`, read-only lookups). Maps offered:
 
 - `domains` – for `virtual_mailbox_domains`: is this domain known and enabled
 - `mailboxes` – for `virtual_mailbox_maps`: does this address resolve to a mailbox
-- `aliases` – for `virtual_alias_maps`: alias expansion (optional; Dovetail can also expand
+- `aliases` – for `virtual_alias_maps`: alias expansion (optional; Kittiwake can also expand
   aliases itself at LMTP time)
 
 The socketmap protocol is unauthenticated, so the listener is meant for a private network
@@ -235,7 +237,7 @@ own address and the aliases that point at its mailbox. Another account attached 
 mailbox is not an identity of this one, so on a shared mailbox each account sends as itself
 or as the shared aliases, never as a colleague. Submissions with another `From` are
 rejected (`EmailSubmission/set` fails the submission, the audit log records the attempt).
-JMAP `Identity/get` lists these identities, all with the account's display name. Dovetail adds its own `Received:` header naming the authenticated account so the MTA
+JMAP `Identity/get` lists these identities, all with the account's display name. Kittiwake adds its own `Received:` header naming the authenticated account so the MTA
 logs can be tied to the audit log.
 
 ## Message size limit
@@ -290,7 +292,7 @@ actions (fetch, list) are audited by default but can be reduced to session-level
 
 ## Brute-force protection
 
-Dovetail does not rate-limit or lock out failed logins; stateless daemons have no shared
+Kittiwake does not rate-limit or lock out failed logins; stateless daemons have no shared
 counters. This is left to HAProxy (and tools like fail2ban on the structured logs). Every
 failed authentication is logged with the client address so those tools have what they need.
 
@@ -554,13 +556,13 @@ A complete mailbox can be exported, for legal requests, migration and backup:
 - Alongside the Maildir, a `manifest.json` with mailbox id, folders, per-message UID/flags/
   object names and a SHA-256 per file, the mailbox's audit log for the requested period, and
   the hold record if any, so a chain of custody can be documented.
-- The output is a tar archive (optionally gzip). `dovetail admin export-mailbox <uuid>` writes
+- The output is a tar archive (optionally gzip). `kittiwake admin export-mailbox <uuid>` writes
   it to a path; the admin API creates an export task that a worker executes, writing to a
   configured export directory, with progress and the result downloadable through the admin
   API. Exports are audited.
 - mbox can be added later as a second format; Maildir is the primary one.
 
-The reverse, **import** of a Maildir into a mailbox (`dovetail admin import-mailbox` and an
+The reverse, **import** of a Maildir into a mailbox (`kittiwake admin import-mailbox` and an
 admin API task), is planned as the migration path from Dovecot: messages go through the normal
 parse-and-store path, flags, keywords, folders and (where possible) UIDs are preserved.
 
@@ -633,7 +635,7 @@ protocol: IMAP and POP3 answer `AUTHENTICATIONFAILED` with a clear reason, the O
 endpoint answers `invalid_grant`, and API tokens of the account stop working on the JMAP
 listener. `jmap` covers the JMAP listener including its REST self-service endpoints, so an
 account that removes `jmap` itself (`PATCH /v1/me`) locks itself out of this API until an
-administrator (`dovetail-admin account set --services`) restores it. Access tokens already
+administrator (`kittiwake-admin account set --services`) restores it. Access tokens already
 issued keep working until they expire (minutes); refreshing one re-checks. The display name is the `From:` name of every identity of the account; the account
 sets it itself (`PATCH /v1/me`, or JMAP `Identity/set` on any of its identities) and an
 admin can set it too. Every
@@ -647,7 +649,7 @@ it still has accounts or aliases) and points at a mailbox; the mailbox owns the 
 knows nothing about names. Removing an account, or a whole domain, leaves its mailboxes
 **orphaned** with all their mail intact; attaching a new account to an orphaned mailbox is how
 an address is renamed or moved to another domain without touching the data. Orphaned
-mailboxes are listed with `dovetail-admin mailbox list --orphaned` (`GET
+mailboxes are listed with `kittiwake-admin mailbox list --orphaned` (`GET
 /v1/admin/mailboxes?orphaned=true`); a mailbox is only ever deleted explicitly. Accounts have an enabled flag; a disabled account cannot log in,
 while the mailbox state (see above) decides what happens to inbound mail.
 
@@ -665,7 +667,7 @@ the account's roles; a token claiming a role the account lacks is rejected.
 
 ## Self-service
 
-Because Dovetail owns the identity data, an authenticated account can manage its own
+Because Kittiwake owns the identity data, an authenticated account can manage its own
 credentials through the REST endpoints: change passwords, create and revoke application
 passwords, enrol and disable TOTP (with recovery codes), create and revoke its own API tokens,
 and list and revoke its sessions. Every such change is audited.
@@ -676,7 +678,7 @@ An account may have no password at all and only API tokens, so applications can 
 without a password. Each API token carries its own roles, which may be narrower than the
 account's. Every API token **must** have an expiration date and a comment describing its
 purpose; tokens without either cannot be created. Expired tokens are rejected. Tokens are
-random, prefixed `dvt_` so they are recognisable in logs and secret scanners, and stored only
+random, prefixed `kwt_` so they are recognisable in logs and secret scanners, and stored only
 as a SHA-256 hash (`tokens/<hash>`); the plaintext is shown once at creation.
 
 ## Admin tokens
@@ -689,9 +691,9 @@ with a comment, an expiration date and one role:
   status), for monitoring and reporting jobs that must never change anything
 
 Admin tokens live in the meta pool next to account tokens but belong to no account and no
-domain; they are managed through the admin API (`/v1/admin/tokens`) or `dovetail-admin token`.
-The first one is minted with `dovetail admin bootstrap`, which talks to RADOS directly and
-refuses once admin tokens exist; `dovetail admin token` mints further ones (including
+domain; they are managed through the admin API (`/v1/admin/tokens`) or `kittiwake-admin token`.
+The first one is minted with `kittiwake admin bootstrap`, which talks to RADOS directly and
+refuses once admin tokens exist; `kittiwake admin token` mints further ones (including
 read-only) for recovery. The admin API accepts bearer tokens only; there are no admin
 passwords or sessions.
 
@@ -721,7 +723,7 @@ OAuth 2.0 Security Best Current Practice (RFC 9700, January 2025):
   revoke their own sessions; admins via the admin API. Revoking a session stops refresh
   immediately; an outstanding access token lives at most its 15 minutes. Disabling or
   deleting an account invalidates its sessions on next refresh.
-- **Signing keys** are generated by Dovetail, stored in RADOS (`keys/jwt` in the index pool)
+- **Signing keys** are generated by Kittiwake, stored in RADOS (`keys/jwt` in the index pool)
   and rotated on a schedule; daemons cache the current and previous public key. Rotating keys
   is also the "log everyone out" switch.
 - **Session metadata** (client name, creation time, last use, last client IP) is kept with
@@ -829,13 +831,13 @@ Nothing of this is built in the first milestones, but nothing in the mail design
 ## Out of scope
 
 Shared folders between mailboxes and IMAP ACLs. Encryption at rest and compression are handled
-by the Ceph pools (BlueStore compression and encryption), not by Dovetail.
+by the Ceph pools (BlueStore compression and encryption), not by Kittiwake.
 
 # APIs
 
 ## Mailbox API: JMAP
 
-The mailbox API **is JMAP**. Rather than designing a custom REST API, Dovetail implements the
+The mailbox API **is JMAP**. Rather than designing a custom REST API, Kittiwake implements the
 IETF standard that was built for exactly this purpose (webmail and mobile clients) and is
 served by Fastmail, Cyrus, Stalwart and others:
 
@@ -932,24 +934,24 @@ file, or via `${ENV_VAR}` substitution.
 ## Development backend
 
 `ceph.backend: memory` runs the whole platform against the in-memory RADOS implementation
-used by the tests: one process, no Ceph, nothing persisted. `dovetail serve --seed-account
+used by the tests: one process, no Ceph, nothing persisted. `kittiwake serve --seed-account
 user@example.org:password` creates a domain, mailbox, account and an admin on that backend at
 startup, so a developer can speak LMTP, JMAP and the admin API to a fresh process immediately
 (`make run-dev`).
 
-## `dovetail admin` and `dovetail-admin`
+## `kittiwake admin` and `kittiwake-admin`
 
-`dovetail admin` talks to RADOS directly with the daemon's config file and does only what
+`kittiwake admin` talks to RADOS directly with the daemon's config file and does only what
 cannot be done through the API because no token exists yet: `bootstrap` (first admin token)
 and `token` (mint a full or read-only admin token). Everything else is done over
 the admin API so the daemon's code base stays small.
 
-`dovetail-admin` is the operator's tool: a Go client for the admin API (also importable as the
+`kittiwake-admin` is the operator's tool: a Go client for the admin API (also importable as the
 package `client/admin`) that covers every endpoint: domains, mailboxes, accounts, aliases,
 tokens, sessions, legal hold, audit queries, queues, key rotation, identity export/import and
 Maildir export/import (it packs a local Maildir directory and uploads it). It takes the admin
-URL and token from flags, environment (`DOVETAIL_ADMIN_URL`, `DOVETAIL_ADMIN_TOKEN`) or
-`~/.config/dovetail/admin.yaml`, and prints tables or JSON (`-o json`).
+URL and token from flags, environment (`KITTIWAKE_ADMIN_URL`, `KITTIWAKE_ADMIN_TOKEN`) or
+`~/.config/kittiwake/admin.yaml`, and prints tables or JSON (`-o json`).
 
 The admin listener serves its own OpenAPI document at `/openapi.yaml` (unauthenticated) so
 other clients can be generated from the exact contract the running version implements.
@@ -970,10 +972,10 @@ other clients can be generated from the exact contract the running version imple
 - RADOS abstraction with librados (cgo) and in-memory implementations
 - Metadata in MariaDB (domains, mailboxes, accounts with services, aliases, catch-all,
   tokens, sessions, signing keys, queue, cluster registry, admin audit) with embedded
-  migrations and `dovetail migrate`; RADOS backend for development; shared conformance
-  suites; `dovetail admin bootstrap`, identity export/import
+  migrations and `kittiwake migrate`; RADOS backend for development; shared conformance
+  suites; `kittiwake admin bootstrap`, identity export/import
 - Multiple Ceph clusters: registry with fsid verification, per-mailbox placement, periodic
-  reload, per-cluster stores and sweeps, `dovetail-admin cluster` and `/v1/admin/clusters`
+  reload, per-cluster stores and sweeps, `kittiwake-admin cluster` and `/v1/admin/clusters`
 - Admin service, REST admin API (domains, mailboxes, accounts, aliases, tokens, sessions,
   hold/release, audit queries, queue inspection, key rotation, export/import) with an
   OpenAPI spec that is tested against the registered routes

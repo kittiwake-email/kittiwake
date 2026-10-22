@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/service/actor"
-	"dovetail/store/audit"
+	"kittiwake/service/actor"
+	"kittiwake/store/audit"
 )
 
 // Detail levels per protocol.

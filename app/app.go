@@ -1,5 +1,5 @@
 // Package app wires configuration, the RADOS client, stores, services and
-// protocol listeners into a running Dovetail process. cmd/dovetail is a
+// protocol listeners into a running Kittiwake process. cmd/kittiwake is a
 // thin command-line layer over it.
 package app
 
@@ -18,30 +18,30 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/config"
-	"dovetail/metrics"
-	"dovetail/proto/httpx"
-	"dovetail/proto/lmtp"
-	"dovetail/proto/proxyproto"
-	"dovetail/proto/socketmap"
-	"dovetail/rados"
-	"dovetail/service/admin"
-	"dovetail/service/auditor"
-	authsvc "dovetail/service/auth"
-	"dovetail/service/delivery"
-	"dovetail/service/export"
-	"dovetail/service/mailbox"
-	"dovetail/service/submit"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/cluster"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/mariadb"
-	"dovetail/store/message"
-	"dovetail/store/queue"
-	"dovetail/store/session"
-	"dovetail/worker"
+	"kittiwake/config"
+	"kittiwake/metrics"
+	"kittiwake/proto/httpx"
+	"kittiwake/proto/lmtp"
+	"kittiwake/proto/proxyproto"
+	"kittiwake/proto/socketmap"
+	"kittiwake/rados"
+	"kittiwake/service/admin"
+	"kittiwake/service/auditor"
+	authsvc "kittiwake/service/auth"
+	"kittiwake/service/delivery"
+	"kittiwake/service/export"
+	"kittiwake/service/mailbox"
+	"kittiwake/service/submit"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/cluster"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/mariadb"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
+	"kittiwake/store/session"
+	"kittiwake/worker"
 )
 
 // Version is set at build time.
@@ -89,7 +89,7 @@ type Services struct {
 	Export   *export.Service
 }
 
-// App is a configured Dovetail process.
+// App is a configured Kittiwake process.
 type App struct {
 	Cfg      config.Config
 	Log      *slog.Logger
@@ -183,7 +183,7 @@ func OpenDatabase(ctx context.Context, cfg config.Database) (*mariadb.DB, error)
 	}
 	if want := mariadb.LatestVersion(); have != want {
 		db.Close()
-		return nil, fmt.Errorf("database: schema version %d, this binary needs %d: run `dovetail migrate`", have, want)
+		return nil, fmt.Errorf("database: schema version %d, this binary needs %d: run `kittiwake migrate`", have, want)
 	}
 	return db, nil
 }
@@ -231,7 +231,7 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 			return nil, fmt.Errorf("cluster registry: %w", err)
 		}
 		if len(reg.Statuses()) == 0 {
-			log.Warn("no Ceph clusters registered; mailboxes cannot be placed or served until one is added (dovetail-admin cluster add)")
+			log.Warn("no Ceph clusters registered; mailboxes cannot be placed or served until one is added (kittiwake-admin cluster add)")
 		}
 		a.Clusters = reg
 		resolver = reg
@@ -476,7 +476,7 @@ func (a *App) serveHTTP(name string, l config.Listener, h http.Handler, start fu
 func hostname() string {
 	h, err := os.Hostname()
 	if err != nil || h == "" {
-		return "dovetail"
+		return "kittiwake"
 	}
 	return h
 }

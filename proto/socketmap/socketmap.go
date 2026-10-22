@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"dovetail/service/delivery"
-	"dovetail/store/identity"
+	"kittiwake/service/delivery"
+	"kittiwake/store/identity"
 )
 
 // Server answers socketmap queries.
@@ -165,7 +165,7 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 		}
 		// Postfix virtual_alias_maps expects addresses. Mailbox destinations
 		// have no address of their own, so the alias maps to itself (Postfix
-		// then delivers it over LMTP, where Dovetail fans it out).
+		// then delivers it over LMTP, where Kittiwake fans it out).
 		var out []string
 		self := false
 		for _, d := range v.Destinations {

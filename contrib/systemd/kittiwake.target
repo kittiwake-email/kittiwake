@@ -1,0 +1,7 @@
+# Groups all Kittiwake instances: systemctl start|stop|restart kittiwake.target
+[Unit]
+Description=Kittiwake mail platform (all instances)
+Wants=kittiwake@lmtp.service kittiwake@imap.service kittiwake@pop3.service kittiwake@jmap.service kittiwake@admin.service kittiwake@postfix.service kittiwake@worker.service
+
+[Install]
+WantedBy=multi-user.target

@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
+	"kittiwake/rados"
 )
 
 func newStore(t *testing.T) (*Store, uuid.UUID) {

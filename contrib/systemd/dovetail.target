@@ -1,7 +1,0 @@
-# Groups all Dovetail instances: systemctl start|stop|restart dovetail.target
-[Unit]
-Description=Dovetail mail platform (all instances)
-Wants=dovetail@lmtp.service dovetail@imap.service dovetail@pop3.service dovetail@jmap.service dovetail@admin.service dovetail@postfix.service dovetail@worker.service
-
-[Install]
-WantedBy=multi-user.target

@@ -1,9 +1,9 @@
-// Command dovetail is the Dovetail mail platform daemon and admin CLI.
+// Command kittiwake is the Kittiwake mail platform daemon and admin CLI.
 //
-//	dovetail serve --config /etc/dovetail/dovetail.yaml
-//	dovetail check-config --config ...
-//	dovetail admin --config ... <subcommand>
-//	dovetail version
+//	kittiwake serve --config /etc/kittiwake/kittiwake.yaml
+//	kittiwake check-config --config ...
+//	kittiwake admin --config ... <subcommand>
+//	kittiwake version
 package main
 
 import (
@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"dovetail/app"
-	"dovetail/config"
-	"dovetail/service/actor"
-	"dovetail/service/admin"
-	"dovetail/store/identity"
-	"dovetail/store/mariadb"
+	"kittiwake/app"
+	"kittiwake/config"
+	"kittiwake/service/actor"
+	"kittiwake/service/admin"
+	"kittiwake/store/identity"
+	"kittiwake/store/mariadb"
 )
 
 func main() {
@@ -54,27 +54,27 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: dovetail <command> [flags]
+	fmt.Fprintln(os.Stderr, `usage: kittiwake <command> [flags]
 
 commands:
   serve         run the daemon in the modes listed in the config file
   check-config  parse and validate the config file
   migrate       create or upgrade the metadata database schema (database.dsn)
-  admin         administrative operations against RADOS (see: dovetail admin help)
+  admin         administrative operations against RADOS (see: kittiwake admin help)
   version       print the version (also: -v, --version)
 
 flags:
-  -c, --config <file>   config file (serve, check-config, admin; default $DOVETAIL_CONFIG
-                        or /etc/dovetail/dovetail.yaml)
+  -c, --config <file>   config file (serve, check-config, admin; default $KITTIWAKE_CONFIG
+                        or /etc/kittiwake/kittiwake.yaml)
   -o, --output <fmt>    plain (default) or json (check-config, admin, version)`)
 }
 
 func loadConfig(path string) (config.Config, error) {
 	if path == "" {
-		path = os.Getenv("DOVETAIL_CONFIG")
+		path = os.Getenv("KITTIWAKE_CONFIG")
 	}
 	if path == "" {
-		path = "/etc/dovetail/dovetail.yaml"
+		path = "/etc/kittiwake/kittiwake.yaml"
 	}
 	return config.Load(path)
 }
@@ -120,7 +120,7 @@ func runVersion(args []string) error {
 	if err := setOutput(*of); err != nil {
 		return err
 	}
-	return emit(map[string]string{"version": app.Version}, func() { fmt.Println("dovetail", app.Version) })
+	return emit(map[string]string{"version": app.Version}, func() { fmt.Println("kittiwake", app.Version) })
 }
 
 func runCheckConfig(args []string) error {
@@ -208,7 +208,7 @@ func runServe(args []string) error {
 	if a.Clusters != nil {
 		clusters = len(a.Clusters.Statuses())
 	}
-	log.Info("dovetail starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend, "clusters", clusters)
+	log.Info("kittiwake starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend, "clusters", clusters)
 	return a.Run(ctx)
 }
 

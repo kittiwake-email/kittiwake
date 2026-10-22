@@ -16,7 +16,7 @@ func TestResolvePrecedence(t *testing.T) {
 	_ = os.WriteFile(file, []byte("url: http://file:1\ntoken: file-token\n"), 0o600)
 	noEnv := func(string) string { return "" }
 	env := func(k string) string {
-		return map[string]string{"DOVETAIL_ADMIN_URL": "http://env:2", "DOVETAIL_ADMIN_TOKEN": "env-token"}[k]
+		return map[string]string{"KITTIWAKE_ADMIN_URL": "http://env:2", "KITTIWAKE_ADMIN_TOKEN": "env-token"}[k]
 	}
 	s, err := resolve("", "", noEnv, file)
 	if err != nil || s.URL != "http://file:1" || s.Token != "file-token" {

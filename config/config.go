@@ -1,4 +1,4 @@
-// Package config loads Dovetail's single YAML configuration file.
+// Package config loads Kittiwake's single YAML configuration file.
 package config
 
 import (
@@ -72,7 +72,7 @@ type Listen struct {
 
 // Listener is one network listener.
 type Listener struct {
-	// Address in Go net form, e.g. "[::]:24" or "/run/dovetail/lmtp.sock".
+	// Address in Go net form, e.g. "[::]:24" or "/run/kittiwake/lmtp.sock".
 	Address string `yaml:"address"`
 	// ProxyProtocol: "off", "optional" (accept with or without header) or
 	// "required" (reject connections without a PROXY header).
@@ -153,7 +153,7 @@ type Cache struct {
 // backend an empty DSN keeps metadata in memory as well.
 type Database struct {
 	// DSN in go-sql-driver/mysql form, e.g.
-	// "dovetail:secret@tcp(db.example:3306)/dovetail"; the usual secret
+	// "kittiwake:secret@tcp(db.example:3306)/kittiwake"; the usual secret
 	// forms (file:, ${ENV}) apply.
 	DSN Secret `yaml:"dsn"`
 }
@@ -203,10 +203,10 @@ func Default() Config {
 		Ceph: Ceph{
 			Backend: "librados",
 			Pools: Pools{
-				Messages:    "dovetail.messages",
-				Attachments: "dovetail.attachments",
-				Index:       "dovetail.index",
-				Meta:        "dovetail.meta",
+				Messages:    "kittiwake.messages",
+				Attachments: "kittiwake.attachments",
+				Index:       "kittiwake.index",
+				Meta:        "kittiwake.meta",
 			},
 		},
 		Listen: Listen{
@@ -233,7 +233,7 @@ func Default() Config {
 			AccessTokenLifetime:  15 * time.Minute,
 			RefreshTokenLifetime: 30 * 24 * time.Hour,
 			KeyRotationInterval:  90 * 24 * time.Hour,
-			Issuer:               "dovetail",
+			Issuer:               "kittiwake",
 		},
 		Cache: Cache{Credentials: 5 * time.Second, Identity: 5 * time.Second, Root: 5 * time.Second},
 		Audit: Audit{Retention: 365 * 24 * time.Hour},
@@ -284,7 +284,7 @@ func (c *Config) Validate() error {
 	switch c.Ceph.Backend {
 	case "librados":
 		if len(c.Ceph.Monitors) > 0 || c.Ceph.User != "" || c.Ceph.Key != "" || c.Ceph.Keyring != "" {
-			return errors.New("config: ceph.monitors/user/key/keyring are not used with librados: clusters are registered in the database (dovetail-admin cluster add); only ceph.config_file and ceph.options apply to every connection")
+			return errors.New("config: ceph.monitors/user/key/keyring are not used with librados: clusters are registered in the database (kittiwake-admin cluster add); only ceph.config_file and ceph.options apply to every connection")
 		}
 	case "memory":
 		if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" {

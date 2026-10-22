@@ -13,8 +13,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/internal/ttlcache"
-	"dovetail/rados"
+	"kittiwake/internal/ttlcache"
+	"kittiwake/rados"
 )
 
 // Backend is what a metadata database must implement. Every method is

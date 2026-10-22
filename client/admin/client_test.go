@@ -10,23 +10,23 @@ import (
 	"testing"
 	"time"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/proto/rest"
-	"dovetail/rados"
-	"dovetail/service/actor"
-	adminsvc "dovetail/service/admin"
-	"dovetail/service/auditor"
-	"dovetail/service/auth"
-	"dovetail/service/delivery"
-	"dovetail/service/export"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
-	"dovetail/store/session"
-	"dovetail/worker"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/proto/rest"
+	"kittiwake/rados"
+	"kittiwake/service/actor"
+	adminsvc "kittiwake/service/admin"
+	"kittiwake/service/auditor"
+	"kittiwake/service/auth"
+	"kittiwake/service/delivery"
+	"kittiwake/service/export"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
+	"kittiwake/store/session"
+	"kittiwake/worker"
 )
 
 type fixture struct {
@@ -104,7 +104,7 @@ func TestStatusAndErrors(t *testing.T) {
 	if st.Version == "" || st.Time.IsZero() {
 		t.Fatalf("status: %+v", st)
 	}
-	if _, err := New(f.ts.URL, "dvt_bogus").Status(ctx); !IsUnauthorized(err) {
+	if _, err := New(f.ts.URL, "kwt_bogus").Status(ctx); !IsUnauthorized(err) {
 		t.Fatalf("bad token: %v", err)
 	}
 	if _, err := New(f.ts.URL, f.userTk).Status(ctx); !IsForbidden(err) {
@@ -246,7 +246,7 @@ func TestMailboxesAccountsAliasesTokens(t *testing.T) {
 	}
 	tk, err := f.c.CreateToken(ctx, acct.ID, TokenRequest{Roles: []string{"read"}, ExpiresAt: f.now.Add(time.Hour), Comment: "ci"})
 	must(t, err)
-	if !strings.HasPrefix(tk.Secret, "dvt_") || tk.Token.Comment != "ci" || tk.Token.AccountID != acct.ID {
+	if !strings.HasPrefix(tk.Secret, "kwt_") || tk.Token.Comment != "ci" || tk.Token.AccountID != acct.ID {
 		t.Fatalf("token: %+v", tk)
 	}
 	if _, err := f.c.CreateToken(ctx, acct.ID, TokenRequest{ExpiresAt: f.now.Add(time.Hour)}); !IsBadRequest(err) {

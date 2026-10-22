@@ -1,6 +1,6 @@
 // Package identitytest is the conformance suite every identity backend
 // must pass. The RADOS backend runs it in its unit tests; the MariaDB
-// backend runs it against a real server when DOVETAIL_TEST_DSN is set.
+// backend runs it against a real server when KITTIWAKE_TEST_DSN is set.
 package identitytest
 
 import (
@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/store/identity"
+	"kittiwake/store/identity"
 )
 
 // Factory returns a fresh, empty store whose clock is the suite's: the
@@ -276,14 +276,14 @@ func testTokens(t *testing.T, f Factory) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secret[:4] != "dvt_" || tok.Hash != identity.HashToken(secret) || len(tok.Roles) != 1 {
+	if secret[:4] != "kwt_" || tok.Hash != identity.HashToken(secret) || len(tok.Roles) != 1 {
 		t.Fatalf("token: %+v %s", tok, secret)
 	}
 	got, err := s.LookupToken(ctx, secret)
 	if err != nil || got.Value.ID != tok.ID || got.Value.AccountID != a.ID {
 		t.Fatalf("lookup: %+v %v", got, err)
 	}
-	if _, err := s.LookupToken(ctx, "dvt_nope"); !errors.Is(err, identity.ErrNotFound) {
+	if _, err := s.LookupToken(ctx, "kwt_nope"); !errors.Is(err, identity.ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}
 	if _, err := s.LookupToken(ctx, "nope"); !errors.Is(err, identity.ErrNotFound) {
@@ -444,7 +444,7 @@ func testClusters(t *testing.T, f Factory) {
 	if _, err := s.CreateCluster(ctx, identity.Cluster{Name: "ams1", MonHost: "x", Pools: identity.Pools{Messages: "m"}}); !errors.Is(err, identity.ErrInvalid) {
 		t.Fatalf("pools required: %v", err)
 	}
-	c1, err := s.CreateCluster(ctx, identity.Cluster{Name: " ams1 ", MonHost: "[2001:db8::1]:6789", User: "dovetail", Key: "AQ==", Pools: pools, Placement: true})
+	c1, err := s.CreateCluster(ctx, identity.Cluster{Name: " ams1 ", MonHost: "[2001:db8::1]:6789", User: "kittiwake", Key: "AQ==", Pools: pools, Placement: true})
 	if err != nil || c1.ID == 0 || c1.Name != "ams1" {
 		t.Fatalf("create: %+v %v", c1, err)
 	}

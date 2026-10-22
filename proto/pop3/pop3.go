@@ -22,12 +22,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/metrics"
-	"dovetail/proto/proxyproto"
-	"dovetail/service/actor"
-	authsvc "dovetail/service/auth"
-	"dovetail/service/mailbox"
-	"dovetail/store/index"
+	"kittiwake/metrics"
+	"kittiwake/proto/proxyproto"
+	"kittiwake/service/actor"
+	authsvc "kittiwake/service/auth"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/index"
 )
 
 // Config for the server.
@@ -59,7 +59,7 @@ type Server struct {
 // New returns a server.
 func New(cfg Config, authSvc *authsvc.Service, mb *mailbox.Service, log *slog.Logger) *Server {
 	if cfg.Hostname == "" {
-		cfg.Hostname = "dovetail"
+		cfg.Hostname = "kittiwake"
 	}
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = 10 * time.Minute
@@ -160,7 +160,7 @@ func (s *Server) handle(c net.Conn) {
 		s.wg.Done()
 	}()
 	ss := &session{srv: s, conn: c, r: bufio.NewReaderSize(c, maxLine+2), w: bufio.NewWriter(c), clientIP: proxyproto.IPOf(c.RemoteAddr()), ctx: context.Background()}
-	ss.ok("Dovetail POP3 server ready")
+	ss.ok("Kittiwake POP3 server ready")
 	for {
 		_ = c.SetDeadline(time.Now().Add(s.cfg.IdleTimeout))
 		line, err := ss.readLine()
@@ -202,7 +202,7 @@ func (ss *session) dispatch(cmd, arg string) bool {
 	switch cmd {
 	case "CAPA":
 		ss.send("+OK Capability list follows")
-		caps := []string{"TOP", "UIDL", "RESP-CODES", "AUTH-RESP-CODE", "PIPELINING", "SASL PLAIN OAUTHBEARER XOAUTH2", "IMPLEMENTATION Dovetail"}
+		caps := []string{"TOP", "UIDL", "RESP-CODES", "AUTH-RESP-CODE", "PIPELINING", "SASL PLAIN OAUTHBEARER XOAUTH2", "IMPLEMENTATION Kittiwake"}
 		if !ss.authed {
 			caps = append(caps, "USER")
 		}

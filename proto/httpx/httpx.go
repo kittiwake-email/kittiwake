@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"strings"
 
-	"dovetail/proto/proxyproto"
-	"dovetail/service/actor"
-	authsvc "dovetail/service/auth"
+	"kittiwake/proto/proxyproto"
+	"kittiwake/service/actor"
+	authsvc "kittiwake/service/auth"
 )
 
 type ctxKey int

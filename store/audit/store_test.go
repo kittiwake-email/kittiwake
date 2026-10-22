@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
+	"kittiwake/rados"
 )
 
 func TestWriteReadPurge(t *testing.T) {

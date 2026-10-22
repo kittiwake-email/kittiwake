@@ -18,28 +18,29 @@ Plain commit messages: subject line plus an explanatory body when useful. Never 
 ## Commands
 
 ```
-make build            # bin/dovetail (cgo; needs librados-dev, installed on the dev box, Ceph 20.x)
+make build            # bin/kittiwake (cgo; needs librados-dev, installed on the dev box, Ceph 20.x)
 make test             # go test ./...   (all unit tests run on the in-memory RADOS; no Ceph needed)
 make test-race
-make test-sql         # store conformance suites on a real MariaDB (DOVETAIL_TEST_DSN; see Makefile for the dev container)
+make test-sql         # store conformance suites on a real MariaDB (KITTIWAKE_TEST_DSN; see Makefile for the dev container)
 make lint             # go vet + gofmt check
 go test ./store/index -run TestFolders          # one test
 go test ./mail -run TestRoundTrip -v
 make run-dev          # whole platform in one process on the memory backend with a seeded account
-make integration      # RADOS conformance suite on a real cluster (lab box, see TESTENV.md)
+make integration      # RADOS conformance suite on a real cluster (lab box, see ../kittiwake-labs)
 make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (lab box)
 make deploy           # build here, push binary to the lab box, restart its systemd instances
-                      # (dovetail@<mode>, one process per mode; see contrib/systemd, TESTENV.md)
-bin/dovetail check-config -c examples/dovetail.yaml
-bin/dovetail migrate -c <cfg>                          # create/upgrade the MariaDB schema (store/mariadb/migrations)
-bin/dovetail admin -c <cfg> bootstrap                 # first admin token; `admin token --read-only` for more
-bin/dovetail-admin -u http://[::1]:8081 -t dvt_... mailbox list       # everything else: the API client
-bin/dovetail-admin cluster add|list|enable|disable|remove            # Ceph cluster registry (mailbox placement)
-bin/dovetail-admin ... -o json ...                                   # -o plain|json everywhere
+                      # (kittiwake@<mode>, one process per mode; see contrib/systemd and ../kittiwake-labs)
+bin/kittiwake check-config -c examples/kittiwake.yaml
+bin/kittiwake migrate -c <cfg>                          # create/upgrade the MariaDB schema (store/mariadb/migrations)
+bin/kittiwake admin -c <cfg> bootstrap                 # first admin token; `admin token --read-only` for more
+bin/kittiwake-admin -u http://[::1]:8081 -t kwt_... mailbox list       # everything else: the API client
+bin/kittiwake-admin cluster add|list|enable|disable|remove            # Ceph cluster registry (mailbox placement)
+bin/kittiwake-admin ... -o json ...                                   # -o plain|json everywhere
 ```
 
-Lab: `TESTENV.md` describes the Ceph test cluster and the `dovetail` box (IPv6-only, no
-GitHub access; rsync the tree to `/root/dovetail`). Real-cluster findings so far: go-ceph
+Lab: the sibling repository `kittiwake-labs` (`/home/wido/repos/kittiwake/kittiwake-labs`,
+Ansible) describes and provisions the Ceph test cluster and the `kittiwake` box (IPv6-only, no
+GitHub access; rsync the tree to `/root/kittiwake`). Real-cluster findings so far: go-ceph
 panics on zero-length WriteFull (handled in rados/librados.go) and assert_version fails with
 ERANGE or EOVERFLOW depending on direction (both map to ErrVersionMismatch).
 
@@ -60,10 +61,10 @@ service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, a
               (business logic + authorisation + audit; protocol adapters call ONLY these)
 proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3
 app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
-cmd/dovetail  serve | check-config | admin (bootstrap, token only) | version
-cmd/dovetail-admin  operator CLI over client/admin (typed Go client for the admin API)
+cmd/kittiwake  serve | check-config | admin (bootstrap, token only) | version
+cmd/kittiwake-admin  operator CLI over client/admin (typed Go client for the admin API)
 client/admin  pure HTTP client for the admin API; importable by third parties
-examples/     dovetail.yaml (full, documented), dev.yaml (memory backend)
+examples/     kittiwake.yaml (full, documented), dev.yaml (memory backend)
 contrib/postfix  main.cf snippet
 api/openapi.yaml REST spec, embedded (api.OpenAPI) and served at /openapi.yaml on the admin
               listener; route↔spec consistency is tested — add new routes to both
@@ -80,9 +81,9 @@ clock (audit objects are per UTC day). Smoke-test the binary with
 
 ## What this is
 
-Dovetail: a massively scalable mail platform intended to replace Dovecot (the name is the
-joint that fits onto Postfix, and the successor of Dovecot). Go module path: `dovetail`.
-Binary name: `dovetail`. Not an MTA: Postfix stays in front (LMTP in, SMTP relay out).
+Kittiwake: a massively scalable mail platform intended to replace Dovecot (the name is the
+joint that fits onto Postfix, and the successor of Dovecot). Go module path: `kittiwake`.
+Binary name: `kittiwake`. Not an MTA: Postfix stays in front (LMTP in, SMTP relay out).
 
 ## Architectural decisions
 
@@ -92,19 +93,19 @@ These are settled. Do not design around them.
   stores (identity, index, messages, attachments, changelog, audit, sessions, queue) →
   services as Go interfaces (`Auth`, `Delivery`, `Mailbox`, `Submit`, `Admin`, `Audit`,
   `Notify`) → protocol adapters (LMTP, IMAP, POP3, JMAP, REST, socketmap, CLI) →
-  `cmd/dovetail`. A protocol adapter never touches a store or RADOS directly. Authorisation
+  `cmd/kittiwake`. A protocol adapter never touches a store or RADOS directly. Authorisation
   (roles, enabled flags, hold) and audit happen in the services, once, via a context that
   carries actor, client IP and protocol. Each layer is tested against the mock of the layer
   below. The service interfaces are the project's public Go API.
 
-- **One Go binary (`dovetail`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
+- **One Go binary (`kittiwake`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
   OAuth + /v1/me), `admin` (/v1/admin only, own listener), `postfix`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to the metadata
   database directly (bootstrap, export/import). Modes combine in one process or split across many.
 - **Mail data in Ceph RADOS, metadata in MariaDB, no Redis.** Stateless daemons via librados
   (cgo; target latest stable Ceph). Per cluster three pools: `messages`, `attachments`,
   `index`. Pure RADOS, not S3/RGW. Metadata (domains, mailboxes, accounts, aliases, tokens,
   signing keys, sessions, worker queue, cluster registry, admin audit) is in MariaDB
-  (`store/mariadb`, embedded migrations, `dovetail migrate`); the daemon refuses an unknown
+  (`store/mariadb`, embedded migrations, `kittiwake migrate`); the daemon refuses an unknown
   schema version. MariaDB commits every DDL statement on its own, so migration statements are
   idempotent and a failed migration is re-run.
 - **Identity store is an interface (`identity.Backend`)** with two implementations: MariaDB
@@ -112,15 +113,15 @@ These are settled. Do not design around them.
   RGW-style objects: exclusive create for uniqueness, omap listings, version-conditional
   updates). `session.Store` and `queue.Store` are interfaces the same way. Both run the same
   conformance suites (`store/*/<pkg>test`; `make test-sql` against a real MariaDB).
-- **Multiple Ceph clusters, all equal.** Clusters are registry rows (`dovetail-admin cluster
+- **Multiple Ceph clusters, all equal.** Clusters are registry rows (`kittiwake-admin cluster
   add`), not config; the fsid read on connect verifies the record. Each mailbox has a
   `cluster_id`; every data store resolves pools through `cluster.Resolver` (Fixed for the
   memory backend, Registry otherwise). Placement is random among connected clusters open for
   placement; an unreachable cluster defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP
   `serverUnavailable`). Sweeps walk every cluster; a removal task carries the cluster id.
-- **Admin API is the only way identity data is created/changed.** `dovetail admin` does only
-  bootstrap/token; operators use `dovetail-admin` (client/admin). Do not add admin features
-  to cmd/dovetail; add them to the API + spec + client.
+- **Admin API is the only way identity data is created/changed.** `kittiwake admin` does only
+  bootstrap/token; operators use `kittiwake-admin` (client/admin). Do not add admin features
+  to cmd/kittiwake; add them to the API + spec + client.
   Self-service endpoints let accounts manage their own passwords, app passwords, TOTP,
   tokens and sessions. All of it audited.
 - **Postfix integration:** `postfix` mode serves a Sendmail-style socketmap (`domains`,
@@ -169,7 +170,7 @@ These are settled. Do not design around them.
   `application`, each with a required comment and optional `expires_at` (temporary
   passwords; expired ones never match) (Dovecot-style scheme prefixes; argon2id for new
   ones), optional TOTP
-  secret, and API tokens (stored as SHA-256, prefixed `dvt_`, expiry and comment mandatory,
+  secret, and API tokens (stored as SHA-256, prefixed `kwt_`, expiry and comment mandatory,
   may only narrow the account's roles). **Admins are tokens, not accounts:** admin tokens
   (`tokens/<hash>` with zero AccountID, listed in `tokens/_admin`) carry `admin` or
   `admin-ro`; accounts can never have admin roles. Every GET on the admin API accepts
@@ -226,7 +227,7 @@ These are settled. Do not design around them.
 - **No TLS in the daemon** (HAProxy terminates it). **IPv6-first.** Single YAML config file.
 - **Observability:** structured JSON logging and Prometheus metrics in every component;
   `/metrics`, `/healthz`, `/readyz` on a management listener. Log/audit lines about a message
-  carry `message_id` (the Message-ID header) next to Dovetail's `msg` uuid.
+  carry `message_id` (the Message-ID header) next to Kittiwake's `msg` uuid.
 
 ## Roadmap
 

@@ -18,8 +18,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/store/cluster"
+	"kittiwake/rados"
+	"kittiwake/store/cluster"
 )
 
 // Protocols.

@@ -16,15 +16,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/mail"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
+	"kittiwake/mail"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
 )
 
 // Errors.

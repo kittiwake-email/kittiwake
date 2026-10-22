@@ -14,16 +14,16 @@ type settings struct {
 	Token string `yaml:"token"`
 }
 
-// configPath is ~/.config/dovetail/admin.yaml (or $DOVETAIL_ADMIN_CONFIG).
+// configPath is ~/.config/kittiwake/admin.yaml (or $KITTIWAKE_ADMIN_CONFIG).
 func configPath() string {
-	if p := os.Getenv("DOVETAIL_ADMIN_CONFIG"); p != "" {
+	if p := os.Getenv("KITTIWAKE_ADMIN_CONFIG"); p != "" {
 		return p
 	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "dovetail", "admin.yaml")
+	return filepath.Join(dir, "kittiwake", "admin.yaml")
 }
 
 // resolve merges flag > env > file. Empty strings mean "not set".
@@ -39,10 +39,10 @@ func resolve(flagURL, flagToken string, env func(string) string, file string) (s
 			return settings{}, err
 		}
 	}
-	if v := env("DOVETAIL_ADMIN_URL"); v != "" {
+	if v := env("KITTIWAKE_ADMIN_URL"); v != "" {
 		s.URL = v
 	}
-	if v := env("DOVETAIL_ADMIN_TOKEN"); v != "" {
+	if v := env("KITTIWAKE_ADMIN_TOKEN"); v != "" {
 		s.Token = v
 	}
 	if flagURL != "" {

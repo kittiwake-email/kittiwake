@@ -23,16 +23,16 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/rados"
-	"dovetail/service/admin"
-	"dovetail/service/auditor"
-	"dovetail/service/auth"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/queue"
-	"dovetail/store/session"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/rados"
+	"kittiwake/service/admin"
+	"kittiwake/service/auditor"
+	"kittiwake/service/auth"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/queue"
+	"kittiwake/store/session"
 )
 
 type fixture struct {
@@ -334,7 +334,7 @@ func TestAdminAuthz(t *testing.T) {
 	if r.body["version"] != "dev" {
 		t.Fatalf("status: %v", r.body)
 	}
-	f.expect(f.do("GET", "/v1/admin/status", f.bearer("dvt_nope"), nil, ""), 401, "bad token")
+	f.expect(f.do("GET", "/v1/admin/status", f.bearer("kwt_nope"), nil, ""), 401, "bad token")
 }
 
 func TestAdminCRUD(t *testing.T) {
@@ -438,7 +438,7 @@ func TestAdminCRUD(t *testing.T) {
 	f.expect(r, 201, "token create")
 	secret := r.body["secret"].(string)
 	tokID := r.body["token"].(map[string]any)["id"].(string)
-	if !strings.HasPrefix(secret, "dvt_") {
+	if !strings.HasPrefix(secret, "kwt_") {
 		t.Fatal("secret")
 	}
 	f.expect(f.do("POST", "/v1/admin/accounts/"+acctID+"/tokens", a, map[string]any{"expires_at": f.now.Add(time.Hour)}, ""), 400, "token without comment")
@@ -636,15 +636,15 @@ func TestClusterRegistry(t *testing.T) {
 	f := newFixture(t)
 	a := f.adminAuth()
 	pools := map[string]string{"messages": "m", "attachments": "a", "index": "i"}
-	f.expect(f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "[2001:db8::1]:6789", "user": "dovetail", "key": "AQ==", "pools": map[string]string{"messages": "m"}}, ""), 400, "cluster add incomplete pools")
-	r := f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "[2001:db8::1]:6789", "user": "dovetail", "key": "AQ==", "pools": pools}, "")
+	f.expect(f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "[2001:db8::1]:6789", "user": "kittiwake", "key": "AQ==", "pools": map[string]string{"messages": "m"}}, ""), 400, "cluster add incomplete pools")
+	r := f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "[2001:db8::1]:6789", "user": "kittiwake", "key": "AQ==", "pools": pools}, "")
 	f.expect(r, 201, "cluster add")
 	if _, hasKey := r.body["key"]; hasKey || r.body["name"] != "ams1" || r.body["placement"] != true || r.body["id"] == nil {
 		t.Fatalf("cluster view: %v", r.body)
 	}
 	id := fmt.Sprint(int64(r.body["id"].(float64)))
 	f.expect(f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "ams1", "mon_host": "x", "user": "u", "key": "k", "pools": pools}, ""), 409, "cluster dup name")
-	r = f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "rtd1", "mon_host": "[2001:db8::2]:6789", "user": "dovetail", "key": "AQ==", "pools": pools, "placement": false}, "")
+	r = f.do("POST", "/v1/admin/clusters", a, map[string]any{"name": "rtd1", "mon_host": "[2001:db8::2]:6789", "user": "kittiwake", "key": "AQ==", "pools": pools, "placement": false}, "")
 	f.expect(r, 201, "cluster add closed")
 	id2 := fmt.Sprint(int64(r.body["id"].(float64)))
 	r = f.do("GET", "/v1/admin/clusters", a, nil, "")

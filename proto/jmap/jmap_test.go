@@ -3,10 +3,10 @@ package jmap
 import (
 	"bytes"
 	"context"
-	"dovetail/mail"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"kittiwake/mail"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,17 +16,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/service/delivery"
-	"dovetail/service/mailbox"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
+	"kittiwake/rados"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/service/delivery"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
 )
 
 type fixture struct {
@@ -811,7 +811,7 @@ func TestJSONPointer(t *testing.T) {
 	}
 }
 
-// rendered returns what Dovetail serves for a raw message: the document
+// rendered returns what Kittiwake serves for a raw message: the document
 // rendered back to RFC 5322 (the original bytes are not kept).
 func rendered(t *testing.T, raw string) string {
 	t.Helper()

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"dovetail/rados"
+	"kittiwake/rados"
 )
 
 func TestCachedLookups(t *testing.T) {

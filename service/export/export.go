@@ -25,15 +25,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/mail"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/service/delivery"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
+	"kittiwake/mail"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/service/delivery"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
 )
 
 // Errors.
@@ -63,7 +63,7 @@ func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attac
 	}
 	h, _ := os.Hostname()
 	if h == "" {
-		h = "dovetail"
+		h = "kittiwake"
 	}
 	return &Service{ids: ids, idx: idx, msgs: msgs, atts: atts, auditSt: auditSt, del: del, audit: aud, log: log, Hostname: h, Now: time.Now}
 }
@@ -234,7 +234,7 @@ func (s *Service) ExportMailbox(ctx context.Context, mb uuid.UUID, w io.Writer, 
 		out = gz
 	}
 	tw := tar.NewWriter(out)
-	prefix := "dovetail-" + mb.String()
+	prefix := "kittiwake-" + mb.String()
 	sum := Summary{}
 	addFile := func(name string, data []byte, mtime time.Time) error {
 		if mtime.IsZero() {
@@ -461,7 +461,7 @@ func (s *Service) ImportArchive(ctx context.Context, mb uuid.UUID, r io.Reader) 
 	if err := s.authorize(ctx); err != nil {
 		return Summary{}, err
 	}
-	tmp, err := os.MkdirTemp("", "dovetail-import-")
+	tmp, err := os.MkdirTemp("", "kittiwake-import-")
 	if err != nil {
 		return Summary{}, err
 	}

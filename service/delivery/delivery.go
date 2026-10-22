@@ -17,17 +17,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/mail"
-	"dovetail/metrics"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/cluster"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
+	"kittiwake/mail"
+	"kittiwake/metrics"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/cluster"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
 )
 
 // Errors. LMTP maps them to reply codes with Status.
@@ -318,7 +318,7 @@ type Request struct {
 // Delivered describes one stored copy.
 type Delivered struct {
 	MailboxID uuid.UUID
-	MessageID uuid.UUID // Dovetail's message uuid
+	MessageID uuid.UUID // Kittiwake's message uuid
 	FolderID  string
 	UID       uint32
 	Via       string

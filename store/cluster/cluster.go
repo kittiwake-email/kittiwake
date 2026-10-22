@@ -18,8 +18,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/store/identity"
+	"kittiwake/rados"
+	"kittiwake/store/identity"
 )
 
 // Role names a data pool of a cluster.

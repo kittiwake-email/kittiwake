@@ -15,8 +15,8 @@ import (
 
 	"github.com/emersion/go-smtp"
 
-	"dovetail/proto/proxyproto"
-	"dovetail/service/delivery"
+	"kittiwake/proto/proxyproto"
+	"kittiwake/service/delivery"
 )
 
 // Config for the server.
@@ -39,7 +39,7 @@ type Server struct {
 // New returns a server.
 func New(cfg Config, del *delivery.Service, log *slog.Logger) *Server {
 	if cfg.Hostname == "" {
-		cfg.Hostname = "dovetail"
+		cfg.Hostname = "kittiwake"
 	}
 	if cfg.MaxMessageSize <= 0 {
 		cfg.MaxMessageSize = 50 << 20

@@ -13,8 +13,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/auth"
-	"dovetail/rados"
+	"kittiwake/auth"
+	"kittiwake/rados"
 )
 
 // Sentinel errors.

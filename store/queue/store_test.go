@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"dovetail/rados"
-	"dovetail/store/queue"
-	"dovetail/store/queue/queuetest"
+	"kittiwake/rados"
+	"kittiwake/store/queue"
+	"kittiwake/store/queue/queuetest"
 )
 
 func TestRadosStore(t *testing.T) {

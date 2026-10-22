@@ -1,6 +1,6 @@
 # Postfix integration
 
-1. Run Dovetail with `postfix` in `modes` and a `listen.postfix` address only
+1. Run Kittiwake with `postfix` in `modes` and a `listen.postfix` address only
    reachable by the Postfix hosts (the socketmap protocol is unauthenticated).
 2. Add the lines from `main.cf.snippet` to `/etc/postfix/main.cf`.
 3. `postfix reload`.

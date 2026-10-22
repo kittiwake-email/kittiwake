@@ -2,7 +2,7 @@
 // (domains, mailboxes, accounts, aliases, tokens), legal hold, mailbox
 // inspection and removal, bootstrap. Every call requires an actor with the
 // admin role (or the CLI's system actor) and is audited. The REST admin API
-// and the `dovetail admin` CLI are thin adapters over this package.
+// and the `kittiwake admin` CLI are thin adapters over this package.
 package admin
 
 import (
@@ -16,13 +16,13 @@ import (
 
 	"github.com/google/uuid"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/service/actor"
-	"dovetail/service/auditor"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/queue"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/service/actor"
+	"kittiwake/service/auditor"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/queue"
 )
 
 // Errors.
@@ -675,7 +675,7 @@ func (s *Service) DeleteAdminToken(ctx context.Context, id string) error {
 
 // Bootstrap mints the first full admin token. It refuses when admin tokens
 // already exist, so it cannot be used to sneak in a token later (use
-// `dovetail admin token`, which is also audited, for recovery).
+// `kittiwake admin token`, which is also audited, for recovery).
 func (s *Service) Bootstrap(ctx context.Context, comment string, lifetime time.Duration) (identity.Token, string, error) {
 	if err := s.authorize(ctx, "bootstrap", comment); err != nil {
 		return identity.Token{}, "", err
@@ -685,7 +685,7 @@ func (s *Service) Bootstrap(ctx context.Context, comment string, lifetime time.D
 		return identity.Token{}, "", err
 	}
 	if len(existing) > 0 {
-		return identity.Token{}, "", fmt.Errorf("%w: %d admin token(s) already exist; use `dovetail admin token`", ErrExists, len(existing))
+		return identity.Token{}, "", fmt.Errorf("%w: %d admin token(s) already exist; use `kittiwake admin token`", ErrExists, len(existing))
 	}
 	if comment == "" {
 		comment = "bootstrap"

@@ -139,7 +139,7 @@ func writePartHeaders(b *bytes.Buffer, doc *Document, p *Part) {
 		params["charset"] = "utf-8"
 	}
 	if p.Type == "multipart" && params["boundary"] == "" {
-		params["boundary"] = "dovetail-" + p.Path
+		params["boundary"] = "kittiwake-" + p.Path
 	}
 	ct := p.Type + "/" + p.Subtype
 	if p.Subtype == "" {
@@ -179,7 +179,7 @@ func (r *renderer) body(b *bytes.Buffer, p *Part, root bool) error {
 	if p.Type == "multipart" {
 		boundary := p.Params["boundary"]
 		if boundary == "" {
-			boundary = "dovetail-" + p.Path
+			boundary = "kittiwake-" + p.Path
 		}
 		for _, c := range p.Children {
 			b.WriteString("--" + boundary + "\r\n")

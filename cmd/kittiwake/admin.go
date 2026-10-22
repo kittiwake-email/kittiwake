@@ -7,18 +7,18 @@ import (
 	"strings"
 	"time"
 
-	"dovetail/app"
-	"dovetail/service/actor"
-	"dovetail/service/admin"
-	"dovetail/store/identity"
+	"kittiwake/app"
+	"kittiwake/service/actor"
+	"kittiwake/service/admin"
+	"kittiwake/store/identity"
 )
 
 // The local admin subcommand is deliberately minimal: it only exists to get
 // an admin API token when there is none (first install, lost tokens).
-// Everything else is done through the admin API with dovetail-admin.
+// Everything else is done through the admin API with kittiwake-admin.
 
 func adminUsage() {
-	fmt.Fprintln(os.Stderr, `usage: dovetail admin -c <file> [-o plain|json] <subcommand> [flags]
+	fmt.Fprintln(os.Stderr, `usage: kittiwake admin -c <file> [-o plain|json] <subcommand> [flags]
 
 subcommands:
   bootstrap  [--comment text] [--token-lifetime 24h]
@@ -30,7 +30,7 @@ Admins are not accounts: an admin is an API token with a comment, an expiry
 and a role (admin, or admin-ro for read-only use). The CLI talks to RADOS
 directly with the daemon's config file and acts as the system actor; both
 actions are audited in the admin log. All other administration is done over
-the admin API: see dovetail-admin.`)
+the admin API: see kittiwake-admin.`)
 }
 
 func runAdmin(args []string) error {
@@ -127,6 +127,6 @@ func printToken(t identity.Token, secret string) error {
 	return emit(map[string]any{"token_id": t.ID, "roles": t.Roles, "expires_at": t.ExpiresAt, "comment": t.Comment, "token_secret": secret}, func() {
 		fmt.Printf("token id:     %s (%s, expires %s)\n", t.ID, strings.Join(t.Roles, ","), t.ExpiresAt.Format(time.RFC3339))
 		fmt.Printf("token secret: %s\n", secret)
-		fmt.Println("The secret is shown once. Use it as: dovetail-admin --token <secret> ...")
+		fmt.Println("The secret is shown once. Use it as: kittiwake-admin --token <secret> ...")
 	})
 }

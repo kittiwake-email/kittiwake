@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"dovetail/store/audit"
+	"kittiwake/store/audit"
 )
 
 // WriteAdmin inserts the records in one statement.

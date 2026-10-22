@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/service/actor"
+	"kittiwake/service/actor"
 )
 
 // serveEventSource streams StateChange events (RFC 8620 §7.3).

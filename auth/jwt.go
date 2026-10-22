@@ -176,13 +176,13 @@ func VerifyAccessToken(token string, keyFor func(kid string) (ed25519.PublicKey,
 	return c, nil
 }
 
-// NewRefreshToken returns a random "dvr_"-prefixed secret and its hash.
+// NewRefreshToken returns a random "kwr_"-prefixed secret and its hash.
 func NewRefreshToken() (plain, hash string, err error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", "", err
 	}
-	plain = "dvr_" + b64url.EncodeToString(b[:])
+	plain = "kwr_" + b64url.EncodeToString(b[:])
 	return plain, HashRefreshToken(plain), nil
 }
 

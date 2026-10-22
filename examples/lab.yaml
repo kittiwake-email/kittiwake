@@ -1,12 +1,12 @@
-# Lab config for the test box "dovetail" (2a14:9b80::3143), see TESTENV.md.
+# Lab config for the test box "kittiwake" (2a14:9b80::3143).
 # Ceph client packages come from download.ceph.com; the cluster is reached
-# through /etc/ceph/ceph.conf with the client.dovetail keyring.
+# through /etc/ceph/ceph.conf with the client.kittiwake keyring.
 modes: [lmtp, jmap, admin, postfix, imap, pop3, worker]
 database:
-  dsn: "dovetail:dovetail@unix(/run/mysqld/mysqld.sock)/dovetail"   # MariaDB on the box, see TESTENV.md
+  dsn: "kittiwake:kittiwake@unix(/run/mysqld/mysqld.sock)/kittiwake"   # MariaDB on the box (see ../kittiwake-labs)
 ceph:
   backend: librados
-  config_file: /etc/ceph/ceph.conf   # the lab cluster itself is registered: see TESTENV.md
+  config_file: /etc/ceph/ceph.conf   # clusters are registered in the database (see ../kittiwake-labs)
 listen:
   # "optional" makes IMAP/POP3/LMTP wait briefly for a PROXY header before the banner;
   # use "off" for direct clients, "required" behind HAProxy.
@@ -22,7 +22,7 @@ smtp:
 session:
   issuer: http://[::1]:8080
 export:
-  directory: /var/lib/dovetail/exports
+  directory: /var/lib/kittiwake/exports
 log:
   level: info
   format: text

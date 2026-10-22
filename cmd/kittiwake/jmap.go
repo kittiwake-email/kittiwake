@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/app"
-	"dovetail/proto/httpx"
-	"dovetail/proto/jmap"
+	"kittiwake/app"
+	"kittiwake/proto/httpx"
+	"kittiwake/proto/jmap"
 )
 
 // mountJMAP adds the JMAP session resource and endpoints behind the
@@ -22,7 +22,7 @@ func mountJMAP(a *app.App, mux *http.ServeMux, trusted []net.IPNet) {
 			return err == nil && v.Value.Hold != nil
 		},
 	}, a.Services.Mailbox, a.Services.Delivery, a.Log)
-	auth := httpx.Auth(a.Services.Auth, "jmap", trusted, "dovetail")
+	auth := httpx.Auth(a.Services.Auth, "jmap", trusted, "kittiwake")
 	mux.Handle("/.well-known/jmap", auth(srv.SessionHandler()))
 	mux.Handle("/jmap/", auth(srv))
 }

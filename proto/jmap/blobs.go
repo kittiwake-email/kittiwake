@@ -15,9 +15,9 @@ import (
 
 	"github.com/google/uuid"
 
-	dmail "dovetail/mail"
-	"dovetail/service/actor"
-	"dovetail/service/mailbox"
+	dmail "kittiwake/mail"
+	"kittiwake/service/actor"
+	"kittiwake/service/mailbox"
 )
 
 // uploadStore keeps uploaded blobs in memory with a TTL and a size bound.

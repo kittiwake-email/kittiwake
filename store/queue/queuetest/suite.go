@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"dovetail/store/queue"
+	"kittiwake/store/queue"
 )
 
 // Factory returns a fresh, empty store. now is the suite's clock: a

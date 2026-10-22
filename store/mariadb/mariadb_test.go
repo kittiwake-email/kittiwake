@@ -6,26 +6,26 @@ import (
 	"testing"
 	"time"
 
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/identity/identitytest"
-	"dovetail/store/mariadb"
-	"dovetail/store/queue"
-	"dovetail/store/queue/queuetest"
-	"dovetail/store/session"
-	"dovetail/store/session/sessiontest"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/identity/identitytest"
+	"kittiwake/store/mariadb"
+	"kittiwake/store/queue"
+	"kittiwake/store/queue/queuetest"
+	"kittiwake/store/session"
+	"kittiwake/store/session/sessiontest"
 )
 
 // The MariaDB backend is tested against a real server:
 //
-//	DOVETAIL_TEST_DSN='dovetail:dovetail@tcp(127.0.0.1:3307)/dovetail' go test ./store/mariadb/
+//	KITTIWAKE_TEST_DSN='kittiwake:kittiwake@tcp(127.0.0.1:3307)/kittiwake' go test ./store/mariadb/
 //
 // Every table is truncated before each conformance test.
 func open(t *testing.T) *mariadb.DB {
 	t.Helper()
-	dsn := os.Getenv("DOVETAIL_TEST_DSN")
+	dsn := os.Getenv("KITTIWAKE_TEST_DSN")
 	if dsn == "" {
-		t.Skip("DOVETAIL_TEST_DSN not set")
+		t.Skip("KITTIWAKE_TEST_DSN not set")
 	}
 	db, err := mariadb.Open(dsn)
 	if err != nil {

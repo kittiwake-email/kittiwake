@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: Dovetail REST API
+  title: Kittiwake REST API
   version: "1"
   description: |
-    The custom REST surface of Dovetail: OAuth 2.0 token endpoints, self-service
+    The custom REST surface of Kittiwake: OAuth 2.0 token endpoints, self-service
     credential management and the admin API. The mailbox API itself is JMAP
     (see RFC 8620/8621) and is not described here.
 
@@ -70,7 +70,7 @@ paths:
         "400":
           description: |
             OAuth error. `error` is one of `invalid_request`, `invalid_grant`,
-            `invalid_scope`, `unsupported_grant_type` or the Dovetail extension
+            `invalid_scope`, `unsupported_grant_type` or the Kittiwake extension
             `totp_required` (resend with `totp_code`).
           content:
             application/json:
@@ -897,7 +897,7 @@ components:
     bearer:
       type: http
       scheme: bearer
-      description: Session access token (JWT) or long-lived API token (dvt_...)
+      description: Session access token (JWT) or long-lived API token (kwt_...)
     basic:
       type: http
       scheme: basic

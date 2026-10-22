@@ -1,4 +1,4 @@
-// Package metrics defines Dovetail's Prometheus metrics in one place.
+// Package metrics defines Kittiwake's Prometheus metrics in one place.
 package metrics
 
 import (
@@ -11,31 +11,31 @@ import (
 var (
 	// Deliveries counts LMTP/import deliveries by result.
 	Deliveries = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "dovetail", Subsystem: "delivery", Name: "messages_total", Help: "Messages delivered or refused, by result.",
+		Namespace: "kittiwake", Subsystem: "delivery", Name: "messages_total", Help: "Messages delivered or refused, by result.",
 	}, []string{"result"})
 	// DeliveryBytes counts bytes of delivered messages.
 	DeliveryBytes = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "dovetail", Subsystem: "delivery", Name: "bytes_total", Help: "Bytes of delivered messages.",
+		Namespace: "kittiwake", Subsystem: "delivery", Name: "bytes_total", Help: "Bytes of delivered messages.",
 	})
 	// Auth counts authentication attempts by protocol and result.
 	Auth = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "dovetail", Subsystem: "auth", Name: "attempts_total", Help: "Authentication attempts by protocol and result.",
+		Namespace: "kittiwake", Subsystem: "auth", Name: "attempts_total", Help: "Authentication attempts by protocol and result.",
 	}, []string{"protocol", "result"})
 	// Connections tracks open protocol connections.
 	Connections = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "dovetail", Name: "connections", Help: "Open connections by protocol.",
+		Namespace: "kittiwake", Name: "connections", Help: "Open connections by protocol.",
 	}, []string{"protocol"})
 	// HTTPRequests counts API requests by handler and status class.
 	HTTPRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "dovetail", Subsystem: "http", Name: "requests_total", Help: "HTTP requests by handler and status.",
+		Namespace: "kittiwake", Subsystem: "http", Name: "requests_total", Help: "HTTP requests by handler and status.",
 	}, []string{"handler", "status"})
 	// RadosOps counts RADOS operations by op and result.
 	RadosOps = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "dovetail", Subsystem: "rados", Name: "ops_total", Help: "RADOS operations by op and result.",
+		Namespace: "kittiwake", Subsystem: "rados", Name: "ops_total", Help: "RADOS operations by op and result.",
 	}, []string{"op", "result"})
 	// Tasks counts worker task outcomes by type.
 	Tasks = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "dovetail", Subsystem: "worker", Name: "tasks_total", Help: "Worker tasks by type and result.",
+		Namespace: "kittiwake", Subsystem: "worker", Name: "tasks_total", Help: "Worker tasks by type and result.",
 	}, []string{"type", "result"})
 )
 

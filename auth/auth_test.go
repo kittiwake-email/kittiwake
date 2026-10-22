@@ -206,8 +206,8 @@ func TestTOTPSkewAndFormat(t *testing.T) {
 	if ok, _ := VerifyTOTP(strings.ToLower(secret[:8])+" "+secret[8:], cur, now, p, 0); !ok {
 		t.Fatal("normalised secret")
 	}
-	uri := TOTPProvisioningURI("Dovetail Mail", "wido@example.org", secret, p)
-	if !strings.HasPrefix(uri, "otpauth://totp/Dovetail%20Mail:wido@example.org?") || !strings.Contains(uri, "secret="+secret) || !strings.Contains(uri, "issuer=Dovetail+Mail") {
+	uri := TOTPProvisioningURI("Kittiwake Mail", "wido@example.org", secret, p)
+	if !strings.HasPrefix(uri, "otpauth://totp/Kittiwake%20Mail:wido@example.org?") || !strings.Contains(uri, "secret="+secret) || !strings.Contains(uri, "issuer=Kittiwake+Mail") {
 		t.Fatalf("uri %s", uri)
 	}
 }
@@ -254,7 +254,7 @@ func TestJWTRoundTrip(t *testing.T) {
 
 	c := Claims{
 		AccountID: uuid.New(), MailboxID: uuid.New(), Username: "wido@example.org",
-		Roles: []string{"read", "write"}, SessionID: "sess1", Issuer: "dovetail",
+		Roles: []string{"read", "write"}, SessionID: "sess1", Issuer: "kittiwake",
 		IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute),
 	}
 	tok, err := SignAccessToken(key, c)
@@ -267,7 +267,7 @@ func TestJWTRoundTrip(t *testing.T) {
 		}
 		return nil, false
 	}
-	got, err := VerifyAccessToken(tok, keyFor, "dovetail", now.Add(time.Minute))
+	got, err := VerifyAccessToken(tok, keyFor, "kittiwake", now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,13 +284,13 @@ func TestJWTRoundTrip(t *testing.T) {
 	if strings.Contains(string(pb), "mbx") {
 		t.Fatal("mbx should be omitted")
 	}
-	g2, err := VerifyAccessToken(atok, keyFor, "dovetail", now)
+	g2, err := VerifyAccessToken(atok, keyFor, "kittiwake", now)
 	if err != nil || g2.MailboxID != uuid.Nil {
 		t.Fatal(err)
 	}
 
 	// Expired.
-	if _, err := VerifyAccessToken(tok, keyFor, "dovetail", c.ExpiresAt); !errors.Is(err, ErrTokenExpired) {
+	if _, err := VerifyAccessToken(tok, keyFor, "kittiwake", c.ExpiresAt); !errors.Is(err, ErrTokenExpired) {
 		t.Fatalf("expiry: %v", err)
 	}
 	// Issuer mismatch.
@@ -330,7 +330,7 @@ func TestJWTRoundTrip(t *testing.T) {
 
 func TestRefreshToken(t *testing.T) {
 	plain, hash, err := NewRefreshToken()
-	if err != nil || !strings.HasPrefix(plain, "dvr_") || len(hash) != 64 {
+	if err != nil || !strings.HasPrefix(plain, "kwr_") || len(hash) != 64 {
 		t.Fatal(plain, hash, err)
 	}
 	if HashRefreshToken(plain) != hash {

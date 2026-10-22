@@ -14,7 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
+	"kittiwake/rados"
 )
 
 // Sentinel errors.

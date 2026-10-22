@@ -22,19 +22,19 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/api"
-	"dovetail/proto/httpx"
-	"dovetail/service/actor"
-	"dovetail/service/admin"
-	"dovetail/service/auth"
-	"dovetail/service/export"
-	"dovetail/service/submit"
-	"dovetail/store/audit"
-	"dovetail/store/cluster"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/queue"
-	"dovetail/store/session"
+	"kittiwake/api"
+	"kittiwake/proto/httpx"
+	"kittiwake/service/actor"
+	"kittiwake/service/admin"
+	"kittiwake/service/auth"
+	"kittiwake/service/export"
+	"kittiwake/service/submit"
+	"kittiwake/store/audit"
+	"kittiwake/store/cluster"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/queue"
+	"kittiwake/store/session"
 )
 
 // Version reported by /v1/admin/status.
@@ -71,7 +71,7 @@ type Server struct {
 // New returns a server.
 func New(cfg Config, authSvc *auth.Service, adminSvc *admin.Service, auditStore *audit.Store, queueStore queue.Store, log *slog.Logger) *Server {
 	if cfg.Realm == "" {
-		cfg.Realm = "dovetail"
+		cfg.Realm = "kittiwake"
 	}
 	if cfg.MaxBody <= 0 {
 		cfg.MaxBody = 4 << 20
@@ -283,7 +283,7 @@ func (s *Server) openAPI(w http.ResponseWriter, r *http.Request) {
 // root identifies the listener.
 func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "dovetail %s admin API\nspec: /openapi.yaml\n", Version)
+	_, _ = fmt.Fprintf(w, "kittiwake %s admin API\nspec: /openapi.yaml\n", Version)
 }
 
 // Handler combines both handlers on one mux (tests and single-listener

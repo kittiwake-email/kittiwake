@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"dovetail/proto/httpx"
-	"dovetail/service/actor"
-	"dovetail/service/export"
-	"dovetail/worker"
+	"kittiwake/proto/httpx"
+	"kittiwake/service/actor"
+	"kittiwake/service/export"
+	"kittiwake/worker"
 )
 
 // exportNameRe matches archive names the worker produces.

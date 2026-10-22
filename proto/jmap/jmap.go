@@ -15,11 +15,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/service/actor"
-	"dovetail/service/delivery"
-	"dovetail/service/mailbox"
-	"dovetail/service/submit"
-	"dovetail/store/cluster"
+	"kittiwake/service/actor"
+	"kittiwake/service/delivery"
+	"kittiwake/service/mailbox"
+	"kittiwake/service/submit"
+	"kittiwake/store/cluster"
 )
 
 // Capability URNs.

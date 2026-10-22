@@ -4,7 +4,7 @@
 // identity.Backend, session.Store and queue.Store on one connection pool.
 //
 // Schema migrations are numbered SQL files embedded in the binary and
-// applied by Migrate (the `dovetail migrate` command), under a server-side
+// applied by Migrate (the `kittiwake migrate` command), under a server-side
 // lock. MariaDB commits every DDL statement on its own, so each statement
 // is written to be idempotent and a migration that failed half-way is
 // simply re-run; the version row is written after the file succeeded.
@@ -25,7 +25,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 
-	"dovetail/store/identity"
+	"kittiwake/store/identity"
 )
 
 //go:embed migrations/*.sql
@@ -41,7 +41,7 @@ type DB struct {
 }
 
 // Open connects to the DSN (go-sql-driver/mysql format, e.g.
-// "dovetail:secret@tcp(db.example:3306)/dovetail"). Times are always
+// "kittiwake:secret@tcp(db.example:3306)/kittiwake"). Times are always
 // exchanged in UTC with microsecond precision whatever the DSN says.
 func Open(dsn string) (*DB, error) {
 	cfg, err := mysql.ParseDSN(dsn)
@@ -158,13 +158,13 @@ func (d *DB) Migrate(ctx context.Context) (int, error) {
 	}
 	defer conn.Close()
 	var got sql.NullInt64
-	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK('dovetail_migrate', 60)").Scan(&got); err != nil {
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK('kittiwake_migrate', 60)").Scan(&got); err != nil {
 		return 0, err
 	}
 	if !got.Valid || got.Int64 != 1 {
 		return 0, errors.New("mariadb: another migration is running")
 	}
-	defer func() { _, _ = conn.ExecContext(ctx, "SELECT RELEASE_LOCK('dovetail_migrate')") }()
+	defer func() { _, _ = conn.ExecContext(ctx, "SELECT RELEASE_LOCK('kittiwake_migrate')") }()
 
 	cur, err := d.SchemaVersion(ctx)
 	if err != nil {

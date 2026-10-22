@@ -1,4 +1,4 @@
-// Package auth holds Dovetail's credential primitives: Dovecot-style
+// Package auth holds Kittiwake's credential primitives: Dovecot-style
 // scheme-prefixed password hashes, TOTP, recovery codes, Ed25519-signed JWT
 // access tokens and opaque refresh tokens. It does no I/O and keeps no state.
 package auth

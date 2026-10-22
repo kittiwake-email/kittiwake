@@ -2,8 +2,8 @@ package imap
 
 import (
 	"context"
-	"dovetail/mail"
 	"io"
+	"kittiwake/mail"
 	"log/slog"
 	"net"
 	"strings"
@@ -16,19 +16,19 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/google/uuid"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/rados"
-	"dovetail/service/auditor"
-	authsvc "dovetail/service/auth"
-	"dovetail/service/delivery"
-	"dovetail/service/mailbox"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
-	sessstore "dovetail/store/session"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/rados"
+	"kittiwake/service/auditor"
+	authsvc "kittiwake/service/auth"
+	"kittiwake/service/delivery"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
+	sessstore "kittiwake/store/session"
 )
 
 type fixture struct {
@@ -497,7 +497,7 @@ func TestLegalHold(t *testing.T) {
 	}
 }
 
-// rendered returns what Dovetail serves for a raw message: the document
+// rendered returns what Kittiwake serves for a raw message: the document
 // rendered back to RFC 5322 (the original bytes are not kept).
 func rendered(t *testing.T, raw string) string {
 	t.Helper()

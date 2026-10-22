@@ -4,9 +4,9 @@ import (
 	"net"
 	"net/http"
 
-	"dovetail/app"
-	"dovetail/proto/httpx"
-	"dovetail/proto/rest"
+	"kittiwake/app"
+	"kittiwake/proto/httpx"
+	"kittiwake/proto/rest"
 )
 
 // restServer builds the REST adapter shared by the jmap and admin modes
@@ -18,7 +18,7 @@ func restServer(a *app.App) (*rest.Server, []net.IPNet) {
 	}
 	rest.Version = app.Version
 	srv := rest.New(rest.Config{
-		Realm: "dovetail", TrustedProxies: trusted, DefaultQuota: a.DefaultQuota(),
+		Realm: "kittiwake", TrustedProxies: trusted, DefaultQuota: a.DefaultQuota(),
 		MaxBody: 1 << 20, Identity: a.Stores.Identity,
 		Export: a.Services.Export, ExportDir: a.Cfg.Export.Directory, Submit: a.Services.Submit,
 	}, a.Services.Auth, a.Services.Admin, a.Stores.Audit, a.Stores.Queue, a.Log)
@@ -34,7 +34,7 @@ func buildJMAP(a *app.App) http.Handler {
 	mountJMAP(a, mux, trusted)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			_, _ = w.Write([]byte("dovetail " + app.Version + " (jmap)\n"))
+			_, _ = w.Write([]byte("kittiwake " + app.Version + " (jmap)\n"))
 			return
 		}
 		http.NotFound(w, r)

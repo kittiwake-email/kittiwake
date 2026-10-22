@@ -10,9 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/rados"
-	"dovetail/store/cluster"
-	"dovetail/store/identity"
+	"kittiwake/rados"
+	"kittiwake/store/cluster"
+	"kittiwake/store/identity"
 )
 
 // Two fake clusters behind a connector keyed by mon_host.

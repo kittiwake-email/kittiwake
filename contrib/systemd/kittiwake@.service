@@ -1,0 +1,37 @@
+# Kittiwake service template: one instance per mode.
+#   systemctl enable --now kittiwake@lmtp kittiwake@imap kittiwake@pop3 kittiwake@jmap \
+#                          kittiwake@admin kittiwake@postfix kittiwake@worker
+# All instances share /etc/kittiwake/kittiwake.yaml; the instance name selects
+# the mode (--modes %i). Per-instance extras (notably a distinct management
+# port for metrics) come from /etc/kittiwake/instances/<mode>.env.
+[Unit]
+Description=Kittiwake mail platform (%i)
+Documentation=https://github.com/wido/kittiwake
+After=network-online.target
+Wants=network-online.target
+PartOf=kittiwake.target
+
+[Service]
+Type=simple
+User=kittiwake
+Group=kittiwake
+EnvironmentFile=-/etc/kittiwake/instances/%i.env
+ExecStart=/usr/local/bin/kittiwake serve -c /etc/kittiwake/kittiwake.yaml --modes %i $KITTIWAKE_ARGS
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=40s
+LimitNOFILE=65536
+# Ports below 1024 (LMTP 24, IMAP 143, POP3 110) without root:
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kittiwake
+StateDirectory=kittiwake
+RuntimeDirectory=kittiwake
+ReadOnlyPaths=/etc/ceph
+
+[Install]
+WantedBy=multi-user.target

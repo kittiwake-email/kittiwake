@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"dovetail/client/admin"
+	"kittiwake/client/admin"
 )
 
 // ---- domain ----
@@ -18,7 +18,7 @@ import (
 func (a *cli) domain(args []string) error {
 	const u = "domain create <name> [--disabled] | list | get <name> | enable <name> | disable <name> | delete <name>"
 	if len(args) == 0 || args[0] == "help" {
-		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
 	}
 	switch args[0] {
@@ -79,7 +79,7 @@ func (a *cli) domain(args []string) error {
 			return emit(d, nil)
 		}
 	}
-	return fmt.Errorf("unknown domain subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown domain subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 // ---- mailbox ----
@@ -123,7 +123,7 @@ func (a *cli) mailbox(args []string) error {
        mailbox export <uuid> [--no-gzip] | exports [--mailbox uuid] | download <name> [--out file]
        mailbox import <uuid> --archive file.tar[.gz] | --dir /path/to/Maildir`
 	if len(args) == 0 || args[0] == "help" {
-		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
 	}
 	switch args[0] {
@@ -342,7 +342,7 @@ func (a *cli) mailbox(args []string) error {
 			return err
 		}
 		return emit(s, func() {
-			fmt.Printf("export scheduled, task %s; poll: dovetail-admin mailbox exports --mailbox %s\n", s.TaskID, id)
+			fmt.Printf("export scheduled, task %s; poll: kittiwake-admin mailbox exports --mailbox %s\n", s.TaskID, id)
 		})
 	case "import":
 		fs := newFlagSet("mailbox import")
@@ -382,7 +382,7 @@ func (a *cli) mailbox(args []string) error {
 			}
 		})
 	}
-	return fmt.Errorf("unknown mailbox subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown mailbox subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 // ---- account ----
@@ -397,7 +397,7 @@ func (a *cli) account(args []string) error {
        account token create <id> --expires YYYY-MM-DD|RFC3339 --comment text [--roles r,..]
        account tokens <id> | token delete <id> <token-id>`
 	if len(args) == 0 || args[0] == "help" {
-		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
 	}
 	switch args[0] {
@@ -613,7 +613,7 @@ func (a *cli) account(args []string) error {
 			table([]string{"TOKEN", "COMMENT", "ROLES", "EXPIRES", "LAST USED"}, rows)
 		})
 	}
-	return fmt.Errorf("unknown account subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown account subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 func (a *cli) accountToken(args []string, u string) error {
@@ -680,7 +680,7 @@ func (a *cli) alias(args []string) error {
        alias list --domain d | get <address> | delete <address>
        alias set <address> [--to ...] [--enable|--disable]`
 	if len(args) == 0 || args[0] == "help" {
-		fmt.Fprintln(os.Stderr, "usage: dovetail-admin "+u)
+		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
 	}
 	if args[0] == "list" {
@@ -762,7 +762,7 @@ func (a *cli) alias(args []string) error {
 		}
 		return ok("deleted " + addr)
 	}
-	return fmt.Errorf("unknown alias subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown alias subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 // ---- audit ----
@@ -833,7 +833,7 @@ func (a *cli) audit(args []string) error {
 func (a *cli) queue(args []string) error {
 	const u = "queue stats <type> | dead <type> | retry <type> <task-id>"
 	if len(args) < 2 || args[0] == "help" {
-		return errors.New("usage: dovetail-admin " + u)
+		return errors.New("usage: kittiwake-admin " + u)
 	}
 	typ := args[1]
 	switch args[0] {
@@ -860,14 +860,14 @@ func (a *cli) queue(args []string) error {
 		})
 	case "retry":
 		if len(args) != 3 {
-			return errors.New("usage: dovetail-admin " + u)
+			return errors.New("usage: kittiwake-admin " + u)
 		}
 		if err := a.c.QueueRetry(a.ctx, typ, args[2]); err != nil {
 			return err
 		}
 		return ok("requeued " + args[2])
 	}
-	return fmt.Errorf("unknown queue subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown queue subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 // token manages admin tokens (admins are tokens, not accounts).
@@ -876,7 +876,7 @@ func (a *cli) token(args []string) error {
        token list
        token delete <token-id>`
 	if len(args) == 0 || args[0] == "help" {
-		fmt.Println("usage: dovetail-admin " + u)
+		fmt.Println("usage: kittiwake-admin " + u)
 		return nil
 	}
 	switch args[0] {
@@ -918,14 +918,14 @@ func (a *cli) token(args []string) error {
 		})
 	case "delete":
 		if len(args) != 2 {
-			return errors.New("usage: dovetail-admin token delete <token-id>")
+			return errors.New("usage: kittiwake-admin token delete <token-id>")
 		}
 		if err := a.c.DeleteAdminToken(a.ctx, args[1]); err != nil {
 			return err
 		}
 		return ok("revoked " + args[1])
 	}
-	return fmt.Errorf("unknown token subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown token subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 func (a *cli) cluster(args []string) error {
@@ -935,7 +935,7 @@ func (a *cli) cluster(args []string) error {
        cluster enable <id> | disable <id>      placement of new mailboxes (existing ones keep working)
        cluster remove <id>                     only when no mailbox refers to it`
 	if len(args) == 0 || args[0] == "help" {
-		fmt.Println("usage: dovetail-admin " + u)
+		fmt.Println("usage: kittiwake-admin " + u)
 		return nil
 	}
 	clusterFlags := func(fs *flag.FlagSet) (name, mon, user, pools *string, keyStdin *bool, keyring *string) {
@@ -1016,7 +1016,7 @@ func (a *cli) cluster(args []string) error {
 		})
 	case "get", "set", "enable", "disable", "remove":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dovetail-admin cluster %s <id>", args[0])
+			return fmt.Errorf("usage: kittiwake-admin cluster %s <id>", args[0])
 		}
 		id, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
@@ -1064,7 +1064,7 @@ func (a *cli) cluster(args []string) error {
 			return ok(fmt.Sprintf("removed cluster %d", id))
 		}
 	}
-	return fmt.Errorf("unknown cluster subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown cluster subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 // keyFromKeyring extracts the first "key = ..." of a Ceph keyring file.
@@ -1084,7 +1084,7 @@ func keyFromKeyring(path string) (string, error) {
 
 func (a *cli) keys(args []string) error {
 	if len(args) != 1 || args[0] != "rotate" {
-		return errors.New("usage: dovetail-admin keys rotate")
+		return errors.New("usage: kittiwake-admin keys rotate")
 	}
 	if err := a.c.RotateKeys(a.ctx); err != nil {
 		return err
@@ -1095,7 +1095,7 @@ func (a *cli) keys(args []string) error {
 func (a *cli) identity(args []string) error {
 	const u = "identity export [--out file] | import <file>"
 	if len(args) == 0 || args[0] == "help" {
-		return errors.New("usage: dovetail-admin " + u)
+		return errors.New("usage: kittiwake-admin " + u)
 	}
 	switch args[0] {
 	case "export":
@@ -1118,7 +1118,7 @@ func (a *cli) identity(args []string) error {
 		return ok("wrote " + *out)
 	case "import":
 		if len(args) != 2 {
-			return errors.New("usage: dovetail-admin " + u)
+			return errors.New("usage: kittiwake-admin " + u)
 		}
 		data, err := os.ReadFile(args[1])
 		if err != nil {
@@ -1130,7 +1130,7 @@ func (a *cli) identity(args []string) error {
 		}
 		return emit(map[string]string{"summary": summary}, func() { fmt.Println(summary) })
 	}
-	return fmt.Errorf("unknown identity subcommand %q\nusage: dovetail-admin %s", args[0], u)
+	return fmt.Errorf("unknown identity subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 func (a *cli) openapi(args []string) error {

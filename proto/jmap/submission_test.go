@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"dovetail/service/actor"
-	"dovetail/service/submit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
+	"kittiwake/service/actor"
+	"kittiwake/service/submit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
 )
 
 type fakeRelay struct {

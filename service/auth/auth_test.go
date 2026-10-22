@@ -10,12 +10,12 @@ import (
 
 	"github.com/google/uuid"
 
-	cryptoauth "dovetail/auth"
-	"dovetail/rados"
-	"dovetail/service/auditor"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/session"
+	cryptoauth "kittiwake/auth"
+	"kittiwake/rados"
+	"kittiwake/service/auditor"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/session"
 )
 
 type fixture struct {
@@ -113,7 +113,7 @@ func TestLoginRefreshRevoke(t *testing.T) {
 	if _, err := f.svc.Refresh(ctx, toks2.RefreshToken, "", ""); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("after revoke: %v", err)
 	}
-	if _, err := f.svc.Refresh(ctx, "dvr1.bad", "", ""); !errors.Is(err, ErrInvalidToken) {
+	if _, err := f.svc.Refresh(ctx, "kwr1.bad", "", ""); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("malformed: %v", err)
 	}
 	// Sessions list, revoke by id.
@@ -228,7 +228,7 @@ func TestAPITokens(t *testing.T) {
 	if err != nil || a.TokenID != tok.ID || a.TokenNote != "ci" || a.Credential != "token" || !a.HasRole("read") || a.HasRole("write") {
 		t.Fatalf("token actor: %+v %v", a, err)
 	}
-	if _, err := f.svc.VerifyBearer(ctx, "dvt_unknown"); !errors.Is(err, ErrInvalidToken) {
+	if _, err := f.svc.VerifyBearer(ctx, "kwt_unknown"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("unknown token: %v", err)
 	}
 	// Roles narrowed on the account later -> token invalid.

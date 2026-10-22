@@ -12,10 +12,10 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/google/uuid"
 
-	"dovetail/metrics"
-	"dovetail/service/actor"
-	authsvc "dovetail/service/auth"
-	"dovetail/store/index"
+	"kittiwake/metrics"
+	"kittiwake/service/actor"
+	authsvc "kittiwake/service/auth"
+	"kittiwake/store/index"
 )
 
 const delim = '/'

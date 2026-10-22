@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/store/session"
+	"kittiwake/store/session"
 )
 
 // Factory returns a fresh, empty store.
@@ -29,7 +29,7 @@ func testSessionsLifecycle(t *testing.T, f Factory) {
 	acct := uuid.New()
 
 	sess, plain, err := s.Create(ctx, acct, []string{"read"}, "phone", "::1", time.Hour)
-	if err != nil || plain[:4] != "dvr_" {
+	if err != nil || plain[:4] != "kwr_" {
 		t.Fatal(err)
 	}
 	got, err := s.Get(ctx, acct, sess.ID)
@@ -37,7 +37,7 @@ func testSessionsLifecycle(t *testing.T, f Factory) {
 		t.Fatal(err)
 	}
 	// Wrong token.
-	if _, _, err := s.Refresh(ctx, acct, sess.ID, "dvr_wrong", "::1", time.Hour); !errors.Is(err, session.ErrNotFound) {
+	if _, _, err := s.Refresh(ctx, acct, sess.ID, "kwr_wrong", "::1", time.Hour); !errors.Is(err, session.ErrNotFound) {
 		t.Fatalf("wrong token: %v", err)
 	}
 	// Rotate.

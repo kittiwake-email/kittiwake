@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# End-to-end test of a built dovetail binary against a real backend:
+# End-to-end test of a built kittiwake binary against a real backend:
 # bootstrap an admin, create domain/mailbox/account through the admin API,
 # deliver over LMTP, read through JMAP, IMAP and POP3, export the mailbox.
 #
 #   scripts/e2e.sh [config]      (default examples/lab.yaml)
-#   E2E_ATTACH=1 scripts/e2e.sh /etc/dovetail/dovetail.yaml
+#   E2E_ATTACH=1 scripts/e2e.sh /etc/kittiwake/kittiwake.yaml
 #       does not start a daemon but tests the already running services
 #       (e.g. the systemd instances), which also proves that separate
 #       processes see each other's writes through RADOS.
 #
-# Requires: bin/dovetail (make build), python3, curl. Leaves the created
+# Requires: bin/kittiwake (make build), python3, curl. Leaves the created
 # test domain in place (e2e-<timestamp>.example) so runs do not collide;
 # delete it with the admin API when done.
 set -euo pipefail
 CFG=${1:-examples/lab.yaml}
-BIN=${BIN:-bin/dovetail}
+BIN=${BIN:-bin/kittiwake}
 STAMP=$(date +%s)
 DOMAIN="e2e-$STAMP.example"
 USER="user@$DOMAIN"
 PASS="e2e-password-$STAMP"
-LOG=$(mktemp -t dovetail-e2e.XXXXXX.log)
+LOG=$(mktemp -t kittiwake-e2e.XXXXXX.log)
 LMTP=$(python3 -c "import yaml,sys;print(yaml.safe_load(open('$CFG'))['listen']['lmtp']['address'])" 2>/dev/null || echo "[::1]:2424")
 JMAP=$(python3 -c "import yaml;print(yaml.safe_load(open('$CFG'))['listen']['jmap']['address'])" 2>/dev/null || echo "[::1]:8080")
 ADMIN=$(python3 -c "import yaml;print(yaml.safe_load(open('$CFG'))['listen']['admin']['address'])" 2>/dev/null || echo "[::1]:8081")

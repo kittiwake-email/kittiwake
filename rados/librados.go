@@ -17,7 +17,7 @@ type Config struct {
 	ConfigFile string
 	// Monitors is the mon_host value, e.g. "[2001:db8::1]:6789,[2001:db8::2]:6789".
 	Monitors string
-	// User is the CephX user without the "client." prefix, e.g. "dovetail".
+	// User is the CephX user without the "client." prefix, e.g. "kittiwake".
 	User string
 	// Key is the CephX secret key (base64). Alternatively use Keyring.
 	Key string
@@ -390,7 +390,7 @@ func (io *libradosIOContext) Lock(ctx context.Context, oid, name, cookie string,
 	defer io.release(h)
 	// LIBRADOS_LOCK_FLAG_RENEW lets the same cookie re-lock.
 	flags := byte(1)
-	ret, err := h.LockExclusive(oid, name, cookie, "dovetail", duration, &flags)
+	ret, err := h.LockExclusive(oid, name, cookie, "kittiwake", duration, &flags)
 	if err != nil {
 		return mapErr(err)
 	}

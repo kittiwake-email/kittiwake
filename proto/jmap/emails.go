@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
-	dmail "dovetail/mail"
-	"dovetail/service/actor"
-	"dovetail/service/mailbox"
-	"dovetail/store/index"
+	dmail "kittiwake/mail"
+	"kittiwake/service/actor"
+	"kittiwake/service/mailbox"
+	"kittiwake/store/index"
 )
 
 // keyword <-> IMAP flag mapping.

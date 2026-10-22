@@ -13,15 +13,15 @@ import (
 // TestLibradosConformance runs the conformance suite against a real Ceph
 // cluster. Configure with:
 //
-//	DOVETAIL_TEST_CEPH_CONF  (default /etc/ceph/ceph.conf)
-//	DOVETAIL_TEST_CEPH_USER  (default dovetail)
-//	DOVETAIL_TEST_CEPH_POOL  (default dovetail.index)
+//	KITTIWAKE_TEST_CEPH_CONF  (default /etc/ceph/ceph.conf)
+//	KITTIWAKE_TEST_CEPH_USER  (default kittiwake)
+//	KITTIWAKE_TEST_CEPH_POOL  (default kittiwake.index)
 //
 // Every subtest uses its own RADOS namespace and removes its objects.
 func TestLibradosConformance(t *testing.T) {
-	conf := envOr("DOVETAIL_TEST_CEPH_CONF", "/etc/ceph/ceph.conf")
-	user := envOr("DOVETAIL_TEST_CEPH_USER", "dovetail")
-	pool := envOr("DOVETAIL_TEST_CEPH_POOL", "dovetail.index")
+	conf := envOr("KITTIWAKE_TEST_CEPH_CONF", "/etc/ceph/ceph.conf")
+	user := envOr("KITTIWAKE_TEST_CEPH_USER", "kittiwake")
+	pool := envOr("KITTIWAKE_TEST_CEPH_POOL", "kittiwake.index")
 	client, err := Connect(Config{ConfigFile: conf, User: user})
 	if err != nil {
 		t.Fatalf("connect: %v", err)

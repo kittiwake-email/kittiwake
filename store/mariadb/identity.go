@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"dovetail/store/identity"
+	"kittiwake/store/identity"
 )
 
 // querier is *sql.DB or *sql.Tx.

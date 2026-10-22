@@ -8,15 +8,15 @@ import (
 	"net"
 	"testing"
 
-	"dovetail/rados"
-	"dovetail/service/auditor"
-	"dovetail/service/delivery"
-	"dovetail/store/attach"
-	"dovetail/store/audit"
-	"dovetail/store/identity"
-	"dovetail/store/index"
-	"dovetail/store/message"
-	"dovetail/store/queue"
+	"kittiwake/rados"
+	"kittiwake/service/auditor"
+	"kittiwake/service/delivery"
+	"kittiwake/store/attach"
+	"kittiwake/store/audit"
+	"kittiwake/store/identity"
+	"kittiwake/store/index"
+	"kittiwake/store/message"
+	"kittiwake/store/queue"
 )
 
 func newServer(t *testing.T) (*Server, identity.Mailbox) {

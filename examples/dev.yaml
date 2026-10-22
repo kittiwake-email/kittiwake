@@ -1,6 +1,6 @@
 # Development config: everything in one process on the in-memory backend.
 # Data is lost when the process exits. Start with:
-#   dovetail serve -c examples/dev.yaml --seed-account wido@example.org:devpassword
+#   kittiwake serve -c examples/dev.yaml --seed-account wido@example.org:devpassword
 modes: [lmtp, jmap, admin, postfix, imap, pop3, worker]
 ceph:
   backend: memory

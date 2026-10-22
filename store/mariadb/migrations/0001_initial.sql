@@ -1,4 +1,4 @@
--- Dovetail metadata schema, version 1. Every statement is idempotent so a
+-- Kittiwake metadata schema, version 1. Every statement is idempotent so a
 -- migration that failed half-way can simply be re-run (MariaDB commits
 -- each DDL statement by itself). Internal keys are integers; the UUIDs the
 -- API shows are unique BINARY(16) columns.

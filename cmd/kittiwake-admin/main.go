@@ -1,12 +1,12 @@
-// Command dovetail-admin administers a Dovetail platform through its admin
-// API. This is where operators work; the local `dovetail admin` command
+// Command kittiwake-admin administers a Kittiwake platform through its admin
+// API. This is where operators work; the local `kittiwake admin` command
 // only bootstraps the first admin token.
 //
-//	dovetail-admin [-u URL] [-t TOKEN] [-o plain|json] <command> [subcommand] [flags] [args]
+//	kittiwake-admin [-u URL] [-t TOKEN] [-o plain|json] <command> [subcommand] [flags] [args]
 //
 // Connection settings in order of precedence: flags, environment
-// (DOVETAIL_ADMIN_URL, DOVETAIL_ADMIN_TOKEN), config file
-// ~/.config/dovetail/admin.yaml (url:, token:).
+// (KITTIWAKE_ADMIN_URL, KITTIWAKE_ADMIN_TOKEN), config file
+// ~/.config/kittiwake/admin.yaml (url:, token:).
 package main
 
 import (
@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"dovetail/client/admin"
+	"kittiwake/client/admin"
 )
 
 // Version is set at build time.
@@ -46,14 +46,14 @@ func firstNonEmpty(a, b string) string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: dovetail-admin [flags] <command> [subcommand] [args]
+	fmt.Fprintln(os.Stderr, `usage: kittiwake-admin [flags] <command> [subcommand] [args]
 
 flags:
-  -u, --url URL        admin API base URL (env DOVETAIL_ADMIN_URL; default http://[::1]:8081)
-  -t, --token TOKEN    admin API token (env DOVETAIL_ADMIN_TOKEN)
+  -u, --url URL        admin API base URL (env KITTIWAKE_ADMIN_URL; default http://[::1]:8081)
+  -t, --token TOKEN    admin API token (env KITTIWAKE_ADMIN_TOKEN)
   -o, --output FORMAT  plain (default) or json
   -v, --version        print the version
-  config file: ~/.config/dovetail/admin.yaml with "url:" and "token:" (env DOVETAIL_ADMIN_CONFIG overrides the path)
+  config file: ~/.config/kittiwake/admin.yaml with "url:" and "token:" (env KITTIWAKE_ADMIN_CONFIG overrides the path)
 
 commands:
   status                              version and time of the admin API
@@ -69,7 +69,7 @@ commands:
   identity  export|import
   openapi   fetch the OpenAPI spec
   version
-Run "dovetail-admin <command> help" for the subcommands and their flags.`)
+Run "kittiwake-admin <command> help" for the subcommands and their flags.`)
 }
 
 type cli struct {
@@ -78,7 +78,7 @@ type cli struct {
 }
 
 func run(args []string) error {
-	fs := flag.NewFlagSet("dovetail-admin", flag.ContinueOnError)
+	fs := flag.NewFlagSet("kittiwake-admin", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var url, token string
 	fs.StringVar(&url, "url", "", "")
@@ -97,7 +97,7 @@ func run(args []string) error {
 	}
 	rest := fs.Args()
 	if *ver || (len(rest) > 0 && rest[0] == "version") {
-		return emit(map[string]string{"version": Version}, func() { fmt.Println("dovetail-admin", Version) })
+		return emit(map[string]string{"version": Version}, func() { fmt.Println("kittiwake-admin", Version) })
 	}
 	if len(rest) == 0 || rest[0] == "help" || rest[0] == "-h" || rest[0] == "--help" {
 		usage()
@@ -108,11 +108,11 @@ func run(args []string) error {
 		return err
 	}
 	if s.Token == "" && rest[0] != "openapi" {
-		return errors.New("no admin token: use -t, DOVETAIL_ADMIN_TOKEN or ~/.config/dovetail/admin.yaml")
+		return errors.New("no admin token: use -t, KITTIWAKE_ADMIN_TOKEN or ~/.config/kittiwake/admin.yaml")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	app := &cli{c: admin.New(s.URL, s.Token, admin.WithUserAgent("dovetail-admin/"+Version)), ctx: ctx}
+	app := &cli{c: admin.New(s.URL, s.Token, admin.WithUserAgent("kittiwake-admin/"+Version)), ctx: ctx}
 	cmd, sub := rest[0], rest[1:]
 	switch cmd {
 	case "status":
