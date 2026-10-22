@@ -192,7 +192,7 @@ func (w *Worker) RunOnce(ctx context.Context) bool {
 	for _, typ := range AllTypes {
 		tasks, err := w.queue.Claim(ctx, typ, w.ID, 10, w.cfg.LeaseDuration)
 		if err != nil {
-			if !errors.Is(err, queue.ErrLocked) {
+			if !errors.Is(err, queue.ErrLocked) && ctx.Err() == nil {
 				w.log.Warn("claim failed", slog.String("type", typ), slog.String("error", err.Error()))
 			}
 			continue
