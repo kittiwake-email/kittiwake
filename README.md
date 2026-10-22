@@ -172,7 +172,10 @@ TLS is not handled by this daemon; a proxy like HAProxy does this.
 Because HAProxy sits in front, the daemon would only ever see the proxy's address. HAProxy
 forwards every connection with the PROXY protocol, so all listeners (IMAP, POP3, LMTP and the
 HTTP API) accept PROXY protocol v1 and v2 and take the real client address from it. PROXY
-protocol can be required per listener so a connection without the header is rejected. As an
+protocol can be required per listener so a connection without the header is rejected.
+"Optional" mode (header parsed if present) delays the banner of server-speaks-first protocols
+(IMAP, POP3, LMTP) by a short wait for every client that sends no header, so it is only for
+mixed setups; use "required" behind HAProxy and "off" for direct clients. As an
 optional fallback the HTTP listeners can trust `X-Forwarded-For` from configured proxy
 addresses. The real client IP is used in logs, audit records and failed-login records.
 

@@ -5,9 +5,11 @@ modes: [lmtp, jmap, admin, postfix, imap, pop3, worker]
 ceph:
   backend: memory
 listen:
-  lmtp:       {address: "127.0.0.1:2424", proxy_protocol: optional}
-  imap:       {address: "127.0.0.1:1143", proxy_protocol: optional}
-  pop3:       {address: "127.0.0.1:1110", proxy_protocol: optional}
+  # "optional" makes IMAP/POP3/LMTP wait briefly for a PROXY header before the banner;
+  # use "off" for direct clients, "required" behind HAProxy.
+  lmtp:       {address: "127.0.0.1:2424", proxy_protocol: off}
+  imap:       {address: "127.0.0.1:1143", proxy_protocol: off}
+  pop3:       {address: "127.0.0.1:1110", proxy_protocol: off}
   jmap:       {address: "127.0.0.1:8080", proxy_protocol: optional}
   admin:      {address: "127.0.0.1:8081", proxy_protocol: off}
   postfix:    {address: "127.0.0.1:2525", proxy_protocol: off}

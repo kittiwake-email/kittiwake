@@ -18,7 +18,9 @@ ceph:
 
 listen:
   # proxy_protocol: off | optional | required. HAProxy sends PROXY on every
-  # connection, so "required" is the production setting.
+  # connection, so "required" is the production setting. "optional" delays
+  # the IMAP/POP3/LMTP banner by up to 300 ms for clients that send no
+  # header; use it only for mixed setups.
   lmtp:       {address: "[::]:24",    proxy_protocol: required}
   imap:       {address: "[::]:143",   proxy_protocol: required}
   pop3:       {address: "[::]:110",   proxy_protocol: required}

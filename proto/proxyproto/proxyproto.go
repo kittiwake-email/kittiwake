@@ -22,7 +22,10 @@ type Mode int
 const (
 	// Off: header not expected; connections are passed through untouched.
 	Off Mode = iota
-	// Optional: parse the header if present, otherwise use the socket address.
+		// Optional: parse the header if present, otherwise use the socket
+	// address. Costs OptionalHeaderTimeout before the banner on
+	// server-speaks-first protocols; prefer Required behind a proxy and
+	// Off without one.
 	Optional
 	// Required: reject connections without a valid header.
 	Required
@@ -45,8 +48,14 @@ func ParseMode(s string) (Mode, error) {
 // no header was sent.
 var ErrNoHeader = errors.New("proxyproto: PROXY header required but absent")
 
-// HeaderTimeout bounds how long we wait for the header.
+// HeaderTimeout bounds how long we wait for the header in Required mode.
 var HeaderTimeout = 5 * time.Second
+
+// OptionalHeaderTimeout bounds the wait in Optional mode. It must be short:
+// server-speaks-first protocols (IMAP, POP3, LMTP) delay their banner by
+// this much for every client that sends no header. A proxy sends the
+// header immediately on connect, so a few hundred milliseconds is plenty.
+var OptionalHeaderTimeout = 300 * time.Millisecond
 
 var (
 	v1Prefix = []byte("PROXY ")
@@ -99,7 +108,11 @@ func NewConn(c net.Conn, mode Mode) (*Conn, error) {
 	if mode == Off {
 		return pc, nil
 	}
-	_ = c.SetReadDeadline(time.Now().Add(HeaderTimeout))
+	wait := HeaderTimeout
+	if mode == Optional {
+		wait = OptionalHeaderTimeout
+	}
+	_ = c.SetReadDeadline(time.Now().Add(wait))
 	defer c.SetReadDeadline(time.Time{})
 	peek, err := pc.r.Peek(12)
 	if err != nil && (mode == Required || len(peek) == 0) {
