@@ -51,6 +51,8 @@ func newFixture(t *testing.T) *fixture {
 	q := queue.New(idxp)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	aud := auditor.New(f.aud, log, nil)
+	aud.Now = now
+	f.aud.Now = now
 	f.svc = New(f.ids, f.idx, msgs, atts, q, aud, log, Config{TrashRetention: 24 * time.Hour})
 	f.svc.Now = now
 	f.del = delivery.New(f.ids, f.idx, msgs, atts, q, aud, log, delivery.Config{})
