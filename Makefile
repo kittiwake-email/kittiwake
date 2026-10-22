@@ -19,9 +19,12 @@ test-race:
 #   sudo docker run -d --name kittiwake-mariadb -e MARIADB_ROOT_PASSWORD=root \
 #     -e MARIADB_DATABASE=kittiwake -e MARIADB_USER=kittiwake -e MARIADB_PASSWORD=kittiwake \
 #     -p 127.0.0.1:3307:3306 mariadb:11.4
+# KITTIWAKE_TEST_READ_DSN points the read/write split test at a real replica
+# (a second container replicating from the first, port 3308 locally).
 KITTIWAKE_TEST_DSN ?= kittiwake:kittiwake@tcp(127.0.0.1:3307)/kittiwake
+KITTIWAKE_TEST_READ_DSN ?=
 test-sql:
-	KITTIWAKE_TEST_DSN='$(KITTIWAKE_TEST_DSN)' go test -count=1 ./store/mariadb/
+	KITTIWAKE_TEST_DSN='$(KITTIWAKE_TEST_DSN)' KITTIWAKE_TEST_READ_DSN='$(KITTIWAKE_TEST_READ_DSN)' go test -count=1 ./store/mariadb/
 
 vet:
 	go vet ./...

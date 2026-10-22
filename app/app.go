@@ -168,9 +168,16 @@ func OpenDatabase(ctx context.Context, cfg config.Database) (*mariadb.DB, error)
 	if dsn == "" {
 		return nil, nil
 	}
-	db, err := mariadb.Open(dsn)
+	readDSN, err := cfg.ReadDSN.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("database read_dsn: %w", err)
+	}
+	db, err := mariadb.OpenSplit(dsn, readDSN)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ReadStickiness > 0 {
+		db.ReadStickiness = cfg.ReadStickiness
 	}
 	if err := db.Ping(ctx); err != nil {
 		db.Close()

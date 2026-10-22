@@ -29,7 +29,7 @@ func (d *DB) WriteAdmin(ctx context.Context, recs []audit.Record) error {
 		}
 		args = append(args, r.Time.UTC(), r.Account, r.Admin, r.Action, r.ClientIP, string(b))
 	}
-	_, err := d.sql.ExecContext(ctx, sb.String(), args...)
+	_, err := d.exec(ctx, sb.String(), args...)
 	return err
 }
 
@@ -61,7 +61,7 @@ func (d *DB) ReadAdmin(ctx context.Context, q audit.Query) ([]audit.Record, stri
 	}
 	sb.WriteString(" ORDER BY id LIMIT ?")
 	args = append(args, q.Max+1)
-	rows, err := d.sql.QueryContext(ctx, sb.String(), args...)
+	rows, err := d.r().QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -89,7 +89,7 @@ func (d *DB) ReadAdmin(ctx context.Context, q audit.Query) ([]audit.Record, stri
 
 // PurgeAdminBefore deletes records older than cutoff; returns rows removed.
 func (d *DB) PurgeAdminBefore(ctx context.Context, cutoff time.Time) (int, error) {
-	res, err := d.sql.ExecContext(ctx, "DELETE FROM audit_admin WHERE time < ?", cutoff.UTC())
+	res, err := d.exec(ctx, "DELETE FROM audit_admin WHERE time < ?", cutoff.UTC())
 	if err != nil {
 		return 0, err
 	}

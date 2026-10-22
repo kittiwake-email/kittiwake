@@ -107,7 +107,9 @@ These are settled. Do not design around them.
   signing keys, sessions, worker queue, cluster registry, admin audit) is in MariaDB
   (`store/mariadb`, embedded migrations, `kittiwake migrate`); the daemon refuses an unknown
   schema version. MariaDB commits every DDL statement on its own, so migration statements are
-  idempotent and a failed migration is re-run.
+  idempotent and a failed migration is re-run. `database.read_dsn` sends SELECT-only
+  operations to a replica (`DB.r()`), writes and transactions to the primary (`DB.exec`, `tx`);
+  after a write a process reads from the primary for `read_stickiness`.
 - **Identity store is an interface (`identity.Backend`)** with two implementations: MariaDB
   (production) and RADOS (`identity.Rados`, memory backend for development and unit tests;
   RGW-style objects: exclusive create for uniqueness, omap listings, version-conditional

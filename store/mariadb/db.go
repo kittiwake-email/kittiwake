@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -31,19 +32,57 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// DB is an open metadata database.
+// DB is an open metadata database: a primary for every write and
+// transaction, and optionally a read replica for plain SELECTs.
+//
+// Read/write split: with a read DSN, SELECT-only operations (lookups,
+// listings, token lookups, queue statistics, admin audit reads) go to the
+// replica and everything that writes, or reads with the intent to write
+// (SELECT ... FOR UPDATE inside a transaction), goes to the primary. A
+// replica lags by its replication delay, so after this process wrote
+// anything its reads stay on the primary for ReadStickiness (default 2 s):
+// an admin who creates an account and reads it back sees it. Other
+// processes rely on the lag being short, as the per-process caches already
+// do. Without a read DSN all queries use the primary.
 type DB struct {
-	sql *sql.DB
-	Now func() time.Time
+	sql  *sql.DB // primary
+	read *sql.DB // replica, nil = none
+	// ReadStickiness: how long after a write this process keeps reading
+	// from the primary.
+	ReadStickiness time.Duration
+	lastWrite      atomic.Int64 // unix nanos of the last write on the primary
+	readerQueries  atomic.Int64 // queries sent to the replica (tests, metrics)
+	Now            func() time.Time
 	// Queue tuning (see queue.Rados for the defaults).
 	MaxAttempts int
 	Backoff     func(attempt int) time.Duration
 }
 
-// Open connects to the DSN (go-sql-driver/mysql format, e.g.
+// Open connects to the primary DSN (go-sql-driver/mysql format, e.g.
 // "kittiwake:secret@tcp(db.example:3306)/kittiwake"). Times are always
 // exchanged in UTC with microsecond precision whatever the DSN says.
-func Open(dsn string) (*DB, error) {
+func Open(dsn string) (*DB, error) { return OpenSplit(dsn, "") }
+
+// OpenSplit connects to the primary and, when readDSN is not empty, to a
+// read replica for SELECT-only operations.
+func OpenSplit(dsn, readDSN string) (*DB, error) {
+	primary, err := openPool(dsn)
+	if err != nil {
+		return nil, err
+	}
+	d := &DB{sql: primary, Now: time.Now, MaxAttempts: 8, Backoff: defaultBackoff, ReadStickiness: 2 * time.Second}
+	if readDSN != "" {
+		replica, err := openPool(readDSN)
+		if err != nil {
+			primary.Close()
+			return nil, fmt.Errorf("read replica: %w", err)
+		}
+		d.read = replica
+	}
+	return d, nil
+}
+
+func openPool(dsn string) (*sql.DB, error) {
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("mariadb: dsn: %w", err)
@@ -64,8 +103,33 @@ func Open(dsn string) (*DB, error) {
 	db.SetMaxOpenConns(32)
 	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(30 * time.Minute)
-	return &DB{sql: db, Now: time.Now, MaxAttempts: 8, Backoff: defaultBackoff}, nil
+	return db, nil
 }
+
+// r returns the pool for a SELECT-only operation: the replica, unless
+// there is none or this process wrote recently.
+func (d *DB) r() *sql.DB {
+	if d.read == nil {
+		return d.sql
+	}
+	if last := d.lastWrite.Load(); last != 0 && time.Since(time.Unix(0, last)) < d.ReadStickiness {
+		return d.sql
+	}
+	d.readerQueries.Add(1)
+	return d.read
+}
+
+// exec runs a write on the primary and starts the stickiness window.
+func (d *DB) exec(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	d.lastWrite.Store(time.Now().UnixNano())
+	return d.sql.ExecContext(ctx, q, args...)
+}
+
+// ReaderQueries counts queries sent to the replica so far.
+func (d *DB) ReaderQueries() int64 { return d.readerQueries.Load() }
+
+// HasReplica reports whether a read DSN is configured.
+func (d *DB) HasReplica() bool { return d.read != nil }
 
 func defaultBackoff(n int) time.Duration {
 	d := time.Duration(1<<uint(min(n, 10))) * 30 * time.Second
@@ -83,11 +147,26 @@ func (d *DB) SetRetryPolicy(maxAttempts int, backoff func(int) time.Duration) {
 	d.MaxAttempts, d.Backoff = maxAttempts, backoff
 }
 
-// Close closes the pool.
-func (d *DB) Close() error { return d.sql.Close() }
+// Close closes the pools.
+func (d *DB) Close() error {
+	if d.read != nil {
+		_ = d.read.Close()
+	}
+	return d.sql.Close()
+}
 
-// Ping checks the connection.
-func (d *DB) Ping(ctx context.Context) error { return d.sql.PingContext(ctx) }
+// Ping checks the primary and the replica.
+func (d *DB) Ping(ctx context.Context) error {
+	if err := d.sql.PingContext(ctx); err != nil {
+		return err
+	}
+	if d.read != nil {
+		if err := d.read.PingContext(ctx); err != nil {
+			return fmt.Errorf("read replica: %w", err)
+		}
+	}
+	return nil
+}
 
 // SQL exposes the pool (tests, status).
 func (d *DB) SQL() *sql.DB { return d.sql }
@@ -299,6 +378,7 @@ func (d *DB) tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 			}
 			return last
 		}
+		d.lastWrite.Store(time.Now().UnixNano())
 		return nil
 	}
 	return last

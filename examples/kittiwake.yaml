@@ -9,6 +9,12 @@ modes: [lmtp, jmap, admin, postfix]
 # upgrade the schema with `kittiwake migrate -c <config>` before starting.
 database:
   dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@tcp(db.example.org:3306)/kittiwake"
+  # Optional read replica for SELECT-only queries (a local MariaDB replicating
+  # from the primary scales reads with the number of daemons). After a write
+  # this process reads from the primary for read_stickiness so it sees its
+  # own changes despite replication lag.
+  # read_dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@unix(/run/mysqld/mysqld.sock)/kittiwake"
+  read_stickiness: 2s
 
 # Ceph clusters are NOT configured here: they are registered in the database
 # (kittiwake-admin cluster add --name ams1 --mon-host ... --user kittiwake --keyring ...

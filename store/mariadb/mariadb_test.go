@@ -121,3 +121,62 @@ func TestAdminAuditLog(t *testing.T) {
 		t.Fatalf("purge: %d %v", n, err)
 	}
 }
+
+// Read/write split: with a read DSN, SELECT-only operations use the
+// replica except within the stickiness window after a write. The test
+// opens the same server as both roles (KITTIWAKE_TEST_READ_DSN overrides
+// the replica, e.g. a real one) and watches the replica query counter.
+func TestReadWriteSplit(t *testing.T) {
+	dsn := os.Getenv("KITTIWAKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KITTIWAKE_TEST_DSN not set")
+	}
+	readDSN := os.Getenv("KITTIWAKE_TEST_READ_DSN")
+	if readDSN == "" {
+		readDSN = dsn
+	}
+	open(t) // migrated and truncated
+	db, err := mariadb.OpenSplit(dsn, readDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.ReadStickiness = 300 * time.Millisecond
+	ctx := context.Background()
+	if !db.HasReplica() {
+		t.Fatal("replica not configured")
+	}
+	ids := identity.NewWith(db)
+	// Nothing written yet: a lookup goes to the replica.
+	_, _, _ = ids.ListDomains(ctx, "", 10)
+	if db.ReaderQueries() != 1 {
+		t.Fatalf("first read not on the replica: %d", db.ReaderQueries())
+	}
+	// A write pins reads to the primary for the stickiness window...
+	if _, err := ids.CreateDomain(ctx, identity.Domain{Name: "split.example", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ids.GetDomain(ctx, "split.example"); err != nil {
+		t.Fatalf("read-your-write: %v", err)
+	}
+	if db.ReaderQueries() != 1 {
+		t.Fatalf("read after write went to the replica: %d", db.ReaderQueries())
+	}
+	// ...and then they return to the replica, which (when it is a real
+	// replica) has caught up by now.
+	time.Sleep(400 * time.Millisecond)
+	d, err := ids.GetDomain(ctx, "split.example")
+	if err != nil || !d.Value.Enabled {
+		t.Fatalf("replica read: %+v %v", d, err)
+	}
+	if db.ReaderQueries() != 2 {
+		t.Fatalf("read after the window not on the replica: %d", db.ReaderQueries())
+	}
+	// Transactions and writes never touch the replica.
+	if _, err := ids.UpdateDomain(ctx, "split.example", func(x *identity.Domain) error { x.Enabled = false; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if db.ReaderQueries() != 2 {
+		t.Fatalf("transaction used the replica: %d", db.ReaderQueries())
+	}
+}

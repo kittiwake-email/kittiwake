@@ -154,8 +154,14 @@ type Cache struct {
 type Database struct {
 	// DSN in go-sql-driver/mysql form, e.g.
 	// "kittiwake:secret@tcp(db.example:3306)/kittiwake"; the usual secret
-	// forms (file:, ${ENV}) apply.
+	// forms (file:, ${ENV}) apply. Every write goes here.
 	DSN Secret `yaml:"dsn"`
+	// ReadDSN is an optional replica (typically a local MariaDB replicating
+	// from the primary) for SELECT-only operations. Empty = primary only.
+	ReadDSN Secret `yaml:"read_dsn"`
+	// ReadStickiness: after a write, how long this process keeps reading
+	// from the primary so it sees its own changes despite replication lag.
+	ReadStickiness time.Duration `yaml:"read_stickiness"`
 }
 
 // Audit configures audit retention and detail.
@@ -235,9 +241,10 @@ func Default() Config {
 			KeyRotationInterval:  90 * 24 * time.Hour,
 			Issuer:               "kittiwake",
 		},
-		Cache: Cache{Credentials: 5 * time.Second, Identity: 5 * time.Second, Root: 5 * time.Second},
-		Audit: Audit{Retention: 365 * 24 * time.Hour},
-		Log:   Log{Level: "info", Format: "json"},
+		Cache:    Cache{Credentials: 5 * time.Second, Identity: 5 * time.Second, Root: 5 * time.Second},
+		Database: Database{ReadStickiness: 2 * time.Second},
+		Audit:    Audit{Retention: 365 * 24 * time.Hour},
+		Log:      Log{Level: "info", Format: "json"},
 	}
 }
 
@@ -295,6 +302,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Ceph.Backend == "librados" && c.Database.DSN == "" {
 		return errors.New("config: database.dsn is required with the librados backend (metadata lives in MariaDB)")
+	}
+	if c.Database.ReadDSN != "" && c.Database.DSN == "" {
+		return errors.New("config: database.read_dsn needs database.dsn")
+	}
+	if c.Database.ReadStickiness < 0 {
+		return errors.New("config: database.read_stickiness must not be negative")
 	}
 	if c.Database.DSN == "" && c.Ceph.Pools.Meta == "" {
 		return errors.New("config: ceph.pools.meta must be named when no database is configured")

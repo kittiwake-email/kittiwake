@@ -61,6 +61,16 @@ state is split by its nature:
   versioned: numbered migrations are embedded in the binary and applied by `kittiwake
   migrate`; a daemon refuses to start on a schema it does not know.
 
+**Reads scale with replicas.** The database config takes a primary DSN for every write
+and transaction and an optional `read_dsn`, typically a MariaDB replica on the same host as
+the daemons, for SELECT-only operations: lookups, listings, token lookups, queue statistics,
+audit reads. Every daemon host can run its own replica, so read capacity grows with the
+number of hosts while a single primary takes the (rare) writes. Replication lag is handled
+in two ways: after a process wrote anything it keeps reading from the primary for
+`read_stickiness` (default 2 s), so an admin who creates an account and reads it back sees
+it; and the per-process caches already tolerate seconds of staleness for everything else.
+Without `read_dsn` all queries use the primary.
+
 The identity store is an interface with two backends. MariaDB is the production backend.
 The RADOS backend (the RGW-style design: one object per record, exclusive create for
 uniqueness, omap for listings) remains for development and tests on the memory backend, and
@@ -909,7 +919,7 @@ The daemon takes a single YAML file as configuration:
 
 - Mode(s) to run and listen addresses (one listener per mode; JMAP and the admin API are
   separate listeners and separate code paths)
-- Metadata database DSN (MariaDB)
+- Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
 - Ceph: `config_file` and `options` applied to every cluster connection (clusters
   themselves are registered in the database); pool names only for the memory backend
 - Outbound SMTP relay host (and optional SASL credentials)
