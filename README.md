@@ -812,30 +812,46 @@ as the API.
 - `net/http` with the standard mux for JMAP and REST; `log/slog` for logging;
   `prometheus/client_golang` for metrics
 
-# Roadmap
+# Status
 
-## Milestone 1 (minimum viable)
+## Implemented
 
-- Configuration loading
-- Identity store in RADOS: domains, mailboxes, accounts, aliases, tokens; `admin bootstrap`
-- Admin API: domains, mailboxes, accounts, aliases, tokens (create/update/delete/list)
-- Postfix socketmap service
-- LMTP delivery into RADOS (parsing, attachment extraction, index update, change log)
-- Sessions: OAuth token endpoint, JWT access tokens, refresh tokens, TOTP
-- JMAP read side: session resource, `Mailbox/get`, `Email/get`, `Email/query`,
-  `Email/changes`, blob download
+- Configuration loading, single YAML file, `memory` backend for development
+- RADOS abstraction with librados (cgo) and in-memory implementations
+- Identity store in RADOS (domains, mailboxes, accounts, aliases, catch-all, tokens);
+  `dovetail admin bootstrap`, identity export/import
+- Admin service, REST admin API (domains, mailboxes, accounts, aliases, tokens, sessions,
+  hold/release, audit queries, queue inspection, key rotation, export/import) with an
+  OpenAPI spec that is tested against the registered routes
+- Postfix socketmap service (`domains`, `mailboxes`, `aliases` maps)
+- MIME parser: JSON document, attachment extraction with dedup, byte-exact raw skeleton
+- LMTP delivery: resolution (account → alias → catch-all), domain/mailbox/hold/quota
+  admission, spam routing to Junk, change log, notifications, audit
+- Sessions: OAuth token endpoint (password and refresh grants), Ed25519 JWT access tokens,
+  rotating refresh tokens with reuse detection, revocation, TOTP with recovery codes,
+  self-service password/app-password/TOTP/session endpoints, signing-key rotation
+- JMAP: core, `Mailbox/*`, `Email/*` (get/query/changes/set/import), `Thread/get`,
+  `Quota/get`, `Identity/get`, `EmailSubmission/set` with onSuccess handling, blobs
+  (upload/download, attachments, raw, parts), EventSource push
+- IMAP4rev1 with IDLE, UIDPLUS, MOVE, SPECIAL-USE, NAMESPACE, UNSELECT, SASL PLAIN /
+  OAUTHBEARER / XOAUTH2; POP3 with UIDL, TOP, SASL
+- Outbound submission via SMTP relay with identity enforcement and Sent copies
+- Legal hold (read-only / sealed, delivery and sending switches, purge suspension)
+- Maildir++ export (tar, manifest, audit log) and import (directory or archive), as CLI,
+  worker task and admin API
+- Workers: trash/expunge retention purge, attachment GC, mailbox removal, quota
+  recalculation, audit purge, orphan sweep, export; lock-elected scheduler
+- Structured logging, Prometheus metrics, health endpoints, PROXY protocol on all listeners
+- Unit tests for every package on the in-memory RADOS; no Ceph needed to run them
 
-## Later
+## Not yet
 
-- JMAP write side: `Email/set`, `Mailbox/set`, `Email/import`, `EmailSubmission`, push
-  (EventSource, WebSocket)
-- Self-service credential endpoints
-- Legal hold; Maildir export and import
-- IMAP, POP3
-- Workers: trash purge, attachment GC, quota recalculation, reconciliation, orphan sweep
-- Remaining admin API (maintenance, support access, audit, sessions)
-- Full-text search backend
-- Real integration tests against Ceph
+- IMAP CONDSTORE/QRESYNC (modseq is tracked; capability not advertised yet), JMAP over
+  WebSocket, `Email/queryChanges`
+- Identity reconciliation worker (listings are repaired only by the explicit tools)
+- Full-text search backend (events are published; no consumer yet)
+- Self-service API token management (tokens are admin-managed)
+- Real integration tests against a Ceph cluster
 - CalDAV/CardDAV and JMAP Contacts/Calendars
 
 # Inspiration

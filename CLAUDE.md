@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project state
 
 `README.md` is the authoritative design document, agreed with the owner; read it before
-designing anything. Milestone 1 is implemented (see Roadmap in README): identity store,
-admin service/CLI, LMTP, Postfix socketmap, sessions/TOTP, JMAP, REST. Not yet: IMAP, POP3,
-workers (purge/GC/reconcile), EmailSubmission, search backend, DAV.
+designing anything. See its "Status" section for what is implemented (nearly everything in
+the mail design: LMTP, JMAP incl. submission, IMAP, POP3, REST/admin, sessions/TOTP, workers,
+legal hold, Maildir export/import) and what is not (CONDSTORE, WebSocket, search backend,
+reconciliation worker, DAV, Ceph integration tests).
 
 ## Commands
 
@@ -31,13 +32,14 @@ cluster).
 
 ```
 rados/        RADOS interface (Get/Write tx/omap/xattr/lock/watch), librados.go + memory.go
+worker/       background tasks + scheduler (purge, GC, removal, audit purge, orphan sweep, export)
 config/       YAML config with defaults + validation (config.Default())
 mail/         MIME parser → Document JSON, attachment extraction, raw skeleton + Reconstruct
 auth/         crypto primitives: password schemes, TOTP, Ed25519 JWT, refresh tokens
 store/        identity, index, message, attach, audit, session, queue (object layouts live here)
-service/      actor (ctx principal), auditor, auth, delivery, mailbox, admin (business logic +
-              authorisation + audit; protocol adapters call ONLY these)
-proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest
+service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, admin, export
+              (business logic + authorisation + audit; protocol adapters call ONLY these)
+proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3
 app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
 cmd/dovetail  serve | check-config | admin ... | version
 examples/     dovetail.yaml (full, documented), dev.yaml (memory backend)
@@ -49,6 +51,10 @@ Conventions: every store/service test builds a fixture on `rados.NewMemoryClient
 take an `actor` from the context and refuse without one; errors are package sentinels
 (`ErrNotFound`, `ErrForbidden`, ...) compared with `errors.Is`; the service layer maps store
 errors, protocol adapters map service errors to wire codes (`delivery.Status`, httpx).
+Tests that query the audit store must pin `auditor.Now`/`audit.Store.Now` to the fixture
+clock (audit objects are per UTC day). Smoke-test the binary with
+`make run-dev` plus Python's smtplib.LMTP/imaplib/poplib and curl against 127.0.0.1 ports
+2424/1143/1110/8080 (see examples/dev.yaml); kill it by PID, not by `pkill -f`.
 
 ## What this is
 
