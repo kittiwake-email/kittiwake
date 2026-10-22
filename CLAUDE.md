@@ -98,17 +98,26 @@ These are settled. Do not design around them.
   below. The service interfaces are the project's public Go API.
 
 - **One Go binary (`dovetail`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
-  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `postfix`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to RADOS directly
-  (bootstrap, export/import, reconcile). Modes combine in one process or split across many.
-- **Everything in Ceph RADOS. No SQL, no Redis.** Stateless daemons via librados (cgo; target
-  latest stable Ceph). Four pools: `messages`, `attachments`, `index`, `meta`. Pure RADOS,
-  not S3/RGW. The RGW metadata approach is the model: key lookups are direct object reads,
-  uniqueness via exclusive create, listings via omap, reconciliation repairs listings.
-- **Identity store (meta pool, RADOS namespaces):** `domains/<name>`, `mailboxes/<uuid>`,
-  `accounts/<uuid>`, `names/<username>` → account uuid, `aliases/<address>` (catch-all is
-  `@<domain>`), `tokens/<sha256>`. Parent objects' omap hold listings. Multi-object writes are
-  primary-first and idempotent; updates are conditional on a version xattr. Behind a Go
-  interface; RADOS is the only implementation.
+  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `postfix`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to the metadata
+  database directly (bootstrap, export/import). Modes combine in one process or split across many.
+- **Mail data in Ceph RADOS, metadata in MariaDB, no Redis.** Stateless daemons via librados
+  (cgo; target latest stable Ceph). Per cluster three pools: `messages`, `attachments`,
+  `index`. Pure RADOS, not S3/RGW. Metadata (domains, mailboxes, accounts, aliases, tokens,
+  signing keys, sessions, worker queue, cluster registry, admin audit) is in MariaDB
+  (`store/mariadb`, embedded migrations, `dovetail migrate`); the daemon refuses an unknown
+  schema version. MariaDB commits every DDL statement on its own, so migration statements are
+  idempotent and a failed migration is re-run.
+- **Identity store is an interface (`identity.Backend`)** with two implementations: MariaDB
+  (production) and RADOS (`identity.Rados`, memory backend for development and unit tests;
+  RGW-style objects: exclusive create for uniqueness, omap listings, version-conditional
+  updates). `session.Store` and `queue.Store` are interfaces the same way. Both run the same
+  conformance suites (`store/*/<pkg>test`; `make test-sql` against a real MariaDB).
+- **Multiple Ceph clusters, all equal.** Clusters are registry rows (`dovetail-admin cluster
+  add`), not config; the fsid read on connect verifies the record. Each mailbox has a
+  `cluster_id`; every data store resolves pools through `cluster.Resolver` (Fixed for the
+  memory backend, Registry otherwise). Placement is random among connected clusters open for
+  placement; an unreachable cluster defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP
+  `serverUnavailable`). Sweeps walk every cluster; a removal task carries the cluster id.
 - **Admin API is the only way identity data is created/changed.** `dovetail admin` does only
   bootstrap/token; operators use `dovetail-admin` (client/admin). Do not add admin features
   to cmd/dovetail; add them to the API + spec + client.
@@ -132,7 +141,7 @@ These are settled. Do not design around them.
   is Document.Size = what IMAP/JMAP report). Only `multipart/signed` keeps the original
   bytes (`.raw`, config `mail.keep_raw`). Every non-primary-body MIME part is an attachment;
   parts under a threshold stay inline as Part.Data.
-- **Attachments** are cluster-wide deduplicated by content hash with reference counting
+- **Attachments** are deduplicated per Ceph cluster by content hash with reference counting
   (omap keys per referencing message on the hash-named object); only a worker deletes orphans.
 - **Delivery order:** attachments, message JSON, raw, index entry + change log (commit
   point), refs. LMTP acks only after the index write.
@@ -144,9 +153,9 @@ These are settled. Do not design around them.
   Thread/Message-ID maps sharded over `<mb>/t.<xx>` (256). Keep omaps bounded.
 - **Change tracking:** every mutation bumps `modseq` and appends to the bounded change log
   `<mailbox>/changes`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.
-- **Workers** consume a RADOS-based task queue (queue object per task type, omap entries,
-  RADOS lock lease, run-after, retry with backoff, dead-letter set). One worker holds a
-  RADOS lock as scheduler for periodic tasks. Reconciliation reports/repairs, never deletes
+- **Workers** consume the task queue in MariaDB (`SELECT ... FOR UPDATE SKIP LOCKED`,
+  lease, run-after, retry with backoff, dead-letter state; the memory backend keeps the same
+  queue as omap entries). One worker holds a lease row as scheduler for periodic tasks. Reconciliation reports/repairs, never deletes
   mailboxes on its own.
 - **Full-text search** is a future, pluggable backend behind an interface; publish
   index/remove events on every mutation from day one.
@@ -167,12 +176,12 @@ These are settled. Do not design around them.
   `admin-ro`; services use `authorizeRead`/`IsAdminReader` for reads and `IsAdmin` for writes.
 - **Sessions (OAuth 2.0 shaped, RFC 9700):** `POST /v1/oauth/token` with password gives a
   15-minute Ed25519-signed JWT access token (verified locally, no lookup) plus an opaque
-  refresh token stored hashed in RADOS (`sessions/<account-id>`), rotated on every use with
-  reuse detection. `POST /v1/oauth/revoke` (RFC 7009). Signing keys in RADOS (`keys/jwt`),
-  rotated. Keep the endpoint OAuth-standard so PKCE/OIDC can be added later.
+  refresh token stored hashed in the `sessions` table, rotated on every use with reuse
+  detection. `POST /v1/oauth/revoke` (RFC 7009). Signing keys in `signing_keys`, rotated. Keep the endpoint OAuth-standard so PKCE/OIDC can be added later.
 - **TOTP (RFC 6238):** with a secret present, primary passwords need a code (`totp_code` at
   the token endpoint, error `totp_required` when missing) and are rejected on IMAP/POP3;
-  application passwords never need a code. Replay state in RADOS `totp/<account-id>`.
+  application passwords never need a code. Replay state in `totp_steps`. Accounts list the
+  services they may use (`imap`, `pop3`, `jmap`); the check happens at login per protocol.
   IMAP/POP3 also accept OAUTHBEARER/XOAUTH2 with a session access token.
 - **Sending:** `From` must be one of the account's identities (own address + aliases to its
   mailbox). Sent copy goes to Sent. Relay failure = API error, nothing stored.
