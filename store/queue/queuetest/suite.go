@@ -19,6 +19,7 @@ type Factory func(t *testing.T, now *time.Time) queue.Store
 func Run(t *testing.T, f Factory) {
 	t.Run("QueueLifecycle", func(t *testing.T) { testQueueLifecycle(t, f) })
 	t.Run("Scheduler", func(t *testing.T) { testScheduler(t, f) })
+	t.Run("LeaseRenewal", func(t *testing.T) { testLeaseRenewal(t, f) })
 }
 
 func testQueueLifecycle(t *testing.T, f Factory) {
@@ -140,4 +141,60 @@ func testScheduler(t *testing.T, f Factory) {
 	if due, _ := s.Due(ctx, "purge", time.Hour); !due {
 		t.Fatal("not due after the interval")
 	}
+}
+
+func testLeaseRenewal(t *testing.T, f Factory) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	s := f(t, &now)
+	s.SetNow(func() time.Time { return now })
+	ctx := context.Background()
+	id, err := s.Enqueue(ctx, "remove", map[string]string{"mailbox": "a"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := s.Claim(ctx, "remove", "w1", 1, time.Minute)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("claim: %v %v", tasks, err)
+	}
+	task := tasks[0]
+	// Renewed before expiry: the lease moves on, nobody else can claim it.
+	now = now.Add(45 * time.Second)
+	if err := s.Extend(ctx, &task, time.Minute); err != nil {
+		t.Fatalf("extend: %v", err)
+	}
+	now = now.Add(45 * time.Second) // 90s after claim: past the original lease
+	if got, _ := s.Claim(ctx, "remove", "w2", 1, time.Minute); len(got) != 0 {
+		t.Fatal("renewed lease was taken over")
+	}
+	if err := s.Complete(ctx, task); err != nil {
+		t.Fatalf("complete with renewed lease key: %v", err)
+	}
+	if st, _ := s.Stats(ctx, "remove"); st.Pending+st.Leased+st.Dead != 0 {
+		t.Fatalf("task remains: %+v", st)
+	}
+	// Lost lease: expired and reclaimed by another worker.
+	_, _ = s.Enqueue(ctx, "remove", map[string]string{"mailbox": "b"}, time.Time{})
+	tasks, _ = s.Claim(ctx, "remove", "w1", 1, time.Minute)
+	task = tasks[0]
+	now = now.Add(2 * time.Minute)
+	if got, _ := s.Claim(ctx, "remove", "w2", 1, time.Minute); len(got) != 1 {
+		t.Fatal("expired lease not reclaimed")
+	}
+	if err := s.Extend(ctx, &task, time.Minute); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("extend after takeover: %v, want ErrLeaseLost", err)
+	}
+	// Release: back to pending, due now, attempts kept, no error recorded.
+	_, _ = s.Enqueue(ctx, "release", map[string]string{"mailbox": "c"}, time.Time{})
+	tasks, _ = s.Claim(ctx, "release", "w1", 1, time.Minute)
+	if err := s.Release(ctx, tasks[0]); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if st, _ := s.Stats(ctx, "release"); st.Pending != 1 || st.Leased != 0 {
+		t.Fatalf("after release: %+v", st)
+	}
+	tasks, _ = s.Claim(ctx, "release", "w2", 1, time.Minute)
+	if len(tasks) != 1 || tasks[0].Attempts != 2 || tasks[0].LastError != "" || tasks[0].RunAfter.After(now) {
+		t.Fatalf("released task: %+v", tasks)
+	}
+	_ = id
 }

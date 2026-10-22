@@ -18,7 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"kittiwake/rados"
-	"kittiwake/store/cluster"
+	"kittiwake/store/storage"
 )
 
 const (
@@ -38,7 +38,7 @@ const (
 
 // Store is the mailbox index store on the index pool.
 type Store struct {
-	r   cluster.Resolver
+	r   storage.Resolver
 	Now func() time.Time
 
 	// roots caches the last root seen per mailbox so an optimistic update
@@ -56,16 +56,16 @@ const maxCachedRoots = 10000
 
 // New returns a store on the index pool context.
 func New(indexPool rados.IOContext) *Store {
-	return NewMulti(cluster.FixedPools(indexPool, indexPool, indexPool))
+	return NewMulti(storage.FixedPools(indexPool, indexPool, indexPool))
 }
 
 // NewMulti returns a store that resolves each mailbox's index pool through r.
-func NewMulti(r cluster.Resolver) *Store { return &Store{r: r, Now: time.Now} }
+func NewMulti(r storage.Resolver) *Store { return &Store{r: r, Now: time.Now} }
 
 // pool returns the mailbox's index pool, or a context that fails every
-// operation with the resolution error (cluster unavailable).
+// operation with the resolution error (storage unavailable).
 func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
-	_, io, err := s.r.Pool(ctx, mb, cluster.RoleIndex)
+	_, io, err := s.r.Pool(ctx, mb, storage.RoleIndex)
 	if err != nil {
 		return rados.ErrorContext(err)
 	}

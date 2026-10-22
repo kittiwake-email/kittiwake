@@ -18,11 +18,11 @@ type MemoryClient struct {
 	pools map[string]*memPool
 	// Now is the clock used for mtimes and lock expiry; tests may override it.
 	Now func() time.Time
-	// Fsid identifies the fake cluster (random per client; tests may set it).
+	// Fsid identifies the fake storage (random per client; tests may set it).
 	Fsid string
 }
 
-// NewMemoryClient returns an empty in-memory cluster.
+// NewMemoryClient returns an empty in-memory storage.
 func NewMemoryClient() *MemoryClient {
 	return &MemoryClient{pools: map[string]*memPool{}, Now: time.Now, Fsid: newFSID()}
 }

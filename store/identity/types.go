@@ -122,9 +122,9 @@ var ValidStates = map[string]bool{StateActive: true, StateSuspended: true, State
 // Mailbox is the container for a user's data.
 type Mailbox struct {
 	ID uuid.UUID `json:"id"`
-	// ClusterID is the Ceph cluster (registry id) holding the mailbox's
-	// data; 0 only in the single-cluster memory backend.
-	ClusterID   int64       `json:"cluster_id"`
+	// StorageID is the Ceph storage (registry id) holding the mailbox's
+	// data; 0 only in the single-storage memory backend.
+	StorageID   int64       `json:"storage_id"`
 	State       string      `json:"state"` // active | suspended | disabled
 	StateReason string      `json:"state_reason,omitempty"`
 	StateSince  time.Time   `json:"state_since"`
@@ -237,11 +237,11 @@ func (t *Token) Expired(at time.Time) bool { return !at.Before(t.ExpiresAt) }
 // IsAdmin reports whether this is an admin token (not bound to an account).
 func (t *Token) IsAdmin() bool { return t.AccountID == uuid.Nil }
 
-// Cluster is one Ceph cluster in the registry. Mailboxes reference it by
-// ID; the fsid (read from the cluster on connect) verifies that the
-// connection details still point at the same cluster. Key is the Ceph
+// Storage is one Ceph storage in the registry. Mailboxes reference it by
+// ID; the fsid (read from the storage on connect) verifies that the
+// connection details still point at the same storage. Key is the Ceph
 // secret of User.
-type Cluster struct {
+type Storage struct {
 	ID        int64     `json:"id"`
 	FSID      uuid.UUID `json:"fsid"`
 	Name      string    `json:"name"`
@@ -254,7 +254,7 @@ type Cluster struct {
 	Updated   time.Time `json:"updated"`
 }
 
-// Pools are the data pools of a cluster.
+// Pools are the data pools of a storage.
 type Pools struct {
 	Messages    string `json:"messages"`
 	Attachments string `json:"attachments"`

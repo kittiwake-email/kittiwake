@@ -23,11 +23,11 @@ import (
 	"kittiwake/service/auditor"
 	"kittiwake/store/attach"
 	"kittiwake/store/audit"
-	"kittiwake/store/cluster"
 	"kittiwake/store/identity"
 	"kittiwake/store/index"
 	"kittiwake/store/message"
 	"kittiwake/store/queue"
+	"kittiwake/store/storage"
 )
 
 // Errors. LMTP maps them to reply codes with Status.
@@ -36,7 +36,7 @@ var (
 	ErrUnknownRecipient = errors.New("delivery: no such recipient")
 	ErrMailboxDisabled  = errors.New("delivery: mailbox disabled")
 	ErrMailboxSuspended = errors.New("delivery: mailbox suspended")
-	// ErrUnavailable: the mailbox's Ceph cluster is not reachable from this
+	// ErrUnavailable: the mailbox's Ceph storage is not reachable from this
 	// process (LMTP defers, the MTA retries).
 	ErrUnavailable = errors.New("delivery: mailbox temporarily unavailable")
 	ErrHold        = errors.New("delivery: mailbox on hold, delivery suspended")
@@ -62,9 +62,9 @@ type Config struct {
 	// RootTTL: how old a cached mailbox root may be for the quota check
 	// (identity lookups are cached by the identity store, see its CacheTTL).
 	RootTTL time.Duration
-	// ClusterAvailable reports whether the mailbox's cluster is connected
+	// StorageAvailable reports whether the mailbox's storage is connected
 	// (no I/O: a registry lookup on the cached mailbox record). nil = always.
-	ClusterAvailable func(ctx context.Context, mailbox uuid.UUID) error
+	StorageAvailable func(ctx context.Context, mailbox uuid.UUID) error
 }
 
 // Task types this service enqueues.
@@ -252,8 +252,8 @@ func (s *Service) admission(ctx context.Context, mb uuid.UUID, size int64) (iden
 	case identity.StateDisabled:
 		return m, ErrMailboxDisabled
 	}
-	if s.cfg.ClusterAvailable != nil {
-		if err := s.cfg.ClusterAvailable(ctx, mb); err != nil {
+	if s.cfg.StorageAvailable != nil {
+		if err := s.cfg.StorageAvailable(ctx, mb); err != nil {
 			return m, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 	}
@@ -357,7 +357,7 @@ func resultLabel(err error) string {
 		return "hold"
 	case errors.Is(err, ErrTooLarge):
 		return "too-large"
-	case errors.Is(err, ErrUnavailable), errors.Is(err, cluster.ErrUnavailable):
+	case errors.Is(err, ErrUnavailable), errors.Is(err, storage.ErrUnavailable):
 		return "unavailable"
 	}
 	return "error"
@@ -586,7 +586,7 @@ func (s *Service) Status(err error) (code int, enhanced, text string) {
 		return 450, "4.2.1", "Mailbox temporarily suspended, try again later"
 	case errors.Is(err, ErrHold):
 		return 450, "4.2.1", "Mailbox temporarily not accepting mail"
-	case errors.Is(err, ErrUnavailable), errors.Is(err, cluster.ErrUnavailable):
+	case errors.Is(err, ErrUnavailable), errors.Is(err, storage.ErrUnavailable):
 		return 451, "4.3.2", "Mailbox storage temporarily unavailable, try again later"
 	case errors.Is(err, ErrOverQuota):
 		if s.cfg.OverQuotaTempFail {

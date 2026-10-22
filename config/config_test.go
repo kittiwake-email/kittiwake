@@ -77,9 +77,9 @@ log: {level: debug, format: text}
 	if _, err := Parse([]byte("modes: [imap]\n")); err == nil || !strings.Contains(err.Error(), "database.dsn") {
 		t.Fatalf("expected dsn error, got %v", err)
 	}
-	// With librados the clusters come from the registry, not the config.
+	// With librados the storage entries come from the registry, not the config.
 	if _, err := Parse([]byte("modes: [imap]\ndatabase: {dsn: x}\nceph: {monitors: [\"[::1]:6789\"]}\n")); err == nil || !strings.Contains(err.Error(), "registered in the database") {
-		t.Fatalf("expected cluster-in-config error, got %v", err)
+		t.Fatalf("expected storage-in-config error, got %v", err)
 	}
 	if _, err := Parse([]byte("modes: [imap]\ndatabase: {dsn: x}\nceph: {config_file: /etc/ceph/ceph.conf, options: {ms_bind_ipv6: \"true\"}}\n")); err != nil {
 		t.Fatalf("librados with registry: %v", err)

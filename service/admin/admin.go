@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -49,17 +48,17 @@ type Service struct {
 	queue queue.Store
 	audit *auditor.Auditor
 	Now   func() time.Time
-	// Clusters places new mailboxes and verifies clusters added through
-	// the API. nil means a single implicit cluster (memory backend).
-	Clusters ClusterControl
+	// Storage places new mailboxes and verifies storage entries added through
+	// the API. nil means a single implicit storage (memory backend).
+	Storage StorageControl
 }
 
-// ClusterControl is what the admin service needs from the cluster registry.
-type ClusterControl interface {
-	// Pick chooses the cluster for a new mailbox.
+// StorageControl is what the admin service needs from the storage registry.
+type StorageControl interface {
+	// Pick chooses the storage for a new mailbox.
 	Pick(ctx context.Context) (int64, error)
-	// Verify connects to a cluster record once and returns its fsid.
-	Verify(c identity.Cluster) (uuid.UUID, error)
+	// Verify connects to a storage record once and returns its fsid.
+	Verify(c identity.Storage) (uuid.UUID, error)
 }
 
 // New returns the service. queue may be nil (tasks are then refused).
@@ -160,18 +159,18 @@ func (s *Service) CreateMailbox(ctx context.Context, m identity.Mailbox) (identi
 	if err := s.authorize(ctx, "mailbox-create", ""); err != nil {
 		return identity.Mailbox{}, err
 	}
-	if m.ClusterID == 0 && s.Clusters != nil {
-		id, err := s.Clusters.Pick(ctx)
+	if m.StorageID == 0 && s.Storage != nil {
+		id, err := s.Storage.Pick(ctx)
 		if err != nil {
 			return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
 		}
-		m.ClusterID = id
+		m.StorageID = id
 	}
 	out, err := s.ids.CreateMailbox(ctx, m)
 	if err != nil {
 		return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
 	}
-	s.ok(ctx, out.ID, "mailbox-create", out.ID.String(), fmt.Sprintf("cluster=%d", out.ClusterID))
+	s.ok(ctx, out.ID, "mailbox-create", out.ID.String(), fmt.Sprintf("storage=%d", out.StorageID))
 	return out, nil
 }
 
@@ -301,17 +300,17 @@ func (s *Service) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	if err := s.authorize(ctx, "mailbox-delete", id.String()); err != nil {
 		return err
 	}
-	// The record carries the cluster; the removal task needs it after the
+	// The record carries the storage; the removal task needs it after the
 	// record is gone.
-	var clusterID int64
+	var storageID int64
 	if v, err := s.ids.GetMailbox(ctx, id); err == nil {
-		clusterID = v.Value.ClusterID
+		storageID = v.Value.StorageID
 	}
 	if err := s.ids.DeleteMailbox(ctx, id); err != nil {
 		return s.fail(ctx, id, "mailbox-delete", id.String(), err)
 	}
 	if s.queue != nil {
-		if _, err := s.queue.Enqueue(ctx, TaskRemoveMailbox, map[string]any{"mailbox": id, "cluster_id": clusterID}, time.Time{}); err != nil {
+		if _, err := s.queue.Enqueue(ctx, TaskRemoveMailbox, map[string]any{"mailbox": id, "storage_id": storageID}, time.Time{}); err != nil {
 			return s.fail(ctx, id, "mailbox-delete", id.String(), err)
 		}
 	}
@@ -330,77 +329,6 @@ func (s *Service) RecalculateQuota(ctx context.Context, id uuid.UUID) (index.Usa
 	}
 	s.ok(ctx, id, "quota-recalc", id.String(), fmt.Sprintf("%+v", root.Usage))
 	return root.Usage, nil
-}
-
-// EmptyMailbox removes every message of the mailbox (into retention, so
-// the worker purges them) and deletes the folders that have no role, for
-// a fresh start such as a new sync. The mailbox, its accounts, role
-// folders and UIDVALIDITY stay.
-func (s *Service) EmptyMailbox(ctx context.Context, id uuid.UUID) (messages, folders int, err error) {
-	if err := s.authorize(ctx, "mailbox-empty", id.String()); err != nil {
-		return 0, 0, err
-	}
-	if v, err := s.ids.GetMailbox(ctx, id); err != nil {
-		return 0, 0, s.fail(ctx, id, "mailbox-empty", id.String(), err)
-	} else if v.Value.Hold != nil {
-		return 0, 0, s.fail(ctx, id, "mailbox-empty", id.String(), fmt.Errorf("%w: mailbox is on legal hold", ErrForbidden))
-	}
-	root, err := s.idx.GetRoot(ctx, id)
-	if err != nil {
-		if errors.Is(err, index.ErrNotFound) {
-			return 0, 0, nil // never used: nothing to empty
-		}
-		return 0, 0, s.fail(ctx, id, "mailbox-empty", id.String(), err)
-	}
-	now := s.Now()
-	for _, f := range root.Folders {
-		for {
-			recs, _, err := s.idx.ListFolder(ctx, id, f.ID, 0, 500)
-			if err != nil {
-				return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
-			}
-			if len(recs) == 0 {
-				break
-			}
-			for _, r := range recs {
-				if _, err := s.idx.Remove(ctx, id, f.ID, r.UID, "admin-empty", now); err != nil {
-					return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
-				}
-				messages++
-			}
-		}
-	}
-	// Deepest folders first so parents are empty of children when their turn comes.
-	var extra []*index.Folder
-	for _, f := range root.Folders {
-		if f.Role == "" && f.Name != "INBOX" {
-			extra = append(extra, f)
-		}
-	}
-	sort.Slice(extra, func(i, j int) bool { return len(extra[i].Name) > len(extra[j].Name) })
-	kept := 0
-	for _, f := range extra {
-		err := s.idx.DeleteFolder(ctx, id, f.ID)
-		switch {
-		case err == nil:
-			folders++
-		case errors.Is(err, index.ErrNotFound):
-		case errors.Is(err, index.ErrNotEmpty):
-			kept++ // a message arrived meanwhile (a sync is running): leave the folder
-		default:
-			return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
-		}
-	}
-	// Counters are rebuilt from the indexes so the mailbox is left consistent
-	// even if a sync was writing to it meanwhile.
-	if _, err := s.idx.Recalculate(ctx, id); err != nil && !errors.Is(err, index.ErrNotFound) {
-		return messages, folders, s.fail(ctx, id, "mailbox-empty", id.String(), err)
-	}
-	if s.queue != nil {
-		_, _ = s.queue.Enqueue(ctx, TaskPurgeTrash, map[string]any{"mailbox": id}, time.Time{})
-	}
-	s.ok(ctx, id, "mailbox-empty", id.String(), fmt.Sprintf("messages=%d folders=%d kept=%d", messages, folders, kept))
-	return messages, folders, nil
 }
 
 // ---- legal hold ----
@@ -895,11 +823,11 @@ func (s *Service) ImportIdentity(ctx context.Context, data []byte) (string, erro
 	return summary, nil
 }
 
-// ---- cluster registry ----
+// ---- storage registry ----
 
-// ClusterRequest describes a cluster to add or change. On add, Key is
+// StorageRequest describes a storage to add or change. On add, Key is
 // the CephX secret of User; on update, empty fields keep their value.
-type ClusterRequest struct {
+type StorageRequest struct {
 	Name      string
 	MonHost   string
 	User      string
@@ -908,60 +836,60 @@ type ClusterRequest struct {
 	Placement *bool
 }
 
-// AddCluster connects to the cluster once to verify the details and read
+// AddStorage connects to the storage once to verify the details and read
 // its fsid, then registers it. Placement defaults to enabled.
-func (s *Service) AddCluster(ctx context.Context, req ClusterRequest) (identity.Cluster, error) {
-	if err := s.authorize(ctx, "cluster-add", req.Name); err != nil {
-		return identity.Cluster{}, err
+func (s *Service) AddStorage(ctx context.Context, req StorageRequest) (identity.Storage, error) {
+	if err := s.authorize(ctx, "storage-add", req.Name); err != nil {
+		return identity.Storage{}, err
 	}
-	c := identity.Cluster{Name: req.Name, MonHost: req.MonHost, User: req.User, Key: req.Key, Pools: req.Pools, Placement: true}
+	c := identity.Storage{Name: req.Name, MonHost: req.MonHost, User: req.User, Key: req.Key, Pools: req.Pools, Placement: true}
 	if req.Placement != nil {
 		c.Placement = *req.Placement
 	}
-	if err := identity.ValidateCluster(&c); err != nil {
-		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-add", req.Name, err)
+	if err := identity.ValidateStorage(&c); err != nil {
+		return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-add", req.Name, err)
 	}
-	if s.Clusters != nil {
-		fsid, err := s.Clusters.Verify(c)
+	if s.Storage != nil {
+		fsid, err := s.Storage.Verify(c)
 		if err != nil {
-			return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-add", req.Name, fmt.Errorf("%w: cannot reach cluster: %v", ErrInvalid, err))
+			return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-add", req.Name, fmt.Errorf("%w: cannot reach storage: %v", ErrInvalid, err))
 		}
 		c.FSID = fsid
 	}
-	out, err := s.ids.CreateCluster(ctx, c)
+	out, err := s.ids.CreateStorage(ctx, c)
 	if err != nil {
-		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-add", req.Name, err)
+		return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-add", req.Name, err)
 	}
-	s.ok(ctx, uuid.Nil, "cluster-add", out.Name, fmt.Sprintf("id=%d fsid=%s placement=%v", out.ID, out.FSID, out.Placement))
+	s.ok(ctx, uuid.Nil, "storage-add", out.Name, fmt.Sprintf("id=%d fsid=%s placement=%v", out.ID, out.FSID, out.Placement))
 	return out, nil
 }
 
-// ListClusters lists the registry (keys included: admin only).
-func (s *Service) ListClusters(ctx context.Context) ([]identity.Cluster, error) {
-	if err := s.authorizeRead(ctx, "cluster-list", ""); err != nil {
+// ListStorage lists the registry (keys included: admin only).
+func (s *Service) ListStorage(ctx context.Context) ([]identity.Storage, error) {
+	if err := s.authorizeRead(ctx, "storage-list", ""); err != nil {
 		return nil, err
 	}
-	return s.ids.ListClusters(ctx)
+	return s.ids.ListStorage(ctx)
 }
 
-// GetCluster returns one cluster.
-func (s *Service) GetCluster(ctx context.Context, id int64) (identity.Cluster, error) {
-	if err := s.authorizeRead(ctx, "cluster-get", strconv.FormatInt(id, 10)); err != nil {
-		return identity.Cluster{}, err
+// GetStorage returns one storage.
+func (s *Service) GetStorage(ctx context.Context, id int64) (identity.Storage, error) {
+	if err := s.authorizeRead(ctx, "storage-get", strconv.FormatInt(id, 10)); err != nil {
+		return identity.Storage{}, err
 	}
-	return s.ids.GetCluster(ctx, id)
+	return s.ids.GetStorage(ctx, id)
 }
 
-// UpdateCluster changes connection details or the placement flag. New
+// UpdateStorage changes connection details or the placement flag. New
 // connection details are verified against the recorded fsid first.
-func (s *Service) UpdateCluster(ctx context.Context, id int64, req ClusterRequest) (identity.Cluster, error) {
+func (s *Service) UpdateStorage(ctx context.Context, id int64, req StorageRequest) (identity.Storage, error) {
 	target := strconv.FormatInt(id, 10)
-	if err := s.authorize(ctx, "cluster-update", target); err != nil {
-		return identity.Cluster{}, err
+	if err := s.authorize(ctx, "storage-update", target); err != nil {
+		return identity.Storage{}, err
 	}
-	cur, err := s.ids.GetCluster(ctx, id)
+	cur, err := s.ids.GetStorage(ctx, id)
 	if err != nil {
-		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, err)
+		return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-update", target, err)
 	}
 	next := cur
 	if req.Name != "" {
@@ -988,34 +916,34 @@ func (s *Service) UpdateCluster(ctx context.Context, id int64, req ClusterReques
 	if req.Placement != nil {
 		next.Placement = *req.Placement
 	}
-	if s.Clusters != nil && (next.MonHost != cur.MonHost || next.User != cur.User || next.Key != cur.Key || next.Pools != cur.Pools) {
-		fsid, err := s.Clusters.Verify(next)
+	if s.Storage != nil && (next.MonHost != cur.MonHost || next.User != cur.User || next.Key != cur.Key || next.Pools != cur.Pools) {
+		fsid, err := s.Storage.Verify(next)
 		if err != nil {
-			return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, fmt.Errorf("%w: cannot reach cluster: %v", ErrInvalid, err))
+			return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-update", target, fmt.Errorf("%w: cannot reach storage: %v", ErrInvalid, err))
 		}
 		if cur.FSID != uuid.Nil && fsid != cur.FSID {
-			return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, fmt.Errorf("%w: new details reach cluster %s, registry has %s", ErrInvalid, fsid, cur.FSID))
+			return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-update", target, fmt.Errorf("%w: new details reach storage %s, registry has %s", ErrInvalid, fsid, cur.FSID))
 		}
 		next.FSID = fsid
 	}
-	out, err := s.ids.UpdateCluster(ctx, id, func(c *identity.Cluster) error { *c = next; return nil })
+	out, err := s.ids.UpdateStorage(ctx, id, func(c *identity.Storage) error { *c = next; return nil })
 	if err != nil {
-		return identity.Cluster{}, s.fail(ctx, uuid.Nil, "cluster-update", target, err)
+		return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-update", target, err)
 	}
-	s.ok(ctx, uuid.Nil, "cluster-update", out.Name, fmt.Sprintf("placement=%v", out.Placement))
+	s.ok(ctx, uuid.Nil, "storage-update", out.Name, fmt.Sprintf("placement=%v", out.Placement))
 	return out, nil
 }
 
-// DeleteCluster removes a cluster that no mailbox refers to.
-func (s *Service) DeleteCluster(ctx context.Context, id int64) error {
+// DeleteStorage removes a storage that no mailbox refers to.
+func (s *Service) DeleteStorage(ctx context.Context, id int64) error {
 	target := strconv.FormatInt(id, 10)
-	if err := s.authorize(ctx, "cluster-delete", target); err != nil {
+	if err := s.authorize(ctx, "storage-delete", target); err != nil {
 		return err
 	}
-	if err := s.ids.DeleteCluster(ctx, id); err != nil {
-		return s.fail(ctx, uuid.Nil, "cluster-delete", target, err)
+	if err := s.ids.DeleteStorage(ctx, id); err != nil {
+		return s.fail(ctx, uuid.Nil, "storage-delete", target, err)
 	}
-	s.ok(ctx, uuid.Nil, "cluster-delete", target, "")
+	s.ok(ctx, uuid.Nil, "storage-delete", target, "")
 	return nil
 }
 

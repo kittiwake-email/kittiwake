@@ -114,7 +114,6 @@ func quotaFrom(sb, hb, sm, hm int64) *admin.QuotaLimits {
 func (a *cli) mailbox(args []string) error {
 	const u = `mailbox create [--soft-bytes N --hard-bytes N --soft-messages N --hard-messages N]
        mailbox list [--orphaned] | inspect <uuid> | delete <uuid> | recalc <uuid> | holds
-       mailbox empty <uuid>                    messages to retention, folders without a role removed (fresh sync)
        mailbox set <uuid> [quota flags]                            (quota flags replace the whole quota)
        mailbox suspend <uuid> --reason text    soft: LMTP 450, the MTA queues; users locked out
        mailbox disable <uuid> --reason text    hard: LMTP 550, rejected at SMTP time; users locked out
@@ -131,11 +130,11 @@ func (a *cli) mailbox(args []string) error {
 	case "create":
 		fs := newFlagSet("mailbox create")
 		sb, hb, sm, hm := quotaFlags(fs)
-		clusterID := fs.Int64("cluster", 0, "pin the Ceph cluster by registry id (default: random among clusters open for placement)")
+		storageID := fs.Int64("storage", 0, "pin the Ceph storage by registry id (default: random among storage entries open for placement)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm), ClusterID: *clusterID}
+		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm), StorageID: *storageID}
 		m, err := a.c.CreateMailbox(a.ctx, req)
 		if err != nil {
 			return err
@@ -167,9 +166,9 @@ func (a *cli) mailbox(args []string) error {
 				if m.StateReason != "" {
 					st += " (" + m.StateReason + ")"
 				}
-				rows = append(rows, []string{m.ID, strconv.FormatInt(m.ClusterID, 10), st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
+				rows = append(rows, []string{m.ID, strconv.FormatInt(m.StorageID, 10), st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
 			}
-			table([]string{"MAILBOX", "CLUSTER", "STATE", "HOLD", "ACCOUNTS"}, rows)
+			table([]string{"MAILBOX", "STORAGE", "STATE", "HOLD", "ACCOUNTS"}, rows)
 		})
 	case "holds":
 		items, err := a.c.ListHolds(a.ctx)
@@ -297,12 +296,6 @@ func (a *cli) mailbox(args []string) error {
 			return err
 		}
 		return ok("deleted " + id + " (data removal scheduled)")
-	case "empty":
-		msgs, folders, err := a.c.EmptyMailbox(a.ctx, id)
-		if err != nil {
-			return err
-		}
-		return emit(map[string]int{"messages": msgs, "folders": folders}, func() { fmt.Printf("emptied: %d messages to retention, %d folders removed\n", msgs, folders) })
 	case "recalc":
 		usage, err := a.c.RecalculateMailbox(a.ctx, id)
 		if err != nil {
@@ -1009,18 +1002,18 @@ func (a *cli) token(args []string) error {
 	return fmt.Errorf("unknown token subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
-func (a *cli) cluster(args []string) error {
-	const u = `cluster add --name text --mon-host "[addr]:6789,..." --user cephx-user --key-stdin|--keyring file --pools messages,attachments,index [--no-placement]
-       cluster list | get <id>
-       cluster set <id> [--name text] [--mon-host ...] [--user ...] [--key-stdin|--keyring file] [--pools m,a,i]
-       cluster enable <id> | disable <id>      placement of new mailboxes (existing ones keep working)
-       cluster remove <id>                     only when no mailbox refers to it`
+func (a *cli) storage(args []string) error {
+	const u = `storage add --name text --mon-host "[addr]:6789,..." --user cephx-user --key-stdin|--keyring file --pools messages,attachments,index [--no-placement]
+       storage list | get <id>
+       storage set <id> [--name text] [--mon-host ...] [--user ...] [--key-stdin|--keyring file] [--pools m,a,i]
+       storage enable <id> | disable <id>      placement of new mailboxes (existing ones keep working)
+       storage remove <id>                     only when no mailbox refers to it`
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Println("usage: kittiwake-admin " + u)
 		return nil
 	}
-	clusterFlags := func(fs *flag.FlagSet) (name, mon, user, pools *string, keyStdin *bool, keyring *string) {
-		name = fs.String("name", "", "cluster name (unique)")
+	storageFlags := func(fs *flag.FlagSet) (name, mon, user, pools *string, keyStdin *bool, keyring *string) {
+		name = fs.String("name", "", "storage name (unique)")
 		mon = fs.String("mon-host", "", "mon_host as in ceph.conf")
 		user = fs.String("user", "", "CephX user without \"client.\"")
 		pools = fs.String("pools", "", "messages,attachments,index pool names")
@@ -1039,8 +1032,8 @@ func (a *cli) cluster(args []string) error {
 		}
 		return "", nil
 	}
-	buildReq := func(name, mon, user, pools string, key string) admin.ClusterRequest {
-		req := admin.ClusterRequest{Name: name, MonHost: mon, User: user, Key: key}
+	buildReq := func(name, mon, user, pools string, key string) admin.StorageRequest {
+		req := admin.StorageRequest{Name: name, MonHost: mon, User: user, Key: key}
 		if pools != "" {
 			p := splitList(pools)
 			if len(p) == 3 {
@@ -1049,14 +1042,14 @@ func (a *cli) cluster(args []string) error {
 		}
 		return req
 	}
-	printCluster := func(c admin.Cluster) {
+	printStorage := func(c admin.Storage) {
 		fmt.Printf("id:        %d\nname:      %s\nfsid:      %s\nmon_host:  %s\nuser:      %s\npools:     %s, %s, %s\nplacement: %v\n",
 			c.ID, c.Name, c.FSID, c.MonHost, c.User, c.Pools.Messages, c.Pools.Attachments, c.Pools.Index, c.Placement)
 	}
 	switch args[0] {
 	case "add":
-		fs := newFlagSet("cluster add")
-		name, mon, user, pools, keyStdin, keyring := clusterFlags(fs)
+		fs := newFlagSet("storage add")
+		name, mon, user, pools, keyStdin, keyring := storageFlags(fs)
 		noPlacement := fs.Bool("no-placement", false, "register without accepting new mailboxes")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -1075,18 +1068,18 @@ func (a *cli) cluster(args []string) error {
 		if *noPlacement {
 			req.Placement = boolPtr(false)
 		}
-		c, err := a.c.AddCluster(a.ctx, req)
+		c, err := a.c.AddStorage(a.ctx, req)
 		if err != nil {
 			return err
 		}
-		return emit(c, func() { printCluster(c) })
+		return emit(c, func() { printStorage(c) })
 	case "list":
-		list, err := a.c.ListClusters(a.ctx)
+		list, err := a.c.ListStorage(a.ctx)
 		if err != nil {
 			return err
 		}
 		if list == nil {
-			list = []admin.Cluster{}
+			list = []admin.Storage{}
 		}
 		return emit(list, func() {
 			var rows [][]string
@@ -1097,22 +1090,22 @@ func (a *cli) cluster(args []string) error {
 		})
 	case "get", "set", "enable", "disable", "remove":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: kittiwake-admin cluster %s <id>", args[0])
+			return fmt.Errorf("usage: kittiwake-admin storage %s <id>", args[0])
 		}
 		id, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
-			return fmt.Errorf("cluster id %q is not a number", args[1])
+			return fmt.Errorf("storage id %q is not a number", args[1])
 		}
 		switch args[0] {
 		case "get":
-			c, err := a.c.GetCluster(a.ctx, id)
+			c, err := a.c.GetStorage(a.ctx, id)
 			if err != nil {
 				return err
 			}
-			return emit(c, func() { printCluster(c) })
+			return emit(c, func() { printStorage(c) })
 		case "set":
-			fs := newFlagSet("cluster set")
-			name, mon, user, pools, keyStdin, keyring := clusterFlags(fs)
+			fs := newFlagSet("storage set")
+			name, mon, user, pools, keyStdin, keyring := storageFlags(fs)
 			if err := fs.Parse(args[2:]); err != nil {
 				return err
 			}
@@ -1127,25 +1120,25 @@ func (a *cli) cluster(args []string) error {
 			if req.Name == "" && req.MonHost == "" && req.User == "" && req.Key == "" && req.Pools == nil {
 				return errors.New("nothing to change")
 			}
-			c, err := a.c.UpdateCluster(a.ctx, id, req)
+			c, err := a.c.UpdateStorage(a.ctx, id, req)
 			if err != nil {
 				return err
 			}
-			return emit(c, func() { printCluster(c) })
+			return emit(c, func() { printStorage(c) })
 		case "enable", "disable":
-			c, err := a.c.UpdateCluster(a.ctx, id, admin.ClusterRequest{Placement: boolPtr(args[0] == "enable")})
+			c, err := a.c.UpdateStorage(a.ctx, id, admin.StorageRequest{Placement: boolPtr(args[0] == "enable")})
 			if err != nil {
 				return err
 			}
-			return emit(c, func() { fmt.Printf("cluster %d (%s): placement %v\n", c.ID, c.Name, c.Placement) })
+			return emit(c, func() { fmt.Printf("storage %d (%s): placement %v\n", c.ID, c.Name, c.Placement) })
 		case "remove":
-			if err := a.c.DeleteCluster(a.ctx, id); err != nil {
+			if err := a.c.DeleteStorage(a.ctx, id); err != nil {
 				return err
 			}
-			return ok(fmt.Sprintf("removed cluster %d", id))
+			return ok(fmt.Sprintf("removed storage %d", id))
 		}
 	}
-	return fmt.Errorf("unknown cluster subcommand %q\nusage: kittiwake-admin %s", args[0], u)
+	return fmt.Errorf("unknown storage subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
 
 // keyFromKeyring extracts the first "key = ..." of a Ceph keyring file.

@@ -1,7 +1,7 @@
 // Package identity persists domains, mailboxes, accounts, aliases, API
-// tokens and the Ceph cluster registry: the metadata of the platform. It
+// tokens and the Ceph storage registry: the metadata of the platform. It
 // is small, read-heavy and global, as opposed to mail data, which lives
-// per mailbox on a Ceph cluster. Store is the API the services use; it
+// per mailbox on a Ceph storage. Store is the API the services use; it
 // adds the per-process read cache and delegates to a Backend, of which
 // there are two: MariaDB (production, package store/mariadb) and RADOS
 // (development and tests, in this package).
@@ -53,11 +53,11 @@ type Backend interface {
 	TouchToken(ctx context.Context, t Versioned[Token])
 	ListTokens(ctx context.Context, accountID uuid.UUID) ([]Token, error)
 	DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID string) error
-	CreateCluster(ctx context.Context, c Cluster) (Cluster, error)
-	GetCluster(ctx context.Context, id int64) (Cluster, error)
-	ListClusters(ctx context.Context) ([]Cluster, error)
-	UpdateCluster(ctx context.Context, id int64, fn func(*Cluster) error) (Cluster, error)
-	DeleteCluster(ctx context.Context, id int64) error
+	CreateStorage(ctx context.Context, c Storage) (Storage, error)
+	GetStorage(ctx context.Context, id int64) (Storage, error)
+	ListStorage(ctx context.Context) ([]Storage, error)
+	UpdateStorage(ctx context.Context, id int64, fn func(*Storage) error) (Storage, error)
+	DeleteStorage(ctx context.Context, id int64) error
 
 	// RegisterNode inserts or refreshes the (mode, address) row.
 	RegisterNode(ctx context.Context, n Node) (Node, error)
@@ -253,19 +253,19 @@ func (s *Store) DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID st
 
 func (s *Store) TouchToken(ctx context.Context, t Versioned[Token]) { s.b.TouchToken(ctx, t) }
 
-// ---- cluster registry ----
+// ---- storage registry ----
 
-func (s *Store) CreateCluster(ctx context.Context, c Cluster) (Cluster, error) {
-	return s.b.CreateCluster(ctx, c)
+func (s *Store) CreateStorage(ctx context.Context, c Storage) (Storage, error) {
+	return s.b.CreateStorage(ctx, c)
 }
-func (s *Store) GetCluster(ctx context.Context, id int64) (Cluster, error) {
-	return s.b.GetCluster(ctx, id)
+func (s *Store) GetStorage(ctx context.Context, id int64) (Storage, error) {
+	return s.b.GetStorage(ctx, id)
 }
-func (s *Store) ListClusters(ctx context.Context) ([]Cluster, error) { return s.b.ListClusters(ctx) }
-func (s *Store) UpdateCluster(ctx context.Context, id int64, fn func(*Cluster) error) (Cluster, error) {
-	return s.b.UpdateCluster(ctx, id, fn)
+func (s *Store) ListStorage(ctx context.Context) ([]Storage, error) { return s.b.ListStorage(ctx) }
+func (s *Store) UpdateStorage(ctx context.Context, id int64, fn func(*Storage) error) (Storage, error) {
+	return s.b.UpdateStorage(ctx, id, fn)
 }
-func (s *Store) DeleteCluster(ctx context.Context, id int64) error { return s.b.DeleteCluster(ctx, id) }
+func (s *Store) DeleteStorage(ctx context.Context, id int64) error { return s.b.DeleteStorage(ctx, id) }
 
 // ---- node registry ----
 

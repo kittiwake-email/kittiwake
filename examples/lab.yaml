@@ -6,7 +6,7 @@ database:
   dsn: "kittiwake:kittiwake@unix(/run/mysqld/mysqld.sock)/kittiwake"   # MariaDB on the box (see ../kittiwake-labs)
 ceph:
   backend: librados
-  config_file: /etc/ceph/ceph.conf   # clusters are registered in the database (see ../kittiwake-labs)
+  config_file: /etc/ceph/ceph.conf   # storage (Ceph clusters) is registered in the database (see ../kittiwake-labs)
 listen:
   # "optional" makes IMAP/POP3/LMTP wait briefly for a PROXY header before the banner;
   # use "off" for direct clients, "required" behind HAProxy.

@@ -99,12 +99,12 @@ These are settled. Do not design around them.
   below. The service interfaces are the project's public Go API.
 
 - **One Go binary (`kittiwake`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
-  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `socketmap`, `worker` (+ `dav` later), plus an `admin` subcommand that talks to the metadata
-  database directly (bootstrap, export/import). Modes combine in one process or split across many.
+  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `socketmap`, `worker` (+ `dav` later), plus an
+  `admin` subcommand that talks to the metadata database directly (bootstrap, export/import). Modes combine in one process or split across many.
 - **Mail data in Ceph RADOS, metadata in MariaDB, no Redis.** Stateless daemons via librados
   (cgo; target latest stable Ceph). Per cluster three pools: `messages`, `attachments`,
   `index`. Pure RADOS, not S3/RGW. Metadata (domains, mailboxes, accounts, aliases, tokens,
-  signing keys, sessions, worker queue, cluster registry, admin audit) is in MariaDB
+  signing keys, sessions, worker queue, storage registry, admin audit) is in MariaDB
   (`store/mariadb`, embedded migrations, `kittiwake migrate`); the daemon refuses an unknown
   schema version. MariaDB commits every DDL statement on its own, so migration statements are
   idempotent and a failed migration is re-run. `database.read_dsn` sends SELECT-only
@@ -115,12 +115,13 @@ These are settled. Do not design around them.
   RGW-style objects: exclusive create for uniqueness, omap listings, version-conditional
   updates). `session.Store` and `queue.Store` are interfaces the same way. Both run the same
   conformance suites (`store/*/<pkg>test`; `make test-sql` against a real MariaDB).
-- **Multiple Ceph clusters, all equal.** Clusters are registry rows (`kittiwake-admin cluster
-  add`), not config; the fsid read on connect verifies the record. Each mailbox has a
-  `cluster_id`; every data store resolves pools through `cluster.Resolver` (Fixed for the
-  memory backend, Registry otherwise). Placement is random among connected clusters open for
-  placement; an unreachable cluster defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP
-  `serverUnavailable`). Sweeps walk every cluster; a removal task carries the cluster id.
+- **Multiple Ceph clusters, all equal, called storage.** A storage is one Ceph cluster as a
+  registry row (`kittiwake-admin storage add`, table `storage`), not config; the fsid read on
+  connect verifies the record. Each mailbox has a `storage_id`; every data store resolves
+  pools through `storage.Resolver` (Fixed for the memory backend, Registry otherwise).
+  Placement is random among connected storage entries open for placement; an unreachable
+  storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
+  every storage; a removal task carries the storage id.
 - **Admin API is the only way identity data is created/changed.** `kittiwake admin` does only
   bootstrap/token; operators use `kittiwake-admin` (client/admin). Do not add admin features
   to cmd/kittiwake; add them to the API + spec + client.

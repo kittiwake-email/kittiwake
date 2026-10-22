@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"kittiwake/rados"
-	"kittiwake/store/cluster"
+	"kittiwake/store/storage"
 )
 
 // Sentinel errors.
@@ -27,22 +27,22 @@ var (
 
 // Store is the attachment store.
 type Store struct {
-	r   cluster.Resolver
+	r   storage.Resolver
 	Now func() time.Time
 }
 
-// New returns a store on the attachments pool context (one cluster).
+// New returns a store on the attachments pool context (one storage).
 func New(attachmentsPool rados.IOContext) *Store {
-	return NewMulti(cluster.FixedPools(attachmentsPool, attachmentsPool, attachmentsPool))
+	return NewMulti(storage.FixedPools(attachmentsPool, attachmentsPool, attachmentsPool))
 }
 
 // NewMulti returns a store that resolves each mailbox's attachments pool
-// through r. Deduplication is per cluster: the same content stored for
-// mailboxes on two clusters is two objects.
-func NewMulti(r cluster.Resolver) *Store { return &Store{r: r, Now: time.Now} }
+// through r. Deduplication is per storage: the same content stored for
+// mailboxes on two storage entries is two objects.
+func NewMulti(r storage.Resolver) *Store { return &Store{r: r, Now: time.Now} }
 
 func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
-	_, io, err := s.r.Pool(ctx, mb, cluster.RoleAttachments)
+	_, io, err := s.r.Pool(ctx, mb, storage.RoleAttachments)
 	if err != nil {
 		return rados.ErrorContext(err)
 	}
@@ -50,7 +50,7 @@ func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
 }
 
 func (s *Store) poolOf(ctx context.Context, cid int64) rados.IOContext {
-	io, err := s.r.PoolOf(ctx, cid, cluster.RoleAttachments)
+	io, err := s.r.PoolOf(ctx, cid, storage.RoleAttachments)
 	if err != nil {
 		return rados.ErrorContext(err)
 	}
@@ -132,9 +132,9 @@ func (s *Store) Stat(ctx context.Context, mb uuid.UUID, hash string) (Info, erro
 	return s.stat(ctx, s.pool(ctx, mb), hash)
 }
 
-// StatOn is Stat on a given cluster (garbage collection).
-func (s *Store) StatOn(ctx context.Context, clusterID int64, hash string) (Info, error) {
-	return s.stat(ctx, s.poolOf(ctx, clusterID), hash)
+// StatOn is Stat on a given storage (garbage collection).
+func (s *Store) StatOn(ctx context.Context, storageID int64, hash string) (Info, error) {
+	return s.stat(ctx, s.poolOf(ctx, storageID), hash)
 }
 
 func (s *Store) stat(ctx context.Context, io rados.IOContext, hash string) (Info, error) {
@@ -161,8 +161,8 @@ func (s *Store) stat(ctx context.Context, io rados.IOContext, hash string) (Info
 }
 
 // Refs lists the referencing messages as "mailbox/message" strings.
-func (s *Store) Refs(ctx context.Context, clusterID int64, hash string) ([]string, error) {
-	kv, _, err := s.poolOf(ctx, clusterID).OmapList(ctx, hash, "ref/", "", 0)
+func (s *Store) Refs(ctx context.Context, storageID int64, hash string) ([]string, error) {
+	kv, _, err := s.poolOf(ctx, storageID).OmapList(ctx, hash, "ref/", "", 0)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -175,8 +175,8 @@ func (s *Store) Refs(ctx context.Context, clusterID int64, hash string) ([]strin
 
 // DeleteIfUnreferenced removes the object when it has no references and was
 // not touched within grace. Returns true if deleted.
-func (s *Store) DeleteIfUnreferenced(ctx context.Context, clusterID int64, hash string, grace time.Duration) (bool, error) {
-	info, err := s.StatOn(ctx, clusterID, hash)
+func (s *Store) DeleteIfUnreferenced(ctx context.Context, storageID int64, hash string, grace time.Duration) (bool, error) {
+	info, err := s.StatOn(ctx, storageID, hash)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
@@ -186,15 +186,15 @@ func (s *Store) DeleteIfUnreferenced(ctx context.Context, clusterID int64, hash 
 	if info.Refs > 0 || s.Now().Sub(info.Touched) < grace {
 		return false, nil
 	}
-	if err := s.poolOf(ctx, clusterID).Delete(ctx, hash); err != nil && !errors.Is(err, rados.ErrNotFound) {
+	if err := s.poolOf(ctx, storageID).Delete(ctx, hash); err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return false, err
 	}
 	return true, nil
 }
 
-// List walks all attachment hashes on every connected cluster.
-func (s *Store) List(ctx context.Context, fn func(clusterID int64, hash string) error) error {
-	return s.r.Each(ctx, cluster.RoleAttachments, func(cid int64, io rados.IOContext) error {
+// List walks all attachment hashes on every connected storage.
+func (s *Store) List(ctx context.Context, fn func(storageID int64, hash string) error) error {
+	return s.r.Each(ctx, storage.RoleAttachments, func(cid int64, io rados.IOContext) error {
 		return io.List(ctx, func(oid string) error {
 			if len(oid) != 64 {
 				return nil

@@ -1,11 +1,11 @@
-// Package cluster maps mailboxes to the Ceph cluster that holds their data.
+// Package storage maps mailboxes to the Ceph storage that holds their data.
 //
 // Every data store (index, messages, attachments, audit) asks a Resolver
 // for the pool context of a mailbox instead of holding one pool. Two
-// resolvers exist: Fixed, one cluster for everything (memory backend,
-// tests), and Registry, which connects to every cluster in the identity
+// resolvers exist: Fixed, one storage for everything (memory backend,
+// tests), and Registry, which connects to every storage in the identity
 // store's registry, keeps the connections, and places new mailboxes.
-package cluster
+package storage
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 	"kittiwake/store/identity"
 )
 
-// Role names a data pool of a cluster.
+// Role names a data pool of a storage.
 type Role int
 
 // Pool roles.
@@ -44,38 +44,38 @@ func (r Role) String() string {
 	return "?"
 }
 
-// ErrUnavailable: the mailbox's cluster is not connected from this process
+// ErrUnavailable: the mailbox's storage is not connected from this process
 // (unknown id, registry not yet reloaded, or connection failed). Callers
 // answer with a temporary failure.
-var ErrUnavailable = errors.New("cluster: unavailable")
+var ErrUnavailable = errors.New("storage: unavailable")
 
-// Resolver finds the pool contexts of a mailbox's cluster.
+// Resolver finds the pool contexts of a mailbox's storage.
 type Resolver interface {
-	// Pool returns the cluster id and the pool context of role for the
-	// mailbox. A cluster id placed in ctx with WithID wins over the lookup
+	// Pool returns the storage id and the pool context of role for the
+	// mailbox. A storage id placed in ctx with WithID wins over the lookup
 	// (deleted mailboxes, sweeps).
 	Pool(ctx context.Context, mailbox uuid.UUID, role Role) (int64, rados.IOContext, error)
-	// PoolOf returns the pool context of role on the given cluster.
-	PoolOf(ctx context.Context, clusterID int64, role Role) (rados.IOContext, error)
+	// PoolOf returns the pool context of role on the given storage.
+	PoolOf(ctx context.Context, storageID int64, role Role) (rados.IOContext, error)
 	// Each calls fn with the pool context of role on every connected
-	// cluster. Used by sweeps and garbage collection.
-	Each(ctx context.Context, role Role, fn func(clusterID int64, io rados.IOContext) error) error
+	// storage. Used by sweeps and garbage collection.
+	Each(ctx context.Context, role Role, fn func(storageID int64, io rados.IOContext) error) error
 }
 
 type ctxKey struct{}
 
-// WithID pins the cluster for mailboxes touched through ctx.
-func WithID(ctx context.Context, clusterID int64) context.Context {
-	return context.WithValue(ctx, ctxKey{}, clusterID)
+// WithID pins the storage for mailboxes touched through ctx.
+func WithID(ctx context.Context, storageID int64) context.Context {
+	return context.WithValue(ctx, ctxKey{}, storageID)
 }
 
-// IDFrom returns the cluster pinned in ctx, if any.
+// IDFrom returns the storage pinned in ctx, if any.
 func IDFrom(ctx context.Context) (int64, bool) {
 	v, ok := ctx.Value(ctxKey{}).(int64)
 	return v, ok
 }
 
-// ---- Fixed: one cluster ----
+// ---- Fixed: one storage ----
 
 // Fixed resolves every mailbox to one client (memory backend, tests).
 type Fixed struct {
@@ -112,13 +112,13 @@ func (f *Fixed) Each(_ context.Context, role Role, fn func(int64, rados.IOContex
 	return fn(0, f.pools[role])
 }
 
-// ---- Registry: every cluster in the identity store ----
+// ---- Registry: every storage in the identity store ----
 
-// Connector opens a client for a cluster record. Production uses librados;
+// Connector opens a client for a storage record. Production uses librados;
 // tests hand out memory clients.
-type Connector func(c identity.Cluster) (rados.Client, error)
+type Connector func(c identity.Storage) (rados.Client, error)
 
-// Registry keeps a connection per registered cluster and resolves
+// Registry keeps a connection per registered storage and resolves
 // mailboxes to them through the identity store (cached reads).
 type Registry struct {
 	ids     *identity.Store
@@ -126,9 +126,9 @@ type Registry struct {
 	log     *slog.Logger
 	Now     func() time.Time
 	// ReloadMinInterval bounds on-demand reloads triggered by an unknown
-	// cluster id (a mailbox placed on a cluster added since the last reload).
+	// storage id (a mailbox placed on a storage added since the last reload).
 	ReloadMinInterval time.Duration
-	// RetryInterval: how long a cluster whose connection failed is left
+	// RetryInterval: how long a storage whose connection failed is left
 	// alone before the next attempt.
 	RetryInterval time.Duration
 
@@ -138,14 +138,14 @@ type Registry struct {
 }
 
 type conn struct {
-	rec    identity.Cluster
+	rec    identity.Storage
 	client rados.Client
 	pools  [3]rados.IOContext
-	err    error     // why the cluster is not connected
+	err    error     // why the storage is not connected
 	tried  time.Time // last connection attempt
 }
 
-// Status describes one cluster for health output.
+// Status describes one storage for health output.
 type Status struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
@@ -163,15 +163,15 @@ func NewRegistry(ids *identity.Store, connect Connector, log *slog.Logger) *Regi
 	return &Registry{ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, RetryInterval: time.Minute, conns: map[int64]*conn{}}
 }
 
-// Reload reads the registry, connects to new clusters (verifying the fsid
+// Reload reads the registry, connects to new storage entries (verifying the fsid
 // when the record has one, recording it when it has none), applies
-// changed placement flags, and closes removed clusters. Connecting
-// happens outside the lock, so a slow or unreachable cluster never stalls
-// lookups for the others; a cluster whose last attempt failed is retried
+// changed placement flags, and closes removed storage entries. Connecting
+// happens outside the lock, so a slow or unreachable storage never stalls
+// lookups for the others; a storage whose last attempt failed is retried
 // no more often than RetryInterval. Connection failures are kept as the
-// cluster's status, not returned.
+// storage's status, not returned.
 func (r *Registry) Reload(ctx context.Context) error {
-	recs, err := r.ids.ListClusters(ctx)
+	recs, err := r.ids.ListStorage(ctx)
 	if err != nil {
 		return err
 	}
@@ -180,7 +180,7 @@ func (r *Registry) Reload(ctx context.Context) error {
 	r.mu.Lock()
 	r.lastLoad = now
 	seen := map[int64]bool{}
-	var todo []identity.Cluster
+	var todo []identity.Storage
 	var closing []rados.Client
 	for _, rec := range recs {
 		seen[rec.ID] = true
@@ -204,7 +204,7 @@ func (r *Registry) Reload(ctx context.Context) error {
 				closing = append(closing, c.client)
 			}
 			delete(r.conns, id)
-			r.log.Info("cluster removed from registry", slog.Int64("cluster", id), slog.String("name", c.rec.Name))
+			r.log.Info("storage removed from registry", slog.Int64("storage", id), slog.String("name", c.rec.Name))
 		}
 	}
 	r.mu.Unlock()
@@ -216,7 +216,7 @@ func (r *Registry) Reload(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for i, rec := range todo {
 		wg.Add(1)
-		go func(i int, rec identity.Cluster) {
+		go func(i int, rec identity.Storage) {
 			defer wg.Done()
 			results[i] = r.open(ctx, rec)
 		}(i, rec)
@@ -242,16 +242,16 @@ func (r *Registry) Reload(ctx context.Context) error {
 
 var errConnecting = errors.New("connecting")
 
-func sameConn(a, b identity.Cluster) bool {
+func sameConn(a, b identity.Storage) bool {
 	return a.MonHost == b.MonHost && a.User == b.User && a.Key == b.Key && a.Pools == b.Pools
 }
 
-func (r *Registry) open(ctx context.Context, rec identity.Cluster) *conn {
+func (r *Registry) open(ctx context.Context, rec identity.Storage) *conn {
 	c := &conn{rec: rec}
 	client, err := r.connect(rec)
 	if err != nil {
 		c.err = err
-		r.log.Error("cluster connect failed", slog.Int64("cluster", rec.ID), slog.String("name", rec.Name), slog.String("error", err.Error()))
+		r.log.Error("storage connect failed", slog.Int64("storage", rec.ID), slog.String("name", rec.Name), slog.String("error", err.Error()))
 		return c
 	}
 	fsid, err := client.FSID()
@@ -269,9 +269,9 @@ func (r *Registry) open(ctx context.Context, rec identity.Cluster) *conn {
 	switch {
 	case rec.FSID == uuid.Nil:
 		// First contact: record the fsid so later reloads verify it.
-		upd, err := r.ids.UpdateCluster(ctx, rec.ID, func(x *identity.Cluster) error {
+		upd, err := r.ids.UpdateStorage(ctx, rec.ID, func(x *identity.Storage) error {
 			if x.FSID != uuid.Nil && x.FSID != got {
-				return fmt.Errorf("%w: cluster %s now reports fsid %s, registry has %s", identity.ErrConflict, x.Name, got, x.FSID)
+				return fmt.Errorf("%w: storage %s now reports fsid %s, registry has %s", identity.ErrConflict, x.Name, got, x.FSID)
 			}
 			x.FSID = got
 			return nil
@@ -284,8 +284,8 @@ func (r *Registry) open(ctx context.Context, rec identity.Cluster) *conn {
 		c.rec = upd
 	case rec.FSID != got:
 		_ = client.Close()
-		c.err = fmt.Errorf("fsid mismatch: registry says %s, cluster reports %s", rec.FSID, got)
-		r.log.Error("cluster refused", slog.Int64("cluster", rec.ID), slog.String("name", rec.Name), slog.String("error", c.err.Error()))
+		c.err = fmt.Errorf("fsid mismatch: registry says %s, storage reports %s", rec.FSID, got)
+		r.log.Error("storage refused", slog.Int64("storage", rec.ID), slog.String("name", rec.Name), slog.String("error", c.err.Error()))
 		return c
 	}
 	for i, name := range []string{rec.Pools.Index, rec.Pools.Messages, rec.Pools.Attachments} {
@@ -298,7 +298,7 @@ func (r *Registry) open(ctx context.Context, rec identity.Cluster) *conn {
 		c.pools[i] = io
 	}
 	c.client = client
-	r.log.Info("cluster connected", slog.Int64("cluster", rec.ID), slog.String("name", rec.Name), slog.String("fsid", got.String()), slog.Bool("placement", rec.Placement))
+	r.log.Info("storage connected", slog.Int64("storage", rec.ID), slog.String("name", rec.Name), slog.String("fsid", got.String()), slog.Bool("placement", rec.Placement))
 	return c
 }
 
@@ -312,7 +312,7 @@ func (r *Registry) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-t.C:
 			if err := r.Reload(ctx); err != nil {
-				r.log.Error("cluster registry reload failed", slog.String("error", err.Error()))
+				r.log.Error("storage registry reload failed", slog.String("error", err.Error()))
 			}
 		}
 	}
@@ -336,7 +336,7 @@ func (r *Registry) get(ctx context.Context, id int64) (*conn, error) {
 	last := r.lastLoad
 	r.mu.RUnlock()
 	if !ok && r.Now().Sub(last) >= r.ReloadMinInterval {
-		// A cluster added since the last reload: look again, bounded.
+		// A storage added since the last reload: look again, bounded.
 		if err := r.Reload(ctx); err == nil {
 			r.mu.RLock()
 			c, ok = r.conns[id]
@@ -344,17 +344,17 @@ func (r *Registry) get(ctx context.Context, id int64) (*conn, error) {
 		}
 	}
 	if !ok {
-		return nil, fmt.Errorf("%w: cluster %d is not in this process's registry", ErrUnavailable, id)
+		return nil, fmt.Errorf("%w: storage %d is not in this process's registry", ErrUnavailable, id)
 	}
 	if c.client == nil {
-		return nil, fmt.Errorf("%w: cluster %d (%s): %v", ErrUnavailable, id, c.rec.Name, c.err)
+		return nil, fmt.Errorf("%w: storage %d (%s): %v", ErrUnavailable, id, c.rec.Name, c.err)
 	}
 	return c, nil
 }
 
-// ClusterOf returns the cluster id of a mailbox: the one pinned in ctx, or
+// StorageOf returns the storage id of a mailbox: the one pinned in ctx, or
 // the mailbox record's (cached).
-func (r *Registry) ClusterOf(ctx context.Context, mailbox uuid.UUID) (int64, error) {
+func (r *Registry) StorageOf(ctx context.Context, mailbox uuid.UUID) (int64, error) {
 	if id, ok := IDFrom(ctx); ok {
 		return id, nil
 	}
@@ -362,14 +362,14 @@ func (r *Registry) ClusterOf(ctx context.Context, mailbox uuid.UUID) (int64, err
 	if err != nil {
 		return 0, err
 	}
-	if m.ClusterID == 0 {
-		return 0, fmt.Errorf("%w: mailbox %s has no cluster", ErrUnavailable, mailbox)
+	if m.StorageID == 0 {
+		return 0, fmt.Errorf("%w: mailbox %s has no storage", ErrUnavailable, mailbox)
 	}
-	return m.ClusterID, nil
+	return m.StorageID, nil
 }
 
 func (r *Registry) Pool(ctx context.Context, mailbox uuid.UUID, role Role) (int64, rados.IOContext, error) {
-	id, err := r.ClusterOf(ctx, mailbox)
+	id, err := r.StorageOf(ctx, mailbox)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -380,8 +380,8 @@ func (r *Registry) Pool(ctx context.Context, mailbox uuid.UUID, role Role) (int6
 	return id, c.pools[role], nil
 }
 
-func (r *Registry) PoolOf(ctx context.Context, clusterID int64, role Role) (rados.IOContext, error) {
-	c, err := r.get(ctx, clusterID)
+func (r *Registry) PoolOf(ctx context.Context, storageID int64, role Role) (rados.IOContext, error) {
+	c, err := r.get(ctx, storageID)
 	if err != nil {
 		return nil, err
 	}
@@ -411,15 +411,15 @@ func (r *Registry) Each(ctx context.Context, role Role, fn func(int64, rados.IOC
 	return nil
 }
 
-// ErrNoPlacement: no connected cluster accepts new mailboxes.
-var ErrNoPlacement = errors.New("cluster: no cluster accepts new mailboxes")
+// ErrNoPlacement: no connected storage accepts new mailboxes.
+var ErrNoPlacement = errors.New("storage: no storage accepts new mailboxes")
 
-// Pick chooses a cluster for a new mailbox: random among connected
-// clusters with placement enabled.
+// Pick chooses a storage for a new mailbox: random among connected
+// storage entries with placement enabled.
 func (r *Registry) Pick(ctx context.Context) (int64, error) {
 	ids := r.placeable()
 	if len(ids) == 0 {
-		// A cluster registered since the last reload: look again, bounded.
+		// A storage registered since the last reload: look again, bounded.
 		r.mu.RLock()
 		last := r.lastLoad
 		r.mu.RUnlock()
@@ -447,7 +447,7 @@ func (r *Registry) placeable() []int64 {
 	return ids
 }
 
-// Statuses lists every registered cluster with its connection state.
+// Statuses lists every registered storage with its connection state.
 func (r *Registry) Statuses() []Status {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -474,9 +474,9 @@ func sortStatuses(s []Status) {
 	}
 }
 
-// Verify connects to a cluster record once, returns its fsid and closes
-// the connection. Used when a cluster is added through the admin API.
-func Verify(connect Connector, rec identity.Cluster) (uuid.UUID, error) {
+// Verify connects to a storage record once, returns its fsid and closes
+// the connection. Used when a storage is added through the admin API.
+func Verify(connect Connector, rec identity.Storage) (uuid.UUID, error) {
 	client, err := connect(rec)
 	if err != nil {
 		return uuid.Nil, err

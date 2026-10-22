@@ -11,7 +11,7 @@ import (
 	ceph "github.com/ceph/go-ceph/rados"
 )
 
-// Config describes how to reach a Ceph cluster.
+// Config describes how to reach a Ceph storage.
 type Config struct {
 	// ConfigFile is an optional ceph.conf to read first.
 	ConfigFile string
@@ -27,7 +27,7 @@ type Config struct {
 	Options map[string]string
 }
 
-// Connect opens a connection to the cluster described by cfg.
+// Connect opens a connection to the storage described by cfg.
 func Connect(cfg Config) (Client, error) {
 	var conn *ceph.Conn
 	var err error

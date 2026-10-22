@@ -228,11 +228,11 @@ func runServe(args []string) error {
 	a.ExtraModes = protocolModes()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	clusters := 0
-	if a.Clusters != nil {
-		clusters = len(a.Clusters.Statuses())
+	storageCount := 0
+	if a.Storage != nil {
+		storageCount = len(a.Storage.Statuses())
 	}
-	log.Info("kittiwake starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend, "clusters", clusters)
+	log.Info("kittiwake starting", "version", app.Version, "modes", cfg.Modes, "backend", cfg.Ceph.Backend, "storage", storageCount)
 	return a.Run(ctx)
 }
 

@@ -103,6 +103,27 @@ func (d *DB) Fail(ctx context.Context, t queue.Task, cause error) (bool, error) 
 	return false, err
 }
 
+// Extend renews the lease while the task is still leased; zero rows
+// means the lease expired and Claim handed the task to another worker.
+func (d *DB) Extend(ctx context.Context, t *queue.Task, lease time.Duration) error {
+	now := d.Now().UTC()
+	res, err := d.exec(ctx, "UPDATE tasks SET lease_until = ? WHERE id = ? AND state = 'leased' AND lease_until > ?", now.Add(lease), t.ID, now)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return queue.ErrLeaseLost
+	}
+	return nil
+}
+
+// Release returns a claimed task to pending, due now, without counting
+// a failure.
+func (d *DB) Release(ctx context.Context, t queue.Task) error {
+	_, err := d.exec(ctx, "UPDATE tasks SET state = 'pending', run_after = ?, lease_worker = NULL, lease_until = NULL WHERE id = ? AND state = 'leased'", d.Now().UTC(), t.ID)
+	return err
+}
+
 func (d *DB) Stats(ctx context.Context, typ string) (queue.Stats, error) {
 	rows, err := d.r().QueryContext(ctx, "SELECT state, COUNT(*) FROM tasks WHERE type = ? GROUP BY state", typ)
 	if err != nil {

@@ -98,35 +98,37 @@ omap load of 150k-message mailboxes have to be spread. Kittiwake therefore place
 mailbox on one of several Ceph clusters**, all equal, and can grow by adding clusters, also
 in other datacenters within a few milliseconds of each other.
 
-- **Registry, not config.** Clusters are rows in the metadata database: name, `mon_host`,
-  CephX user and key, the three data pools, and a placement flag. `kittiwake-admin cluster
-  add` hands the details to the admin daemon, which connects once, checks the pools exist,
-  reads the cluster's **fsid** and stores it. The daemon config carries no cluster at all
-  (only `ceph.config_file` and `ceph.options` as librados defaults for every connection).
-- **Fsid is the identity.** Mailboxes reference the cluster by its integer registry id;
-  the fsid guards the registry entry: a daemon that connects and finds another fsid than
-  recorded refuses that cluster, so a mistyped `mon_host` can never serve the wrong data.
-- **Every daemon connects to every cluster** it finds in the registry, re-reads the
-  registry every 30 seconds (and at once when it meets a cluster id it does not know), so a
-  cluster added or closed for placement is picked up without a restart. The management
-  listener's `/clusters` shows each cluster's connection state.
-- **Placement** of a new mailbox is random among connected clusters whose placement flag
-  is on; `kittiwake-admin mailbox create --cluster <id>` pins one. `cluster disable` stops
-  new placement on a cluster, existing mailboxes keep working; a cluster can only be removed
+- **Storage, not config.** A *storage* is one Ceph cluster registered as a row in the
+  metadata database: name, `mon_host`, CephX user and key, the three data pools, and a
+  placement flag. `kittiwake-admin storage add` hands the details to the admin daemon,
+  which connects once, checks the pools exist, reads the cluster's **fsid** and stores it.
+  The daemon config carries no storage at all (only `ceph.config_file` and `ceph.options`
+  as librados defaults for every connection).
+- **Fsid is the identity.** Mailboxes reference their storage by its integer registry id
+  (`storage_id`); the fsid guards the entry: a daemon that connects and finds another fsid
+  than recorded refuses that storage, so a mistyped `mon_host` can never serve the wrong
+  data.
+- **Every daemon connects to every storage** it finds in the registry, re-reads the
+  registry every 30 seconds (and at once when it meets a storage id it does not know), so a
+  storage added or closed for placement is picked up without a restart. The management
+  listener's `/storage` shows each storage's connection state.
+- **Placement** of a new mailbox is random among connected storage entries whose placement
+  flag is on; `kittiwake-admin mailbox create --storage <id>` pins one. `storage disable`
+  stops new placement there, existing mailboxes keep working; a storage can only be removed
   when no mailbox refers to it (a foreign key enforces it).
-- **Where things live.** Every data store resolves a mailbox to its cluster's pools
+- **Where things live.** Every data store resolves a mailbox to its storage's pools
   through a cached identity read (the same cached record the state check already loads).
-  Index, messages, attachments and the per-mailbox audit log sit on the mailbox's cluster.
-  Attachment deduplication is per cluster. Garbage collection and sweeps walk every
-  connected cluster; a removal task for a deleted mailbox carries the cluster id, since the
+  Index, messages, attachments and the per-mailbox audit log sit on the mailbox's storage.
+  Attachment deduplication is per storage. Garbage collection and sweeps walk every
+  connected storage; a removal task for a deleted mailbox carries the storage id, since the
   record it would look up is gone. Platform-wide admin audit records live in the database.
-- **Unavailable cluster.** A mailbox whose cluster is not connected from this process is
+- **Unavailable storage.** A mailbox whose storage is not connected from this process is
   served as temporarily unavailable: LMTP answers 4xx so the MTA queues, users get a clear
-  error, the log names the cluster.
+  error, the log names the storage.
 - **Latency.** Serving a mailbox in another datacenter costs one round trip per sequential
   RADOS write; the write path is three. Reads on the hot path are cached or session-local.
-- **Not yet:** moving a mailbox between clusters (a worker task: suspend soft, copy, flip,
-  delete), per-domain default clusters.
+- **Not yet:** moving a mailbox between storage entries (a worker task: suspend soft, copy,
+  flip, delete), per-domain default storage.
 
 ## One binary, multiple modes
 
@@ -976,8 +978,8 @@ The daemon takes a single YAML file as configuration:
   the modes to run in one process, otherwise each systemd instance passes its mode with
   `--modes` and takes everything else, including its management port, from the YAML
 - Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
-- Ceph: `config_file` and `options` applied to every cluster connection (clusters
-  themselves are registered in the database); pool names only for the memory backend
+- Ceph: `config_file` and `options` applied to every storage connection (the Ceph
+  clusters themselves are registered in the database as storage); pool names only for the memory backend
 - Outbound SMTP relay host (and optional SASL credentials)
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
@@ -1038,11 +1040,11 @@ other clients can be generated from the exact contract the running version imple
 - Configuration loading, single YAML file, `memory` backend for development
 - RADOS abstraction with librados (cgo) and in-memory implementations
 - Metadata in MariaDB (domains, mailboxes, accounts with services, aliases, catch-all,
-  tokens, sessions, signing keys, queue, cluster registry, admin audit) with embedded
+  tokens, sessions, signing keys, queue, storage registry, admin audit) with embedded
   migrations and `kittiwake migrate`; RADOS backend for development; shared conformance
   suites; `kittiwake admin bootstrap`, identity export/import
 - Multiple Ceph clusters: registry with fsid verification, per-mailbox placement, periodic
-  reload, per-cluster stores and sweeps, `kittiwake-admin cluster` and `/v1/admin/clusters`
+  reload, per-storage stores and sweeps, `kittiwake-admin storage` and `/v1/admin/storage`
 - Admin service, REST admin API (domains, mailboxes, accounts, aliases, tokens, sessions,
   hold/release, audit queries, queue inspection, key rotation, export/import) with an
   OpenAPI spec that is tested against the registered routes

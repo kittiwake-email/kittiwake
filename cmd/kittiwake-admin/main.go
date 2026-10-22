@@ -58,13 +58,13 @@ flags:
 commands:
   status                              version and time of the admin API
   domain    create|list|get|enable|disable|delete
-  mailbox   create|list|inspect|set|suspend|disable|activate|delete|empty|recalc|hold|release|holds|export|exports|download|import
+  mailbox   create|list|inspect|set|suspend|disable|activate|delete|recalc|hold|release|holds|export|exports|download|import
   account   create|list|get|set|delete|password (set|list|expire|remove)|totp-disable|sessions|revoke-session|token|tokens
   alias     create|list|get|set|delete
   audit     query the audit log
   queue     stats|dead|retry
   token     create|list|delete     admin tokens (full or --read-only)
-  cluster   add|list|get|set|enable|disable|remove   Ceph cluster registry (placement of new mailboxes)
+  storage   add|list|get|set|enable|disable|remove   Ceph storage registry (placement of new mailboxes)
   node      list [--mode m]       running daemon nodes (registered with heartbeats)
   keys      rotate
   identity  export|import
@@ -136,8 +136,8 @@ func run(args []string) error {
 		return app.queue(sub)
 	case "token":
 		return app.token(sub)
-	case "cluster":
-		return app.cluster(sub)
+	case "storage":
+		return app.storage(sub)
 	case "node":
 		return app.node(sub)
 	case "keys":

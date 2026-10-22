@@ -36,15 +36,15 @@ type Config struct {
 	Log      Log      `yaml:"log"`
 }
 
-// Ceph is the cluster connection and pool layout.
+// Ceph is the storage connection and pool layout.
 type Ceph struct {
 	// Backend is "librados" (default) or "memory" (in-process, volatile;
 	// for development and tests only).
 	Backend string `yaml:"backend"`
-	// ConfigFile and Options apply to every cluster connection (librados
+	// ConfigFile and Options apply to every storage connection (librados
 	// defaults such as ms_bind_ipv6). Monitors, credentials and pools of a
-	// cluster live in the registry (database), not here; with the memory
-	// backend Pools names the pools of the one in-memory cluster.
+	// storage live in the registry (database), not here; with the memory
+	// backend Pools names the pools of the one in-memory storage.
 	ConfigFile string            `yaml:"config_file"`
 	Options    map[string]string `yaml:"options"`
 	Monitors   []string          `yaml:"monitors"`
@@ -54,8 +54,8 @@ type Ceph struct {
 	Pools      Pools             `yaml:"pools"`
 }
 
-// Pools names the RADOS pools of the memory backend's single cluster.
-// With librados every cluster's pools are in its registry record.
+// Pools names the RADOS pools of the memory backend's single storage.
+// With librados every storage's pools are in its registry record.
 type Pools struct {
 	Messages    string `yaml:"messages"`
 	Attachments string `yaml:"attachments"`
@@ -193,7 +193,7 @@ type Cache struct {
 
 // Database is the metadata database (MariaDB): domains, mailboxes,
 // accounts, aliases, tokens, sessions, the worker queue and the Ceph
-// cluster registry. Required with the librados backend; with the memory
+// storage registry. Required with the librados backend; with the memory
 // backend an empty DSN keeps metadata in memory as well.
 type Database struct {
 	// DSN in go-sql-driver/mysql form, e.g.
@@ -373,7 +373,7 @@ func (c *Config) Validate() error {
 	switch c.Ceph.Backend {
 	case "librados":
 		if len(c.Ceph.Monitors) > 0 || c.Ceph.User != "" || c.Ceph.Key != "" || c.Ceph.Keyring != "" {
-			return errors.New("config: ceph.monitors/user/key/keyring are not used with librados: clusters are registered in the database (kittiwake-admin cluster add); only ceph.config_file and ceph.options apply to every connection")
+			return errors.New("config: ceph.monitors/user/key/keyring are not used with librados: storage entries are registered in the database (kittiwake-admin storage add); only ceph.config_file and ceph.options apply to every connection")
 		}
 	case "memory":
 		if c.Ceph.Pools.Messages == "" || c.Ceph.Pools.Attachments == "" || c.Ceph.Pools.Index == "" {

@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"kittiwake/rados"
-	"kittiwake/store/cluster"
+	"kittiwake/store/storage"
 )
 
 // Sentinel errors.
@@ -27,20 +27,20 @@ var (
 
 // Store is the message store.
 type Store struct {
-	r   cluster.Resolver
+	r   storage.Resolver
 	Now func() time.Time
 }
 
-// New returns a store on the messages pool context (one cluster).
+// New returns a store on the messages pool context (one storage).
 func New(messagesPool rados.IOContext) *Store {
-	return NewMulti(cluster.FixedPools(messagesPool, messagesPool, messagesPool))
+	return NewMulti(storage.FixedPools(messagesPool, messagesPool, messagesPool))
 }
 
 // NewMulti returns a store that resolves each mailbox's messages pool through r.
-func NewMulti(r cluster.Resolver) *Store { return &Store{r: r, Now: time.Now} }
+func NewMulti(r storage.Resolver) *Store { return &Store{r: r, Now: time.Now} }
 
 func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
-	_, io, err := s.r.Pool(ctx, mb, cluster.RoleMessages)
+	_, io, err := s.r.Pool(ctx, mb, storage.RoleMessages)
 	if err != nil {
 		return rados.ErrorContext(err)
 	}
@@ -119,7 +119,7 @@ func (s *Store) Delete(ctx context.Context, mb, msg uuid.UUID) error {
 
 // Info describes a stored message object for sweeps.
 type Info struct {
-	ClusterID int64
+	StorageID int64
 	Mailbox   uuid.UUID
 	Message   uuid.UUID
 	Created   time.Time
@@ -127,11 +127,11 @@ type Info struct {
 	Location  string
 }
 
-// List walks every message document on every connected cluster (not the
+// List walks every message document on every connected storage (not the
 // .raw objects), calling fn with its info. Used by the orphan sweep and
-// mailbox removal; act on an Info with cluster.WithID(ctx, info.ClusterID).
+// mailbox removal; act on an Info with storage.WithID(ctx, info.StorageID).
 func (s *Store) List(ctx context.Context, fn func(Info) error) error {
-	return s.r.Each(ctx, cluster.RoleMessages, func(cid int64, io rados.IOContext) error {
+	return s.r.Each(ctx, storage.RoleMessages, func(cid int64, io rados.IOContext) error {
 		return io.List(ctx, func(oid string) error {
 			if len(oid) != 73 || oid[36] != '/' { // uuid/uuid
 				return nil
@@ -148,7 +148,7 @@ func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 				}
 				return mapErr(err)
 			}
-			info := Info{ClusterID: cid, Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime}
+			info := Info{StorageID: cid, Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime}
 			if x, err := io.GetXattrs(ctx, oid); err == nil {
 				if c, err := strconv.ParseInt(string(x["created"]), 10, 64); err == nil {
 					info.Created = time.Unix(c, 0).UTC()

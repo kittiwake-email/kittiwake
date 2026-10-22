@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,11 +28,11 @@ import (
 	"kittiwake/service/export"
 	"kittiwake/store/attach"
 	"kittiwake/store/audit"
-	"kittiwake/store/cluster"
 	"kittiwake/store/identity"
 	"kittiwake/store/index"
 	"kittiwake/store/message"
 	"kittiwake/store/queue"
+	"kittiwake/store/storage"
 )
 
 // Task types handled here (plus those defined by services).
@@ -83,7 +84,9 @@ type Config struct {
 	OrphanAge time.Duration
 	// PollInterval between queue checks when idle.
 	PollInterval time.Duration
-	// LeaseDuration for claimed tasks.
+	// LeaseDuration for claimed tasks. A running task renews its lease
+	// every quarter of it, so a crashed worker's task is taken over by
+	// another worker within one lease duration.
 	LeaseDuration time.Duration
 	// Schedule intervals for periodic tasks.
 	PurgeInterval time.Duration // per-mailbox trash purge
@@ -108,6 +111,8 @@ type Worker struct {
 	Now   func() time.Time
 	// Export is optional; without it export-mailbox tasks fail.
 	Export *export.Service
+	// afterStep is a test hook called after each message a removal purged.
+	afterStep func(n int)
 }
 
 // Stores needed by the worker.
@@ -138,7 +143,7 @@ func New(cfg Config, st Stores, aud *auditor.Auditor, log *slog.Logger) *Worker 
 		cfg.PollInterval = 5 * time.Second
 	}
 	if cfg.LeaseDuration <= 0 {
-		cfg.LeaseDuration = 10 * time.Minute
+		cfg.LeaseDuration = 2 * time.Minute
 	}
 	if cfg.PurgeInterval <= 0 {
 		cfg.PurgeInterval = time.Hour
@@ -200,11 +205,70 @@ func (w *Worker) RunOnce(ctx context.Context) bool {
 	return busy
 }
 
+// execute runs one claimed task. While it runs, the lease is renewed
+// every quarter of its duration; a lease that cannot be renewed (another
+// worker took the task over after this one looked dead) cancels the run.
+// A run cut short by the worker shutting down hands the task back to the
+// queue, due at once, so the next worker continues where this one stopped;
+// every task is written to be resumable.
 func (w *Worker) execute(ctx context.Context, task queue.Task) {
 	start := w.Now()
-	err := w.handle(ctx, task)
+	tctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex // guards task.LeaseKey, which renewal may change
+	lost := false
+	done := make(chan struct{})
+	renewed := make(chan struct{})
+	run := task
+	go func() {
+		defer close(renewed)
+		t := time.NewTicker(w.cfg.LeaseDuration / 4)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tctx.Done():
+				return
+			case <-t.C:
+			}
+			mu.Lock()
+			err := w.queue.Extend(ctx, &task, w.cfg.LeaseDuration)
+			if errors.Is(err, queue.ErrLeaseLost) {
+				lost = true
+			}
+			mu.Unlock()
+			if lost {
+				w.log.Warn("task lease lost; stopping", slog.String("type", task.Type), slog.String("id", task.ID))
+				cancel()
+				return
+			}
+			if err != nil {
+				w.log.Warn("task lease renewal failed", slog.String("type", task.Type), slog.String("id", task.ID), slog.String("error", err.Error()))
+			}
+		}
+	}()
+	err := w.handle(tctx, run)
+	close(done)
+	<-renewed
+	mu.Lock()
+	defer mu.Unlock()
+	// Queue bookkeeping must outlive a cancelled run context.
+	qctx, qcancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer qcancel()
 	if err != nil {
-		dead, ferr := w.queue.Fail(ctx, task, err)
+		if lost {
+			return // the task belongs to another worker now
+		}
+		if ctx.Err() != nil {
+			if rerr := w.queue.Release(qctx, task); rerr != nil {
+				w.log.Warn("task release failed", slog.String("type", task.Type), slog.String("id", task.ID), slog.String("error", rerr.Error()))
+				return
+			}
+			w.log.Info("task released for the next worker", slog.String("type", task.Type), slog.String("id", task.ID), slog.Duration("ran", w.Now().Sub(start)))
+			return
+		}
+		dead, ferr := w.queue.Fail(qctx, task, err)
 		res := "retry"
 		if dead {
 			res = "dead"
@@ -214,7 +278,7 @@ func (w *Worker) execute(ctx context.Context, task queue.Task) {
 			slog.Bool("dead", dead), slog.String("error", err.Error()), slog.Any("requeue_error", ferr))
 		return
 	}
-	if err := w.queue.Complete(ctx, task); err != nil {
+	if err := w.queue.Complete(qctx, task); err != nil {
 		w.log.Warn("complete failed", slog.String("type", task.Type), slog.String("error", err.Error()))
 	}
 	metrics.Tasks.WithLabelValues(task.Type, "ok").Inc()
@@ -223,9 +287,9 @@ func (w *Worker) execute(ctx context.Context, task queue.Task) {
 
 type mailboxPayload struct {
 	Mailbox uuid.UUID `json:"mailbox"`
-	// ClusterID pins the cluster for a mailbox whose record is gone
+	// StorageID pins the storage for a mailbox whose record is gone
 	// (remove-mailbox); zero means "look it up".
-	ClusterID int64 `json:"cluster_id,omitempty"`
+	StorageID int64 `json:"storage_id,omitempty"`
 }
 
 func (w *Worker) handle(ctx context.Context, task queue.Task) error {
@@ -241,8 +305,8 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 	case TaskPurgeTrash:
 		return w.purgeTrash(ctx, mp.Mailbox)
 	case TaskRemoveMailbox:
-		if mp.ClusterID != 0 {
-			ctx = cluster.WithID(ctx, mp.ClusterID)
+		if mp.StorageID != 0 {
+			ctx = storage.WithID(ctx, mp.StorageID)
 		}
 		return w.removeMailbox(ctx, mp.Mailbox)
 	case TaskRecalcQuota:
@@ -378,6 +442,9 @@ func (w *Worker) deleteMessage(ctx context.Context, mb, msg uuid.UUID) error {
 }
 
 // removeMailbox purges every object of a mailbox whose record is gone.
+// It is resumable: every pass lists what is still there, so a run that
+// was cut short (worker restart, lease lost) continues where it stopped
+// when the task is claimed again.
 func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 	if v, err := w.ids.GetMailbox(ctx, mb); err == nil {
 		if v.Value.Hold != nil {
@@ -388,6 +455,12 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 		return err
 	}
 	n := 0
+	step := func() error {
+		if w.afterStep != nil {
+			w.afterStep(n)
+		}
+		return ctx.Err()
+	}
 	root, err := w.idx.GetRoot(ctx, mb)
 	if err == nil {
 		for _, f := range root.Folders {
@@ -404,6 +477,9 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 						return err
 					}
 					n++
+					if err := step(); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -419,6 +495,9 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 				return err
 			}
 			n++
+			if err := step(); err != nil {
+				return err
+			}
 		}
 		if err := w.idx.DeleteAll(ctx, mb); err != nil {
 			return err
@@ -437,20 +516,23 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 		return err
 	}
 	for _, i := range leftover {
-		if err := w.deleteMessage(cluster.WithID(ctx, i.ClusterID), mb, i.Message); err != nil {
+		if err := w.deleteMessage(storage.WithID(ctx, i.StorageID), mb, i.Message); err != nil {
 			return err
 		}
 		n++
+		if err := step(); err != nil {
+			return err
+		}
 	}
 	w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "remove-mailbox", Detail: fmt.Sprintf("messages=%d", n)})
 	return nil
 }
 
 // attachmentGC deletes attachment objects nobody references any more, on
-// every connected cluster.
+// every connected storage.
 func (w *Worker) attachmentGC(ctx context.Context) error {
 	type ref struct {
-		cluster int64
+		storage int64
 		hash    string
 	}
 	var hashes []ref
@@ -459,7 +541,7 @@ func (w *Worker) attachmentGC(ctx context.Context) error {
 	}
 	deleted := 0
 	for _, h := range hashes {
-		ok, err := w.atts.DeleteIfUnreferenced(ctx, h.cluster, h.hash, w.cfg.AttachmentGCGrace)
+		ok, err := w.atts.DeleteIfUnreferenced(ctx, h.storage, h.hash, w.cfg.AttachmentGCGrace)
 		if err != nil {
 			return err
 		}
@@ -504,7 +586,7 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		set, ok := retention[mb]
 		if !ok {
 			set = map[uuid.UUID]bool{}
-			entries, _, _, err := w.idx.ListRetention(cluster.WithID(ctx, cid), mb, time.Time{}, 0)
+			entries, _, _, err := w.idx.ListRetention(storage.WithID(ctx, cid), mb, time.Time{}, 0)
 			if err == nil {
 				for _, e := range entries {
 					set[e.MessageID] = true
@@ -519,8 +601,8 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		if i.Created.After(cutoff) {
 			return nil
 		}
-		// The object's own cluster answers; the mailbox record may be gone.
-		cctx := cluster.WithID(ctx, i.ClusterID)
+		// The object's own storage answers; the mailbox record may be gone.
+		cctx := storage.WithID(ctx, i.StorageID)
 		if loc, err := index.ParseLocation(i.Location); err == nil {
 			if rec, err := w.idx.GetRecord(cctx, i.Mailbox, loc.FolderID, loc.UID); err == nil && rec.MessageID == i.Message {
 				return nil
@@ -528,7 +610,7 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 				return err
 			}
 		}
-		if inRetention(i.ClusterID, i.Mailbox, i.Message) {
+		if inRetention(i.StorageID, i.Mailbox, i.Message) {
 			return nil
 		}
 		orphans = append(orphans, i)
@@ -538,7 +620,7 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		return err
 	}
 	for _, o := range orphans {
-		if err := w.deleteMessage(cluster.WithID(ctx, o.ClusterID), o.Mailbox, o.Message); err != nil {
+		if err := w.deleteMessage(storage.WithID(ctx, o.StorageID), o.Mailbox, o.Message); err != nil {
 			return err
 		}
 	}

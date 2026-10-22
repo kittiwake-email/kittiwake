@@ -1,6 +1,6 @@
 // Package mariadb is the production metadata backend: domains, mailboxes,
 // accounts, aliases, tokens, signing keys, sessions, the worker queue and
-// the Ceph cluster registry in MariaDB (10.6 or newer). It implements
+// the Ceph storage registry in MariaDB (10.6 or newer). It implements
 // identity.Backend, session.Store and queue.Store on one connection pool.
 //
 // Schema migrations are numbered SQL files embedded in the binary and

@@ -11,7 +11,7 @@ import (
 )
 
 // TestLibradosConformance runs the conformance suite against a real Ceph
-// cluster. Configure with:
+// storage. Configure with:
 //
 //	KITTIWAKE_TEST_CEPH_CONF  (default /etc/ceph/ceph.conf)
 //	KITTIWAKE_TEST_CEPH_USER  (default kittiwake)

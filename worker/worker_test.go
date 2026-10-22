@@ -221,6 +221,91 @@ func TestRemoveMailbox(t *testing.T) {
 	}
 }
 
+// A worker that shuts down in the middle of a removal hands the task back
+// at once (no retry backoff, no attempt counted as a failure) and the next
+// worker finishes it: nothing is left in the index or the message pool.
+func TestRemoveMailboxResumesAfterRestart(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	var msgs []delivery.Delivered
+	for i := 0; i < 5; i++ {
+		d, _ := f.deliver(t)
+		msgs = append(msgs, d)
+	}
+	acct, _ := f.st.Identity.GetAccountByUsername(ctx, "wido@example.org")
+	_ = f.st.Identity.DeleteAccount(ctx, acct.Value.ID)
+	if err := f.adm.DeleteMailbox(f.adm_, f.mb.ID); err != nil {
+		t.Fatal(err)
+	}
+	// First worker: SIGTERM after the second message.
+	rctx, stop := context.WithCancel(ctx)
+	f.w.afterStep = func(n int) {
+		if n == 2 {
+			stop()
+		}
+	}
+	f.w.RunOnce(rctx)
+	f.w.afterStep = nil
+	st, _ := f.st.Queue.Stats(ctx, TaskRemoveMailbox)
+	if st.Pending != 1 || st.Leased != 0 || st.Dead != 0 {
+		t.Fatalf("task not handed back after shutdown: %+v", st)
+	}
+	var left int
+	_ = f.st.Messages.List(ctx, func(message.Info) error { left++; return nil })
+	if left != 3 {
+		t.Fatalf("expected 3 messages left after the interrupted run, got %d", left)
+	}
+	// Next worker, same clock: the task is due at once, not after a backoff.
+	tasks, _ := f.st.Queue.Claim(ctx, TaskRemoveMailbox, "peek", 1, time.Minute)
+	if len(tasks) != 1 || tasks[0].Attempts != 2 || tasks[0].LastError != "" {
+		t.Fatalf("expected the released task due now with attempts=2, got %+v", tasks)
+	}
+	_ = f.st.Queue.Release(ctx, tasks[0])
+	f.drain(t)
+	left = 0
+	_ = f.st.Messages.List(ctx, func(message.Info) error { left++; return nil })
+	if left != 0 {
+		t.Fatalf("leftover message objects after resume: %d", left)
+	}
+	if ok, _ := f.st.Index.Exists(ctx, f.mb.ID); ok {
+		t.Fatal("index remains")
+	}
+	st, _ = f.st.Queue.Stats(ctx, TaskRemoveMailbox)
+	if st.Pending != 0 || st.Leased != 0 || st.Dead != 0 {
+		t.Fatalf("task remains: %+v", st)
+	}
+}
+
+// A task whose lease was taken over by another worker is not completed,
+// failed or released by the worker that lost it.
+func TestLostLeaseStopsTask(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		f.deliver(t)
+	}
+	acct, _ := f.st.Identity.GetAccountByUsername(ctx, "wido@example.org")
+	_ = f.st.Identity.DeleteAccount(ctx, acct.Value.ID)
+	_ = f.adm.DeleteMailbox(f.adm_, f.mb.ID)
+	f.w.cfg.LeaseDuration = 4 * time.Millisecond // renewal every millisecond
+	f.w.afterStep = func(n int) {
+		if n == 1 {
+			// Another worker reclaims the task: the lease expires on the clock.
+			f.now = f.now.Add(time.Hour)
+			other, _ := f.st.Queue.Claim(ctx, TaskRemoveMailbox, "other", 1, time.Hour)
+			if len(other) != 1 {
+				t.Error("other worker could not reclaim the expired lease")
+			}
+			time.Sleep(20 * time.Millisecond) // let renewal notice
+		}
+	}
+	f.w.RunOnce(ctx)
+	st, _ := f.st.Queue.Stats(ctx, TaskRemoveMailbox)
+	if st.Leased != 1 || st.Pending != 0 || st.Dead != 0 {
+		t.Fatalf("the other worker's lease must stay untouched: %+v", st)
+	}
+}
+
 func TestOrphanSweepAndAuditPurge(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

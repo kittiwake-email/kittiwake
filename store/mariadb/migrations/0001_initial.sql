@@ -1,4 +1,4 @@
--- Kittiwake metadata schema, version 1. Every statement is idempotent so a
+-- Kittiwake metadata schema, version 1 (one fresh schema: nothing shipped before it). Every statement is idempotent so a
 -- migration that failed half-way can simply be re-run (MariaDB commits
 -- each DDL statement by itself). Internal keys are integers; the UUIDs the
 -- API shows are unique BINARY(16) columns.
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
   applied_at DATETIME(6)  NOT NULL
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS clusters (
+CREATE TABLE IF NOT EXISTS storage (
   id               INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   fsid             BINARY(16)   NULL,
   name             VARCHAR(64)  NOT NULL,
@@ -21,8 +21,8 @@ CREATE TABLE IF NOT EXISTS clusters (
   placement        TINYINT(1)   NOT NULL DEFAULT 1,
   created          DATETIME(6)  NOT NULL,
   updated          DATETIME(6)  NOT NULL,
-  UNIQUE KEY uk_clusters_fsid (fsid),
-  UNIQUE KEY uk_clusters_name (name)
+  UNIQUE KEY uk_storage_fsid (fsid),
+  UNIQUE KEY uk_storage_name (name)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS domains (
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE TABLE IF NOT EXISTS mailboxes (
   id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   uuid          BINARY(16)      NOT NULL,
-  cluster_id    INT UNSIGNED    NULL,
+  storage_id    INT UNSIGNED    NULL,
   state         VARCHAR(16)     NOT NULL,
   state_reason  VARCHAR(255)    NOT NULL DEFAULT '',
   state_since   DATETIME(6)     NOT NULL,
@@ -51,8 +51,8 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   created       DATETIME(6)     NOT NULL,
   updated       DATETIME(6)     NOT NULL,
   UNIQUE KEY uk_mailboxes_uuid (uuid),
-  KEY ix_mailboxes_cluster (cluster_id),
-  CONSTRAINT fk_mailboxes_cluster FOREIGN KEY (cluster_id) REFERENCES clusters (id)
+  KEY ix_mailboxes_storage (storage_id),
+  CONSTRAINT fk_mailboxes_storage FOREIGN KEY (storage_id) REFERENCES storage (id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -79,13 +79,12 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS account_passwords (
   id         CHAR(36)        NOT NULL PRIMARY KEY,
   account_id BIGINT UNSIGNED NOT NULL,
-  position   INT             NOT NULL,
   hash       VARCHAR(512)    NOT NULL,
   kind       VARCHAR(16)     NOT NULL,
   comment    VARCHAR(255)    NOT NULL DEFAULT '',
   expires_at DATETIME(6)     NULL,
   created    DATETIME(6)     NOT NULL,
-  KEY ix_account_passwords_account (account_id, position),
+  KEY ix_account_passwords_created (account_id, created, id),
   CONSTRAINT fk_account_passwords_account FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
@@ -176,4 +175,28 @@ CREATE TABLE IF NOT EXISTS scheduler_lease (
   id     TINYINT UNSIGNED NOT NULL PRIMARY KEY,
   holder VARCHAR(128)     NOT NULL,
   until  DATETIME(6)      NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS audit_admin (
+  id        BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  time      DATETIME(6)     NOT NULL,
+  account   VARCHAR(320)    NOT NULL DEFAULT '',
+  admin     VARCHAR(320)    NOT NULL DEFAULT '',
+  action    VARCHAR(64)     NOT NULL,
+  client_ip VARCHAR(45)     NOT NULL DEFAULT '',
+  record    JSON            NOT NULL,
+  KEY ix_audit_admin_time (time, id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id        BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  mode      VARCHAR(16)     NOT NULL,
+  address   VARCHAR(255)    NOT NULL,
+  host      VARCHAR(255)    NOT NULL DEFAULT '',
+  version   VARCHAR(64)     NOT NULL DEFAULT '',
+  started   DATETIME(6)     NOT NULL,
+  last_seen DATETIME(6)     NOT NULL,
+  expires   DATETIME(6)     NOT NULL,
+  UNIQUE KEY uk_nodes_mode_address (mode, address),
+  KEY ix_nodes_expires (expires)
 ) ENGINE=InnoDB;

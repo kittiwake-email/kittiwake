@@ -1,6 +1,6 @@
 // Package audit persists audit records: per mailbox, one object per day
 // (`<mailbox>/audit/<YYYY-MM-DD>`, records as omap entries keyed by
-// timestamp) in the index pool of the mailbox's cluster; platform-wide
+// timestamp) in the index pool of the mailbox's storage; platform-wide
 // admin actions go to an AdminLog (a MariaDB table in production, the
 // `audit/admin/<YYYY-MM-DD>` object on the memory backend). See README.md
 // "Auditing".
@@ -19,7 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"kittiwake/rados"
-	"kittiwake/store/cluster"
+	"kittiwake/store/storage"
 )
 
 // Protocols.
@@ -65,14 +65,14 @@ type Record struct {
 // records instead of one per record). Records also go to the structured log
 // synchronously, so a crash loses at most one interval of RADOS copies.
 type Store struct {
-	r     cluster.Resolver
+	r     storage.Resolver
 	admin AdminLog
 	Now   func() time.Time
 	seq   atomic.Uint64
 
 	mu           sync.Mutex
 	buffered     bool
-	pending      map[target]map[string][]byte // cluster+oid -> key -> record
+	pending      map[target]map[string][]byte // storage+oid -> key -> record
 	pendingAdmin []Record
 	count        int
 	maxBatch     int
@@ -84,12 +84,12 @@ type Store struct {
 
 // New returns a store on the index pool context.
 func New(indexPool rados.IOContext) *Store {
-	return NewMulti(cluster.FixedPools(indexPool, indexPool, indexPool), RadosAdminLog(indexPool))
+	return NewMulti(storage.FixedPools(indexPool, indexPool, indexPool), RadosAdminLog(indexPool))
 }
 
 // NewMulti returns a store that writes mailbox records to the index pool
-// of each mailbox's cluster and admin records to admin.
-func NewMulti(r cluster.Resolver, admin AdminLog) *Store {
+// of each mailbox's storage and admin records to admin.
+func NewMulti(r storage.Resolver, admin AdminLog) *Store {
 	return &Store{r: r, admin: admin, Now: time.Now, pending: map[target]map[string][]byte{}}
 }
 
@@ -101,9 +101,9 @@ type AdminLog interface {
 	PurgeAdminBefore(ctx context.Context, cutoff time.Time) (int, error)
 }
 
-// target is one daily object on one cluster.
+// target is one daily object on one storage.
 type target struct {
-	cluster int64
+	storage int64
 	oid     string
 }
 
@@ -148,12 +148,12 @@ func (s *Store) flushAll(ctx context.Context) {
 	s.count = 0
 	s.mu.Unlock()
 	for t, kv := range batch {
-		io, err := s.r.PoolOf(ctx, t.cluster, cluster.RoleIndex)
+		io, err := s.r.PoolOf(ctx, t.storage, storage.RoleIndex)
 		if err == nil {
 			_, err = io.Write(ctx, t.oid, rados.NewWriteTx().OmapSet(kv))
 		}
 		if err != nil && s.errs != nil {
-			s.errs(fmt.Errorf("audit flush %s on cluster %d (%d records): %w", t.oid, t.cluster, len(kv), err))
+			s.errs(fmt.Errorf("audit flush %s on storage %d (%d records): %w", t.oid, t.storage, len(kv), err))
 		}
 	}
 	if len(admin) > 0 {
@@ -203,11 +203,11 @@ func (s *Store) Write(ctx context.Context, r Record) error {
 	k := s.key(r.Time)
 	var t *target
 	if r.Mailbox != uuid.Nil {
-		cid, _, err := s.r.Pool(ctx, r.Mailbox, cluster.RoleIndex)
+		cid, _, err := s.r.Pool(ctx, r.Mailbox, storage.RoleIndex)
 		if err != nil {
 			return err
 		}
-		t = &target{cluster: cid, oid: mailboxOID(r.Mailbox, day(r.Time))}
+		t = &target{storage: cid, oid: mailboxOID(r.Mailbox, day(r.Time))}
 	}
 	toAdmin := r.Protocol == ProtoAdmin || r.Protocol == ProtoCLI || r.Admin != "" || r.Mailbox == uuid.Nil
 	s.mu.Lock()
@@ -237,7 +237,7 @@ func (s *Store) Write(ctx context.Context, r Record) error {
 	}
 	s.mu.Unlock()
 	if t != nil {
-		io, err := s.r.PoolOf(ctx, t.cluster, cluster.RoleIndex)
+		io, err := s.r.PoolOf(ctx, t.storage, storage.RoleIndex)
 		if err != nil {
 			return err
 		}
@@ -270,7 +270,7 @@ func (s *Store) Read(ctx context.Context, q Query) (records []Record, next strin
 	if q.Mailbox == uuid.Nil {
 		return s.admin.ReadAdmin(ctx, q)
 	}
-	_, io, err := s.r.Pool(ctx, q.Mailbox, cluster.RoleIndex)
+	_, io, err := s.r.Pool(ctx, q.Mailbox, storage.RoleIndex)
 	if err != nil {
 		return nil, "", err
 	}
@@ -357,7 +357,7 @@ func (s *Store) PurgeBefore(ctx context.Context, mb uuid.UUID, cutoff time.Time,
 	if mb == uuid.Nil {
 		return s.admin.PurgeAdminBefore(ctx, cutoff)
 	}
-	_, io, err := s.r.Pool(ctx, mb, cluster.RoleIndex)
+	_, io, err := s.r.Pool(ctx, mb, storage.RoleIndex)
 	if err != nil {
 		return 0, err
 	}
@@ -378,7 +378,7 @@ func purgeObjects(ctx context.Context, io rados.IOContext, cutoff time.Time, day
 	return n, nil
 }
 
-// ---- admin log on RADOS (memory backend, single cluster) ----
+// ---- admin log on RADOS (memory backend, single storage) ----
 
 type radosAdminLog struct {
 	io  rados.IOContext

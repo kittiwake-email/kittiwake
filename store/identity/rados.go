@@ -28,7 +28,7 @@ const (
 	nsNames     = "names"
 	nsAliases   = "aliases"
 	nsTokens    = "tokens"
-	nsClusters  = "clusters"
+	nsStorage   = "storage"
 	nsNodes     = "nodes"
 
 	allDomainsObject = "_all"
@@ -46,7 +46,7 @@ type Rados struct {
 	names     rados.IOContext
 	aliases   rados.IOContext
 	tokens    rados.IOContext
-	clusters  rados.IOContext
+	storage   rados.IOContext
 	nodes     rados.IOContext
 	Now       func() time.Time
 }
@@ -63,7 +63,7 @@ func NewRados(meta rados.IOContext) *Rados {
 		names:     meta.Namespace(nsNames),
 		aliases:   meta.Namespace(nsAliases),
 		tokens:    meta.Namespace(nsTokens),
-		clusters:  meta.Namespace(nsClusters),
+		storage:   meta.Namespace(nsStorage),
 		nodes:     meta.Namespace(nsNodes),
 		Now:       time.Now,
 	}
@@ -296,9 +296,9 @@ func (s *Rados) CreateMailbox(ctx context.Context, m Mailbox) (Mailbox, error) {
 		return Mailbox{}, fmt.Errorf("%w: mailbox state %q", ErrInvalid, m.State)
 	}
 	m.StateSince = now
-	if m.ClusterID != 0 {
-		if _, err := s.GetCluster(ctx, m.ClusterID); err != nil {
-			return Mailbox{}, fmt.Errorf("cluster %d: %w", m.ClusterID, err)
+	if m.StorageID != 0 {
+		if _, err := s.GetStorage(ctx, m.StorageID); err != nil {
+			return Mailbox{}, fmt.Errorf("storage %d: %w", m.StorageID, err)
 		}
 	}
 	if _, err := createJSON(ctx, s.mailboxes, m.ID.String(), m); err != nil {
@@ -978,23 +978,23 @@ func (s *Rados) DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID st
 	return mapErr(err)
 }
 
-// ---- cluster registry ----
+// ---- storage registry ----
 //
-// clusters/<id> holds the record; clusters/_seq holds the last id (OCC);
-// clusters/_all lists ids in omap so listing is one read.
+// storage/<id> holds the record; storage/_seq holds the last id (OCC);
+// storage/_all lists ids in omap so listing is one read.
 
 const (
-	clusterSeqOID = "_seq"
-	clusterAllOID = "_all"
+	storageSeqOID = "_seq"
+	storageAllOID = "_all"
 )
 
-func clusterOID(id int64) string { return strconv.FormatInt(id, 10) }
+func storageOID(id int64) string { return strconv.FormatInt(id, 10) }
 
-func (s *Rados) nextClusterID(ctx context.Context) (int64, error) {
+func (s *Rados) nextStorageID(ctx context.Context) (int64, error) {
 	for attempt := 0; attempt < 10; attempt++ {
-		data, ver, err := s.clusters.Get(ctx, clusterSeqOID)
+		data, ver, err := s.storage.Get(ctx, storageSeqOID)
 		if errors.Is(err, rados.ErrNotFound) {
-			if _, err := s.clusters.Write(ctx, clusterSeqOID, rados.NewWriteTx().CreateExclusive().WriteFull([]byte("1"))); err == nil {
+			if _, err := s.storage.Write(ctx, storageSeqOID, rados.NewWriteTx().CreateExclusive().WriteFull([]byte("1"))); err == nil {
 				return 1, nil
 			} else if !errors.Is(err, rados.ErrExists) {
 				return 0, mapErr(err)
@@ -1006,7 +1006,7 @@ func (s *Rados) nextClusterID(ctx context.Context) (int64, error) {
 		}
 		last, _ := strconv.ParseInt(string(data), 10, 64)
 		next := last + 1
-		if _, err := s.clusters.Write(ctx, clusterSeqOID, rados.NewWriteTx().AssertVersion(ver).WriteFull([]byte(strconv.FormatInt(next, 10)))); err != nil {
+		if _, err := s.storage.Write(ctx, storageSeqOID, rados.NewWriteTx().AssertVersion(ver).WriteFull([]byte(strconv.FormatInt(next, 10)))); err != nil {
 			if errors.Is(err, rados.ErrVersionMismatch) {
 				continue
 			}
@@ -1017,66 +1017,66 @@ func (s *Rados) nextClusterID(ctx context.Context) (int64, error) {
 	return 0, ErrConflict
 }
 
-func validateCluster(c *Cluster) error {
+func validateStorage(c *Storage) error {
 	c.Name = strings.TrimSpace(c.Name)
 	if c.Name == "" || len(c.Name) > 64 {
-		return fmt.Errorf("%w: cluster name", ErrInvalid)
+		return fmt.Errorf("%w: storage name", ErrInvalid)
 	}
 	if strings.TrimSpace(c.MonHost) == "" {
-		return fmt.Errorf("%w: cluster mon_host", ErrInvalid)
+		return fmt.Errorf("%w: storage mon_host", ErrInvalid)
 	}
 	if c.Pools.Messages == "" || c.Pools.Attachments == "" || c.Pools.Index == "" {
-		return fmt.Errorf("%w: cluster needs messages, attachments and index pools", ErrInvalid)
+		return fmt.Errorf("%w: storage needs messages, attachments and index pools", ErrInvalid)
 	}
 	return nil
 }
 
-func (s *Rados) CreateCluster(ctx context.Context, c Cluster) (Cluster, error) {
-	if err := validateCluster(&c); err != nil {
-		return Cluster{}, err
+func (s *Rados) CreateStorage(ctx context.Context, c Storage) (Storage, error) {
+	if err := validateStorage(&c); err != nil {
+		return Storage{}, err
 	}
-	all, err := s.ListClusters(ctx)
+	all, err := s.ListStorage(ctx)
 	if err != nil {
-		return Cluster{}, err
+		return Storage{}, err
 	}
 	for _, x := range all {
 		if x.Name == c.Name || (c.FSID != uuid.Nil && x.FSID == c.FSID) {
-			return Cluster{}, fmt.Errorf("%w: cluster %s", ErrExists, c.Name)
+			return Storage{}, fmt.Errorf("%w: storage %s", ErrExists, c.Name)
 		}
 	}
-	id, err := s.nextClusterID(ctx)
+	id, err := s.nextStorageID(ctx)
 	if err != nil {
-		return Cluster{}, err
+		return Storage{}, err
 	}
 	c.ID = id
 	now := s.Now().UTC()
 	c.Created, c.Updated = now, now
-	if _, err := createJSON(ctx, s.clusters, clusterOID(id), c); err != nil {
-		return Cluster{}, err
+	if _, err := createJSON(ctx, s.storage, storageOID(id), c); err != nil {
+		return Storage{}, err
 	}
-	if _, err := s.clusters.Write(ctx, clusterAllOID, rados.NewWriteTx().OmapSet(map[string][]byte{clusterOID(id): []byte(c.Name)})); err != nil {
-		return Cluster{}, mapErr(err)
+	if _, err := s.storage.Write(ctx, storageAllOID, rados.NewWriteTx().OmapSet(map[string][]byte{storageOID(id): []byte(c.Name)})); err != nil {
+		return Storage{}, mapErr(err)
 	}
 	return c, nil
 }
 
-func (s *Rados) GetCluster(ctx context.Context, id int64) (Cluster, error) {
-	v, err := getJSON[Cluster](ctx, s.clusters, clusterOID(id))
+func (s *Rados) GetStorage(ctx context.Context, id int64) (Storage, error) {
+	v, err := getJSON[Storage](ctx, s.storage, storageOID(id))
 	return v.Value, err
 }
 
-func (s *Rados) ListClusters(ctx context.Context) ([]Cluster, error) {
-	kv, _, err := s.clusters.OmapList(ctx, clusterAllOID, "", "", 0)
+func (s *Rados) ListStorage(ctx context.Context) ([]Storage, error) {
+	kv, _, err := s.storage.OmapList(ctx, storageAllOID, "", "", 0)
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, mapErr(err)
 	}
-	var out []Cluster
+	var out []Storage
 	for _, e := range kv {
 		id, _ := strconv.ParseInt(e.Key, 10, 64)
-		c, err := s.GetCluster(ctx, id)
+		c, err := s.GetStorage(ctx, id)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -1089,56 +1089,56 @@ func (s *Rados) ListClusters(ctx context.Context) ([]Cluster, error) {
 	return out, nil
 }
 
-func (s *Rados) UpdateCluster(ctx context.Context, id int64, fn func(*Cluster) error) (Cluster, error) {
+func (s *Rados) UpdateStorage(ctx context.Context, id int64, fn func(*Storage) error) (Storage, error) {
 	for attempt := 0; attempt < 5; attempt++ {
-		cur, err := getJSON[Cluster](ctx, s.clusters, clusterOID(id))
+		cur, err := getJSON[Storage](ctx, s.storage, storageOID(id))
 		if err != nil {
-			return Cluster{}, err
+			return Storage{}, err
 		}
 		c := cur.Value
 		if err := fn(&c); err != nil {
-			return Cluster{}, err
+			return Storage{}, err
 		}
-		if err := validateCluster(&c); err != nil {
-			return Cluster{}, err
+		if err := validateStorage(&c); err != nil {
+			return Storage{}, err
 		}
 		c.ID = id
 		c.Updated = s.Now().UTC()
-		if _, err := updateJSON(ctx, s.clusters, clusterOID(id), cur.Version, c); err != nil {
+		if _, err := updateJSON(ctx, s.storage, storageOID(id), cur.Version, c); err != nil {
 			if errors.Is(err, ErrConflict) {
 				continue
 			}
-			return Cluster{}, err
+			return Storage{}, err
 		}
-		_, _ = s.clusters.Write(ctx, clusterAllOID, rados.NewWriteTx().OmapSet(map[string][]byte{clusterOID(id): []byte(c.Name)}))
+		_, _ = s.storage.Write(ctx, storageAllOID, rados.NewWriteTx().OmapSet(map[string][]byte{storageOID(id): []byte(c.Name)}))
 		return c, nil
 	}
-	return Cluster{}, ErrConflict
+	return Storage{}, ErrConflict
 }
 
-// DeleteCluster removes a cluster no mailbox refers to.
-func (s *Rados) DeleteCluster(ctx context.Context, id int64) error {
-	if _, err := s.GetCluster(ctx, id); err != nil {
+// DeleteStorage removes a storage no mailbox refers to.
+func (s *Rados) DeleteStorage(ctx context.Context, id int64) error {
+	if _, err := s.GetStorage(ctx, id); err != nil {
 		return err
 	}
 	inUse := errors.New("in use")
 	err := s.ListMailboxes(ctx, func(mb uuid.UUID) error {
 		v, err := s.GetMailbox(ctx, mb)
-		if err == nil && v.Value.ClusterID == id {
+		if err == nil && v.Value.StorageID == id {
 			return inUse
 		}
 		return nil
 	})
 	if errors.Is(err, inUse) {
-		return fmt.Errorf("%w: cluster %d has mailboxes", ErrInUse, id)
+		return fmt.Errorf("%w: storage %d has mailboxes", ErrInUse, id)
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := s.clusters.Write(ctx, clusterAllOID, rados.NewWriteTx().OmapRemove(clusterOID(id))); err != nil && !errors.Is(err, rados.ErrNotFound) {
+	if _, err := s.storage.Write(ctx, storageAllOID, rados.NewWriteTx().OmapRemove(storageOID(id))); err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return mapErr(err)
 	}
-	return mapErr(s.clusters.Delete(ctx, clusterOID(id)))
+	return mapErr(s.storage.Delete(ctx, storageOID(id)))
 }
 
 // Exported validation helpers shared with other backends.
@@ -1158,8 +1158,8 @@ func ValidateRoles(roles []string) error { return validateRoles(roles) }
 // ValidateServices checks an account service list.
 func ValidateServices(services []string) error { return validateServices(services) }
 
-// ValidateCluster checks and trims a cluster record.
-func ValidateCluster(c *Cluster) error { return validateCluster(c) }
+// ValidateStorage checks and trims a storage record.
+func ValidateStorage(c *Storage) error { return validateStorage(c) }
 
 // ---- node registry (one object per mode/address, listing via List) ----
 
@@ -1188,7 +1188,7 @@ func (s *Rados) RegisterNode(ctx context.Context, n Node) (Node, error) {
 			n.Started = cur.Value.Started
 		}
 	} else {
-		id, err := s.nextClusterID(ctx) // shared sequence; ids only need to be unique
+		id, err := s.nextStorageID(ctx) // shared sequence; ids only need to be unique
 		if err != nil {
 			return Node{}, err
 		}

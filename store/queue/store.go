@@ -21,6 +21,9 @@ import (
 var (
 	ErrNotFound = errors.New("queue: not found")
 	ErrLocked   = errors.New("queue: locked by another worker")
+	// ErrLeaseLost is returned by Extend when the task is no longer leased
+	// to the caller: the lease expired and another worker reclaimed it.
+	ErrLeaseLost = errors.New("queue: lease lost")
 )
 
 // Task is a unit of background work.
@@ -48,6 +51,13 @@ type Store interface {
 	Claim(ctx context.Context, typ, worker string, max int, lease time.Duration) ([]Task, error)
 	Complete(ctx context.Context, t Task) error
 	Fail(ctx context.Context, t Task, cause error) (bool, error)
+	// Extend renews the lease of a running task for another lease
+	// duration (updating t.LeaseKey) or returns ErrLeaseLost.
+	Extend(ctx context.Context, t *Task, lease time.Duration) error
+	// Release hands a claimed task back unchanged, due now, without
+	// counting a failure: a worker shutting down calls it so the next
+	// worker continues at once instead of after the lease expires.
+	Release(ctx context.Context, t Task) error
 	Stats(ctx context.Context, typ string) (Stats, error)
 	Dead(ctx context.Context, typ string) ([]Task, error)
 	Retry(ctx context.Context, typ, id string) error
@@ -251,6 +261,47 @@ func (s *Rados) Fail(ctx context.Context, t Task, cause error) (bool, error) {
 	}
 	_, err := s.io.Write(ctx, queueOID(t.Type), tx)
 	return dead, err
+}
+
+// Extend renews the lease: the lease entry moves to a key with the new
+// expiry. A missing entry means the lease expired and was reclaimed.
+func (s *Rados) Extend(ctx context.Context, t *Task, lease time.Duration) error {
+	oid := queueOID(t.Type)
+	cookie := "extend-" + t.ID
+	if err := s.io.Lock(ctx, oid, "claim", cookie, 30*time.Second); err != nil {
+		if errors.Is(err, rados.ErrLocked) {
+			return ErrLocked
+		}
+		return err
+	}
+	defer func() { _ = s.io.Unlock(ctx, oid, "claim", cookie) }()
+	cur, err := s.io.OmapGet(ctx, oid, []string{t.LeaseKey})
+	if err != nil && !errors.Is(err, rados.ErrNotFound) {
+		return err
+	}
+	if _, ok := cur[t.LeaseKey]; !ok {
+		return ErrLeaseLost
+	}
+	next := leaseKey(s.Now().UTC().Add(lease), t.ID)
+	if next == t.LeaseKey {
+		return nil
+	}
+	b, _ := json.Marshal(t)
+	if _, err := s.io.Write(ctx, oid, rados.NewWriteTx().OmapRemove(t.LeaseKey).OmapSet(map[string][]byte{next: b})); err != nil {
+		return err
+	}
+	t.LeaseKey = next
+	return nil
+}
+
+// Release returns a claimed task to pending, due now.
+func (s *Rados) Release(ctx context.Context, t Task) error {
+	lease := t.LeaseKey
+	t.RunAfter = s.Now().UTC()
+	t.LeaseKey = ""
+	b, _ := json.Marshal(&t)
+	_, err := s.io.Write(ctx, queueOID(t.Type), rados.NewWriteTx().OmapRemove(lease).OmapSet(map[string][]byte{pendingKey(t.RunAfter, t.ID): b}))
+	return err
 }
 
 // Stats summarises a queue.

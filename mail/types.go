@@ -1,5 +1,5 @@
 // Package mail parses raw RFC 5322 messages into Kittiwake's JSON document,
-// extracts attachments for cluster-wide deduplication and renders a message
+// extracts attachments for storage-wide deduplication and renders a message
 // back from the document (Render). The original bytes are not kept: the
 // document holds the verbatim headers (Received trace, Message-ID, DKIM) and
 // every part's content, and Render produces a deterministic equivalent.

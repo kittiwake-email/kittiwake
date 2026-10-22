@@ -161,20 +161,20 @@ func (d *DB) listStrings(ctx context.Context, q string, args ...any) ([]string, 
 
 // ---- mailboxes ----
 
-const mailboxCols = "id, uuid, cluster_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated"
+const mailboxCols = "id, uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated"
 
 func scanMailbox(row interface{ Scan(...any) error }) (int64, identity.Mailbox, error) {
 	var id int64
 	var m identity.Mailbox
 	var u []byte
-	var cluster sql.NullInt64
+	var storage sql.NullInt64
 	var hold sql.NullString
 	var released sql.NullTime
-	if err := row.Scan(&id, &u, &cluster, &m.State, &m.StateReason, &m.StateSince, &m.Quota.SoftBytes, &m.Quota.HardBytes, &m.Quota.SoftMessages, &m.Quota.HardMessages, &hold, &released, &m.Created, &m.Updated); err != nil {
+	if err := row.Scan(&id, &u, &storage, &m.State, &m.StateReason, &m.StateSince, &m.Quota.SoftBytes, &m.Quota.HardBytes, &m.Quota.SoftMessages, &m.Quota.HardMessages, &hold, &released, &m.Created, &m.Updated); err != nil {
 		return 0, identity.Mailbox{}, mapErr(err)
 	}
 	m.ID = toUUID(u)
-	m.ClusterID = cluster.Int64
+	m.StorageID = storage.Int64
 	if hold.Valid && hold.String != "" {
 		var h identity.Hold
 		if json.Unmarshal([]byte(hold.String), &h) == nil {
@@ -218,12 +218,12 @@ func (d *DB) CreateMailbox(ctx context.Context, m identity.Mailbox) (identity.Ma
 		return identity.Mailbox{}, fmt.Errorf("%w: mailbox state %q", identity.ErrInvalid, m.State)
 	}
 	m.StateSince = now
-	_, err := d.exec(ctx, "INSERT INTO mailboxes (uuid, cluster_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
-		bin(m.ID), nullID(m.ClusterID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, now, now)
+	_, err := d.exec(ctx, "INSERT INTO mailboxes (uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+		bin(m.ID), nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, now, now)
 	if err != nil {
 		err = mapErr(err)
 		if errors.Is(err, identity.ErrNotFound) {
-			return identity.Mailbox{}, fmt.Errorf("cluster %d: %w", m.ClusterID, identity.ErrNotFound)
+			return identity.Mailbox{}, fmt.Errorf("storage %d: %w", m.StorageID, identity.ErrNotFound)
 		}
 		return identity.Mailbox{}, err
 	}
@@ -263,8 +263,8 @@ func (d *DB) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*identity.
 		if m.State != prev.State {
 			m.StateSince = m.Updated
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE mailboxes SET cluster_id = ?, state = ?, state_reason = ?, state_since = ?, soft_bytes = ?, hard_bytes = ?, soft_messages = ?, hard_messages = ?, hold = ?, released = ?, updated = ? WHERE id = ?",
-			nullID(m.ClusterID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, holdJSON(m.Hold), nullTime(m.Released), m.Updated, rid)
+		_, err = tx.ExecContext(ctx, "UPDATE mailboxes SET storage_id = ?, state = ?, state_reason = ?, state_since = ?, soft_bytes = ?, hard_bytes = ?, soft_messages = ?, hard_messages = ?, hold = ?, released = ?, updated = ? WHERE id = ?",
+			nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, holdJSON(m.Hold), nullTime(m.Released), m.Updated, rid)
 		if err != nil {
 			return err
 		}
@@ -915,15 +915,15 @@ func (d *DB) DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID strin
 	return nil
 }
 
-// ---- clusters ----
+// ---- storage ----
 
-const clusterCols = "id, fsid, name, mon_host, ceph_user, ceph_key, pool_messages, pool_attachments, pool_index, placement, created, updated"
+const storageCols = "id, fsid, name, mon_host, ceph_user, ceph_key, pool_messages, pool_attachments, pool_index, placement, created, updated"
 
-func scanCluster(row interface{ Scan(...any) error }) (identity.Cluster, error) {
-	var c identity.Cluster
+func scanStorage(row interface{ Scan(...any) error }) (identity.Storage, error) {
+	var c identity.Storage
 	var fsid []byte
 	if err := row.Scan(&c.ID, &fsid, &c.Name, &c.MonHost, &c.User, &c.Key, &c.Pools.Messages, &c.Pools.Attachments, &c.Pools.Index, &c.Placement, &c.Created, &c.Updated); err != nil {
-		return identity.Cluster{}, mapErr(err)
+		return identity.Storage{}, mapErr(err)
 	}
 	if len(fsid) == 16 {
 		c.FSID = toUUID(fsid)
@@ -931,34 +931,34 @@ func scanCluster(row interface{ Scan(...any) error }) (identity.Cluster, error) 
 	return c, nil
 }
 
-func (d *DB) CreateCluster(ctx context.Context, c identity.Cluster) (identity.Cluster, error) {
-	if err := identity.ValidateCluster(&c); err != nil {
-		return identity.Cluster{}, err
+func (d *DB) CreateStorage(ctx context.Context, c identity.Storage) (identity.Storage, error) {
+	if err := identity.ValidateStorage(&c); err != nil {
+		return identity.Storage{}, err
 	}
 	now := d.Now().UTC()
 	c.Created, c.Updated = now, now
-	res, err := d.exec(ctx, "INSERT INTO clusters (fsid, name, mon_host, ceph_user, ceph_key, pool_messages, pool_attachments, pool_index, placement, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	res, err := d.exec(ctx, "INSERT INTO storage (fsid, name, mon_host, ceph_user, ceph_key, pool_messages, pool_attachments, pool_index, placement, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		nullBin(c.FSID), c.Name, c.MonHost, c.User, c.Key, c.Pools.Messages, c.Pools.Attachments, c.Pools.Index, c.Placement, now, now)
 	if err != nil {
-		return identity.Cluster{}, mapErr(err)
+		return identity.Storage{}, mapErr(err)
 	}
 	c.ID, _ = res.LastInsertId()
 	return c, nil
 }
 
-func (d *DB) GetCluster(ctx context.Context, id int64) (identity.Cluster, error) {
-	return scanCluster(d.r().QueryRowContext(ctx, "SELECT "+clusterCols+" FROM clusters WHERE id = ?", id))
+func (d *DB) GetStorage(ctx context.Context, id int64) (identity.Storage, error) {
+	return scanStorage(d.r().QueryRowContext(ctx, "SELECT "+storageCols+" FROM storage WHERE id = ?", id))
 }
 
-func (d *DB) ListClusters(ctx context.Context) ([]identity.Cluster, error) {
-	rows, err := d.r().QueryContext(ctx, "SELECT "+clusterCols+" FROM clusters ORDER BY id")
+func (d *DB) ListStorage(ctx context.Context) ([]identity.Storage, error) {
+	rows, err := d.r().QueryContext(ctx, "SELECT "+storageCols+" FROM storage ORDER BY id")
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []identity.Cluster
+	var out []identity.Storage
 	for rows.Next() {
-		c, err := scanCluster(rows)
+		c, err := scanStorage(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -967,22 +967,22 @@ func (d *DB) ListClusters(ctx context.Context) ([]identity.Cluster, error) {
 	return out, rows.Err()
 }
 
-func (d *DB) UpdateCluster(ctx context.Context, id int64, fn func(*identity.Cluster) error) (identity.Cluster, error) {
-	var out identity.Cluster
+func (d *DB) UpdateStorage(ctx context.Context, id int64, fn func(*identity.Storage) error) (identity.Storage, error) {
+	var out identity.Storage
 	err := d.tx(ctx, func(tx *sql.Tx) error {
-		c, err := scanCluster(tx.QueryRowContext(ctx, "SELECT "+clusterCols+" FROM clusters WHERE id = ? FOR UPDATE", id))
+		c, err := scanStorage(tx.QueryRowContext(ctx, "SELECT "+storageCols+" FROM storage WHERE id = ? FOR UPDATE", id))
 		if err != nil {
 			return err
 		}
 		if err := fn(&c); err != nil {
 			return err
 		}
-		if err := identity.ValidateCluster(&c); err != nil {
+		if err := identity.ValidateStorage(&c); err != nil {
 			return err
 		}
 		c.ID = id
 		c.Updated = d.Now().UTC()
-		if _, err := tx.ExecContext(ctx, "UPDATE clusters SET fsid = ?, name = ?, mon_host = ?, ceph_user = ?, ceph_key = ?, pool_messages = ?, pool_attachments = ?, pool_index = ?, placement = ?, updated = ? WHERE id = ?",
+		if _, err := tx.ExecContext(ctx, "UPDATE storage SET fsid = ?, name = ?, mon_host = ?, ceph_user = ?, ceph_key = ?, pool_messages = ?, pool_attachments = ?, pool_index = ?, placement = ?, updated = ? WHERE id = ?",
 			nullBin(c.FSID), c.Name, c.MonHost, c.User, c.Key, c.Pools.Messages, c.Pools.Attachments, c.Pools.Index, c.Placement, c.Updated, id); err != nil {
 			return err
 		}
@@ -992,19 +992,19 @@ func (d *DB) UpdateCluster(ctx context.Context, id int64, fn func(*identity.Clus
 	return out, err
 }
 
-func (d *DB) DeleteCluster(ctx context.Context, id int64) error {
+func (d *DB) DeleteStorage(ctx context.Context, id int64) error {
 	return d.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := scanCluster(tx.QueryRowContext(ctx, "SELECT "+clusterCols+" FROM clusters WHERE id = ? FOR UPDATE", id)); err != nil {
+		if _, err := scanStorage(tx.QueryRowContext(ctx, "SELECT "+storageCols+" FROM storage WHERE id = ? FOR UPDATE", id)); err != nil {
 			return err
 		}
 		var n int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM mailboxes WHERE cluster_id = ?", id).Scan(&n); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM mailboxes WHERE storage_id = ?", id).Scan(&n); err != nil {
 			return err
 		}
 		if n > 0 {
-			return fmt.Errorf("%w: cluster %d has %d mailboxes", identity.ErrInUse, id, n)
+			return fmt.Errorf("%w: storage %d has %d mailboxes", identity.ErrInUse, id, n)
 		}
-		_, err := tx.ExecContext(ctx, "DELETE FROM clusters WHERE id = ?", id)
+		_, err := tx.ExecContext(ctx, "DELETE FROM storage WHERE id = ?", id)
 		return err
 	})
 }

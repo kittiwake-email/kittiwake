@@ -31,7 +31,7 @@ func Run(t *testing.T, f Factory) {
 		{"AdminTokens", testAdminTokens},
 		{"ConcurrentUpdates", testConcurrentUpdates},
 		{"Services", testServices},
-		{"Clusters", testClusters},
+		{"Storage", testStorages},
 		{"Nodes", testNodes},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.fn(t, f) })
@@ -435,67 +435,67 @@ func testServices(t *testing.T, f Factory) {
 	}
 }
 
-func testClusters(t *testing.T, f Factory) {
+func testStorages(t *testing.T, f Factory) {
 	s := f(t)
 	ctx := context.Background()
 	pools := identity.Pools{Messages: "m", Attachments: "a", Index: "i"}
-	if _, err := s.CreateCluster(ctx, identity.Cluster{Name: "", MonHost: "x", Pools: pools}); !errors.Is(err, identity.ErrInvalid) {
+	if _, err := s.CreateStorage(ctx, identity.Storage{Name: "", MonHost: "x", Pools: pools}); !errors.Is(err, identity.ErrInvalid) {
 		t.Fatalf("name required: %v", err)
 	}
-	if _, err := s.CreateCluster(ctx, identity.Cluster{Name: "ams1", MonHost: "x", Pools: identity.Pools{Messages: "m"}}); !errors.Is(err, identity.ErrInvalid) {
+	if _, err := s.CreateStorage(ctx, identity.Storage{Name: "ams1", MonHost: "x", Pools: identity.Pools{Messages: "m"}}); !errors.Is(err, identity.ErrInvalid) {
 		t.Fatalf("pools required: %v", err)
 	}
-	c1, err := s.CreateCluster(ctx, identity.Cluster{Name: " ams1 ", MonHost: "[2001:db8::1]:6789", User: "kittiwake", Key: "AQ==", Pools: pools, Placement: true})
+	c1, err := s.CreateStorage(ctx, identity.Storage{Name: " ams1 ", MonHost: "[2001:db8::1]:6789", User: "kittiwake", Key: "AQ==", Pools: pools, Placement: true})
 	if err != nil || c1.ID == 0 || c1.Name != "ams1" {
 		t.Fatalf("create: %+v %v", c1, err)
 	}
-	if _, err := s.CreateCluster(ctx, identity.Cluster{Name: "ams1", MonHost: "y", Pools: pools}); !errors.Is(err, identity.ErrExists) {
+	if _, err := s.CreateStorage(ctx, identity.Storage{Name: "ams1", MonHost: "y", Pools: pools}); !errors.Is(err, identity.ErrExists) {
 		t.Fatalf("duplicate name: %v", err)
 	}
 	fs := uuid.New()
-	c2, err := s.CreateCluster(ctx, identity.Cluster{Name: "rtd1", FSID: fs, MonHost: "y", Pools: pools, Placement: true})
+	c2, err := s.CreateStorage(ctx, identity.Storage{Name: "rtd1", FSID: fs, MonHost: "y", Pools: pools, Placement: true})
 	if err != nil || c2.ID == c1.ID || c2.FSID != fs {
 		t.Fatalf("create 2: %+v %v", c2, err)
 	}
-	if _, err := s.CreateCluster(ctx, identity.Cluster{Name: "rtd2", FSID: fs, MonHost: "y", Pools: pools}); !errors.Is(err, identity.ErrExists) {
+	if _, err := s.CreateStorage(ctx, identity.Storage{Name: "rtd2", FSID: fs, MonHost: "y", Pools: pools}); !errors.Is(err, identity.ErrExists) {
 		t.Fatalf("duplicate fsid: %v", err)
 	}
-	list, err := s.ListClusters(ctx)
+	list, err := s.ListStorage(ctx)
 	if err != nil || len(list) != 2 || list[0].ID != c1.ID || list[1].Name != "rtd1" {
 		t.Fatalf("list: %+v %v", list, err)
 	}
-	upd, err := s.UpdateCluster(ctx, c1.ID, func(c *identity.Cluster) error { c.Placement = false; c.FSID = uuid.New(); return nil })
+	upd, err := s.UpdateStorage(ctx, c1.ID, func(c *identity.Storage) error { c.Placement = false; c.FSID = uuid.New(); return nil })
 	if err != nil || upd.Placement || upd.FSID == uuid.Nil {
 		t.Fatalf("update: %+v %v", upd, err)
 	}
-	got, _ := s.GetCluster(ctx, c1.ID)
+	got, _ := s.GetStorage(ctx, c1.ID)
 	if got.Placement || got.FSID != upd.FSID || got.Key != "AQ==" {
 		t.Fatalf("get after update: %+v", got)
 	}
-	if _, err := s.GetCluster(ctx, 999); !errors.Is(err, identity.ErrNotFound) {
+	if _, err := s.GetStorage(ctx, 999); !errors.Is(err, identity.ErrNotFound) {
 		t.Fatalf("missing: %v", err)
 	}
-	// A mailbox pins its cluster.
-	if _, err := s.CreateMailbox(ctx, identity.Mailbox{ClusterID: 999}); !errors.Is(err, identity.ErrNotFound) {
-		t.Fatalf("unknown cluster on mailbox: %v", err)
+	// A mailbox pins its storage.
+	if _, err := s.CreateMailbox(ctx, identity.Mailbox{StorageID: 999}); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("unknown storage on mailbox: %v", err)
 	}
-	mb, err := s.CreateMailbox(ctx, identity.Mailbox{ClusterID: c2.ID})
-	if err != nil || mb.ClusterID != c2.ID {
-		t.Fatalf("mailbox on cluster: %+v %v", mb, err)
+	mb, err := s.CreateMailbox(ctx, identity.Mailbox{StorageID: c2.ID})
+	if err != nil || mb.StorageID != c2.ID {
+		t.Fatalf("mailbox on storage: %+v %v", mb, err)
 	}
-	if g, _ := s.GetMailbox(ctx, mb.ID); g.Value.ClusterID != c2.ID {
-		t.Fatalf("cluster id not persisted: %+v", g.Value)
+	if g, _ := s.GetMailbox(ctx, mb.ID); g.Value.StorageID != c2.ID {
+		t.Fatalf("storage id not persisted: %+v", g.Value)
 	}
-	if err := s.DeleteCluster(ctx, c2.ID); !errors.Is(err, identity.ErrInUse) {
+	if err := s.DeleteStorage(ctx, c2.ID); !errors.Is(err, identity.ErrInUse) {
 		t.Fatalf("delete in use: %v", err)
 	}
-	if err := s.DeleteCluster(ctx, c1.ID); err != nil {
+	if err := s.DeleteStorage(ctx, c1.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteCluster(ctx, c1.ID); !errors.Is(err, identity.ErrNotFound) {
+	if err := s.DeleteStorage(ctx, c1.ID); !errors.Is(err, identity.ErrNotFound) {
 		t.Fatalf("double delete: %v", err)
 	}
-	if list, _ := s.ListClusters(ctx); len(list) != 1 {
+	if list, _ := s.ListStorage(ctx); len(list) != 1 {
 		t.Fatalf("after delete: %+v", list)
 	}
 }

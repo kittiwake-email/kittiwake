@@ -31,11 +31,11 @@ import (
 	"kittiwake/service/export"
 	"kittiwake/service/submit"
 	"kittiwake/store/audit"
-	"kittiwake/store/cluster"
 	"kittiwake/store/identity"
 	"kittiwake/store/index"
 	"kittiwake/store/queue"
 	"kittiwake/store/session"
+	"kittiwake/store/storage"
 )
 
 // Version reported by /v1/admin/status.
@@ -176,11 +176,11 @@ func (s *Server) AdminHandler() http.Handler {
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
 		route{"GET /v1/admin/nodes", s.nodeList},
-		route{"POST /v1/admin/clusters", s.clusterAdd},
-		route{"GET /v1/admin/clusters", s.clusterList},
-		route{"GET /v1/admin/clusters/{cid}", s.clusterGet},
-		route{"PATCH /v1/admin/clusters/{cid}", s.clusterPatch},
-		route{"DELETE /v1/admin/clusters/{cid}", s.clusterDelete},
+		route{"POST /v1/admin/storage", s.storageAdd},
+		route{"GET /v1/admin/storage", s.storageList},
+		route{"GET /v1/admin/storage/{sid}", s.storageGet},
+		route{"PATCH /v1/admin/storage/{sid}", s.storagePatch},
+		route{"DELETE /v1/admin/storage/{sid}", s.storageDelete},
 		route{"POST /v1/admin/domains", s.domainCreate},
 		route{"GET /v1/admin/domains", s.domainList},
 		route{"GET /v1/admin/domains/{name}", s.domainGet},
@@ -192,7 +192,6 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"PATCH /v1/admin/mailboxes/{id}", s.mailboxPatch},
 		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
 		route{"POST /v1/admin/mailboxes/{id}/recalculate", s.mailboxRecalculate},
-		route{"POST /v1/admin/mailboxes/{id}/empty", s.mailboxEmpty},
 		route{"POST /v1/admin/mailboxes/{id}/export", s.mailboxExport},
 		route{"POST /v1/admin/mailboxes/{id}/import", s.mailboxImport},
 		route{"GET /v1/admin/exports", s.exportList},
@@ -340,7 +339,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusUnauthorized
 	case errors.Is(err, auth.ErrAccountDisabled), errors.Is(err, auth.ErrServiceDisabled):
 		status = http.StatusForbidden
-	case errors.Is(err, cluster.ErrUnavailable), errors.Is(err, cluster.ErrNoPlacement):
+	case errors.Is(err, storage.ErrUnavailable), errors.Is(err, storage.ErrNoPlacement):
 		status = http.StatusServiceUnavailable
 	default:
 		var maxErr *http.MaxBytesError
@@ -832,9 +831,9 @@ type mailboxRequest struct {
 	State       *string               `json:"state,omitempty"`
 	StateReason string                `json:"state_reason,omitempty"`
 	Quota       *identity.QuotaLimits `json:"quota,omitempty"`
-	// ClusterID pins the Ceph cluster on create (default: random among
-	// clusters open for placement). Not changeable afterwards.
-	ClusterID int64 `json:"cluster_id,omitempty"`
+	// StorageID pins the Ceph storage on create (default: random among
+	// storage entries open for placement). Not changeable afterwards.
+	StorageID int64 `json:"storage_id,omitempty"`
 }
 
 func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
@@ -845,7 +844,7 @@ func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m := identity.Mailbox{State: identity.StateActive, ClusterID: req.ClusterID}
+	m := identity.Mailbox{State: identity.StateActive, StorageID: req.StorageID}
 	if req.State != nil {
 		m.State, m.StateReason = *req.State, req.StateReason
 	}
@@ -885,8 +884,8 @@ func (s *Server) mailboxPatch(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if req.ClusterID != 0 {
-		s.fail(w, r, badRequest("cluster_id cannot be changed (mailbox moves are a worker task)"))
+	if req.StorageID != 0 {
+		s.fail(w, r, badRequest("storage_id cannot be changed (mailbox moves are a worker task)"))
 		return
 	}
 	var out identity.Mailbox
@@ -927,20 +926,6 @@ func (s *Server) mailboxDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
-}
-
-func (s *Server) mailboxEmpty(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	msgs, folders, err := s.admin.EmptyMailbox(r.Context(), id)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"messages": msgs, "folders": folders})
 }
 
 func (s *Server) mailboxRecalculate(w http.ResponseWriter, r *http.Request) {
@@ -1090,7 +1075,7 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		ID        uuid.UUID            `json:"id"`
-		ClusterID int64                `json:"cluster_id"`
+		StorageID int64                `json:"storage_id"`
 		State     string               `json:"state"`
 		Reason    string               `json:"state_reason,omitempty"`
 		OnHold    bool                 `json:"on_hold"`
@@ -1112,7 +1097,7 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 		if orphaned && len(accts) > 0 {
 			return nil
 		}
-		items = append(items, item{ID: id, ClusterID: m.ClusterID, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
+		items = append(items, item{ID: id, StorageID: m.StorageID, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
 		return nil
 	})
 	if err != nil {
@@ -1589,9 +1574,9 @@ func (s *Server) importIdentity(w http.ResponseWriter, r *http.Request) {
 // ensure context import is used for interface satisfaction in tests.
 var _ = context.Background
 
-// ---- admin: clusters ----
+// ---- admin: storage ----
 
-type clusterRequest struct {
+type storageRequest struct {
 	Name      string          `json:"name,omitempty"`
 	MonHost   string          `json:"mon_host,omitempty"`
 	User      string          `json:"user,omitempty"`
@@ -1600,16 +1585,16 @@ type clusterRequest struct {
 	Placement *bool           `json:"placement,omitempty"`
 }
 
-func (r clusterRequest) toAdmin() admin.ClusterRequest {
-	out := admin.ClusterRequest{Name: r.Name, MonHost: r.MonHost, User: r.User, Key: r.Key, Placement: r.Placement}
+func (r storageRequest) toAdmin() admin.StorageRequest {
+	out := admin.StorageRequest{Name: r.Name, MonHost: r.MonHost, User: r.User, Key: r.Key, Placement: r.Placement}
 	if r.Pools != nil {
 		out.Pools = *r.Pools
 	}
 	return out
 }
 
-// clusterView never shows the key.
-type clusterView struct {
+// storageView never shows the key.
+type storageView struct {
 	ID        int64          `json:"id"`
 	FSID      uuid.UUID      `json:"fsid"`
 	Name      string         `json:"name"`
@@ -1621,85 +1606,85 @@ type clusterView struct {
 	Updated   time.Time      `json:"updated"`
 }
 
-func viewCluster(c identity.Cluster) clusterView {
-	return clusterView{ID: c.ID, FSID: c.FSID, Name: c.Name, MonHost: c.MonHost, User: c.User, Pools: c.Pools, Placement: c.Placement, Created: c.Created, Updated: c.Updated}
+func viewStorage(c identity.Storage) storageView {
+	return storageView{ID: c.ID, FSID: c.FSID, Name: c.Name, MonHost: c.MonHost, User: c.User, Pools: c.Pools, Placement: c.Placement, Created: c.Created, Updated: c.Updated}
 }
 
-func pathClusterID(r *http.Request) (int64, error) {
-	id, err := strconv.ParseInt(r.PathValue("cid"), 10, 64)
+func pathStorageID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("sid"), 10, 64)
 	if err != nil || id <= 0 {
-		return 0, badRequest("cluster id must be a positive integer")
+		return 0, badRequest("storage id must be a positive integer")
 	}
 	return id, nil
 }
 
-func (s *Server) clusterAdd(w http.ResponseWriter, r *http.Request) {
-	var req clusterRequest
+func (s *Server) storageAdd(w http.ResponseWriter, r *http.Request) {
+	var req storageRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	out, err := s.admin.AddCluster(r.Context(), req.toAdmin())
+	out, err := s.admin.AddStorage(r.Context(), req.toAdmin())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, viewCluster(out))
+	httpx.WriteJSON(w, http.StatusCreated, viewStorage(out))
 }
 
-func (s *Server) clusterList(w http.ResponseWriter, r *http.Request) {
-	list, err := s.admin.ListClusters(r.Context())
+func (s *Server) storageList(w http.ResponseWriter, r *http.Request) {
+	list, err := s.admin.ListStorage(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	out := make([]clusterView, 0, len(list))
+	out := make([]storageView, 0, len(list))
 	for _, c := range list {
-		out = append(out, viewCluster(c))
+		out = append(out, viewStorage(c))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
-func (s *Server) clusterGet(w http.ResponseWriter, r *http.Request) {
-	id, err := pathClusterID(r)
+func (s *Server) storageGet(w http.ResponseWriter, r *http.Request) {
+	id, err := pathStorageID(r)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	c, err := s.admin.GetCluster(r.Context(), id)
+	c, err := s.admin.GetStorage(r.Context(), id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, viewCluster(c))
+	httpx.WriteJSON(w, http.StatusOK, viewStorage(c))
 }
 
-func (s *Server) clusterPatch(w http.ResponseWriter, r *http.Request) {
-	id, err := pathClusterID(r)
+func (s *Server) storagePatch(w http.ResponseWriter, r *http.Request) {
+	id, err := pathStorageID(r)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	var req clusterRequest
+	var req storageRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	out, err := s.admin.UpdateCluster(r.Context(), id, req.toAdmin())
+	out, err := s.admin.UpdateStorage(r.Context(), id, req.toAdmin())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, viewCluster(out))
+	httpx.WriteJSON(w, http.StatusOK, viewStorage(out))
 }
 
-func (s *Server) clusterDelete(w http.ResponseWriter, r *http.Request) {
-	id, err := pathClusterID(r)
+func (s *Server) storageDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := pathStorageID(r)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if err := s.admin.DeleteCluster(r.Context(), id); err != nil {
+	if err := s.admin.DeleteStorage(r.Context(), id); err != nil {
 		s.fail(w, r, err)
 		return
 	}

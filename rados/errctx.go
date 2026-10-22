@@ -7,7 +7,7 @@ import (
 
 // ErrorContext returns an IOContext whose every operation fails with err.
 // Store code resolves a mailbox's pool once per operation; when the
-// cluster is unavailable it gets this context and the error surfaces at
+// storage is unavailable it gets this context and the error surfaces at
 // the first RADOS call, without a second error path in every method.
 func ErrorContext(err error) IOContext { return errIO{err: err} }
 

@@ -619,48 +619,37 @@ func (c *Client) ImportIdentity(ctx context.Context, dump []byte) (string, error
 	return out.Summary, c.do(ctx, http.MethodPost, "/v1/admin/import", nil, bytes.NewReader(dump), "application/json", &out)
 }
 
-// EmptyMailbox removes every message (into retention) and the folders
-// without a role; the mailbox and its accounts stay.
-func (c *Client) EmptyMailbox(ctx context.Context, id string) (messages, folders int, err error) {
+// ---- storage ----
+
+// AddStorage registers a Ceph storage; the server verifies it and records its fsid.
+func (c *Client) AddStorage(ctx context.Context, req StorageRequest) (Storage, error) {
+	var out Storage
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/storage", nil, req, "", &out)
+}
+
+// ListStorage lists the registry.
+func (c *Client) ListStorage(ctx context.Context) ([]Storage, error) {
 	var out struct {
-		Messages int `json:"messages"`
-		Folders  int `json:"folders"`
+		Items []Storage `json:"items"`
 	}
-	err = c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/empty", nil, nil, "", &out)
-	return out.Messages, out.Folders, err
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/storage", nil, nil, "", &out)
 }
 
-// ---- clusters ----
-
-// AddCluster registers a Ceph cluster; the server verifies it and records its fsid.
-func (c *Client) AddCluster(ctx context.Context, req ClusterRequest) (Cluster, error) {
-	var out Cluster
-	return out, c.do(ctx, http.MethodPost, "/v1/admin/clusters", nil, req, "", &out)
+// GetStorage returns one storage.
+func (c *Client) GetStorage(ctx context.Context, id int64) (Storage, error) {
+	var out Storage
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/storage/"+strconv.FormatInt(id, 10), nil, nil, "", &out)
 }
 
-// ListClusters lists the registry.
-func (c *Client) ListClusters(ctx context.Context) ([]Cluster, error) {
-	var out struct {
-		Items []Cluster `json:"items"`
-	}
-	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/clusters", nil, nil, "", &out)
+// UpdateStorage changes connection details or placement.
+func (c *Client) UpdateStorage(ctx context.Context, id int64, req StorageRequest) (Storage, error) {
+	var out Storage
+	return out, c.do(ctx, http.MethodPatch, "/v1/admin/storage/"+strconv.FormatInt(id, 10), nil, req, "", &out)
 }
 
-// GetCluster returns one cluster.
-func (c *Client) GetCluster(ctx context.Context, id int64) (Cluster, error) {
-	var out Cluster
-	return out, c.do(ctx, http.MethodGet, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, nil, "", &out)
-}
-
-// UpdateCluster changes connection details or placement.
-func (c *Client) UpdateCluster(ctx context.Context, id int64, req ClusterRequest) (Cluster, error) {
-	var out Cluster
-	return out, c.do(ctx, http.MethodPatch, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, req, "", &out)
-}
-
-// DeleteCluster removes a cluster no mailbox refers to.
-func (c *Client) DeleteCluster(ctx context.Context, id int64) error {
-	return c.do(ctx, http.MethodDelete, "/v1/admin/clusters/"+strconv.FormatInt(id, 10), nil, nil, "", nil)
+// DeleteStorage removes a storage no mailbox refers to.
+func (c *Client) DeleteStorage(ctx context.Context, id int64) error {
+	return c.do(ctx, http.MethodDelete, "/v1/admin/storage/"+strconv.FormatInt(id, 10), nil, nil, "", nil)
 }
 
 // ---- nodes ----

@@ -280,74 +280,74 @@ paths:
                         started: { type: string, format: date-time }
                         last_seen: { type: string, format: date-time }
                         alive: { type: boolean, description: Heartbeat within three intervals }
-  /v1/admin/clusters:
+  /v1/admin/storage:
     get:
       tags: [admin]
-      summary: List the Ceph cluster registry (keys are never shown)
+      summary: List the storage registry (keys are never shown)
       responses:
         "200":
-          description: Clusters
+          description: Storage entries
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/Cluster" } }
+                  items: { type: array, items: { $ref: "#/components/schemas/Storage" } }
     post:
       tags: [admin]
-      summary: Register a Ceph cluster
+      summary: Register a storage (a Ceph cluster)
       description: >-
         The admin daemon connects once with the given details, verifies the pools exist and
-        records the cluster's fsid. Every daemon picks the new cluster up within its registry
+        records the cluster's fsid as the identity of the storage. Every daemon picks the new storage up within its registry
         reload interval. Placement defaults to enabled.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ClusterRequest" }
+            schema: { $ref: "#/components/schemas/StorageRequest" }
       responses:
         "201":
-          description: Cluster
+          description: Storage
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Cluster" }
+              schema: { $ref: "#/components/schemas/Storage" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "409": { $ref: "#/components/responses/Conflict" }
-  /v1/admin/clusters/{cid}:
+  /v1/admin/storage/{sid}:
     parameters:
-      - { name: cid, in: path, required: true, schema: { type: integer } }
+      - { name: sid, in: path, required: true, schema: { type: integer } }
     get:
       tags: [admin]
-      summary: Get a cluster
+      summary: Get a storage
       responses:
         "200":
-          description: Cluster
+          description: Storage
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Cluster" }
+              schema: { $ref: "#/components/schemas/Storage" }
         "404": { $ref: "#/components/responses/NotFound" }
     patch:
       tags: [admin]
       summary: Change connection details or placement
       description: >-
-        placement=false stops new mailboxes from being placed on the cluster; existing
+        placement=false stops new mailboxes from being placed on this storage; existing
         mailboxes keep working. New connection details are verified against the recorded fsid.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ClusterRequest" }
+            schema: { $ref: "#/components/schemas/StorageRequest" }
       responses:
         "200":
-          description: Cluster
+          description: Storage
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Cluster" }
+              schema: { $ref: "#/components/schemas/Storage" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [admin]
-      summary: Remove a cluster that no mailbox refers to
+      summary: Remove a storage that no mailbox refers to
       responses:
         "204": { description: Removed }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -442,7 +442,7 @@ paths:
                       type: object
                       properties:
                         id: { type: string, format: uuid }
-                        cluster_id: { type: integer, format: int64 }
+                        storage_id: { type: integer, format: int64 }
                         state: { type: string, enum: [active, suspended, disabled] }
                         state_reason: { type: string }
                         on_hold: { type: boolean }
@@ -577,23 +577,6 @@ paths:
           content:
             application/gzip: { schema: { type: string, format: binary } }
             application/x-tar: { schema: { type: string, format: binary } }
-        "404": { $ref: "#/components/responses/NotFound" }
-  /v1/admin/mailboxes/{id}/empty:
-    parameters: [{ $ref: "#/components/parameters/mailboxId" }]
-    post:
-      tags: [admin]
-      summary: Empty the mailbox for a fresh start (messages go to retention, folders without a role are removed)
-      responses:
-        "200":
-          description: What was removed
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  messages: { type: integer }
-                  folders: { type: integer }
-        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/mailboxes/{id}/recalculate:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
@@ -1158,7 +1141,7 @@ components:
         messages: { type: string }
         attachments: { type: string }
         index: { type: string }
-    ClusterRequest:
+    StorageRequest:
       type: object
       properties:
         name: { type: string, maxLength: 64 }
@@ -1167,7 +1150,7 @@ components:
         key: { type: string, description: CephX secret of user (write-only) }
         pools: { $ref: "#/components/schemas/Pools" }
         placement: { type: boolean, description: Accepts new mailboxes }
-    Cluster:
+    Storage:
       type: object
       properties:
         id: { type: integer, format: int64 }
@@ -1182,7 +1165,7 @@ components:
     MailboxRequest:
       type: object
       properties:
-        cluster_id: { type: integer, format: int64, description: "Create only: pin the Ceph cluster (default random among clusters open for placement)" }
+        storage_id: { type: integer, format: int64, description: "Create only: pin the storage (default: random among storage entries open for placement)" }
         state:
           type: string
           enum: [active, suspended, disabled]
@@ -1215,7 +1198,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        cluster_id: { type: integer, format: int64, description: Ceph cluster holding the mailbox data }
+        storage_id: { type: integer, format: int64, description: Storage (Ceph cluster) holding the mailbox data }
         state: { type: string, enum: [active, suspended, disabled] }
         state_reason: { type: string }
         state_since: { type: string, format: date-time }

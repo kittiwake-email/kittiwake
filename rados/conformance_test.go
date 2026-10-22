@@ -9,7 +9,7 @@ import (
 
 // RunConformance exercises the semantics every IOContext implementation
 // must provide. The memory backend runs it in the normal unit tests; the
-// librados backend runs it against a real cluster with -tags integration.
+// librados backend runs it against a real storage with -tags integration.
 func RunConformance(t *testing.T, newCtx func(t *testing.T) IOContext) {
 	t.Run("WriteGetXattr", func(t *testing.T) { confWriteGet(t, newCtx(t)) })
 	t.Run("AssertVersion", func(t *testing.T) { confAssertVersion(t, newCtx(t)) })
