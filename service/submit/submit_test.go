@@ -73,9 +73,30 @@ const outgoing = "From: Wido <wido@example.org>\r\nTo: Bob <bob@other.example>\r
 
 func TestIdentities(t *testing.T) {
 	f := newFixture(t)
+	ctx := context.Background()
+	// A second account on the same mailbox is not an identity of the first.
+	_, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "shared@example.org", MailboxID: f.mb.ID, Roles: []string{"read", "send"}, Enabled: true})
+	if _, err := f.svc.SetName(f.user, " Wido den Hollander "); err != nil {
+		t.Fatal(err)
+	}
 	ids, err := f.svc.Identities(f.user, f.mb.ID)
 	if err != nil || len(ids) != 2 || ids[0].Email != "wido@example.org" || ids[1].Email != "info@example.org" {
 		t.Fatalf("identities: %+v %v", ids, err)
+	}
+	if ids[0].Name != "Wido den Hollander" || ids[1].Name != "Wido den Hollander" {
+		t.Fatalf("display name not carried: %+v", ids)
+	}
+	// Sending as the other account's address is refused; as an alias it is allowed.
+	msg := "From: shared@example.org\r\nTo: bob@other.example\r\nSubject: x\r\n\r\nhi\r\n"
+	if _, err := f.svc.Send(f.user, Request{MailboxID: f.mb.ID, Raw: []byte(msg)}); !errors.Is(err, ErrBadSender) {
+		t.Fatalf("other account's address accepted as From: %v", err)
+	}
+	msg = "From: Info <info@example.org>\r\nTo: bob@other.example\r\nSubject: x\r\n\r\nhi\r\n"
+	if _, err := f.svc.Send(f.user, Request{MailboxID: f.mb.ID, Raw: []byte(msg)}); err != nil {
+		t.Fatalf("alias refused as From: %v", err)
+	}
+	if _, err := f.svc.SetName(f.user, "bad\nname"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("newline in name accepted: %v", err)
 	}
 	other := actor.With(context.Background(), actor.Actor{MailboxID: uuid.New(), Roles: []string{"read"}})
 	if _, err := f.svc.Identities(other, f.mb.ID); !errors.Is(err, ErrForbidden) {

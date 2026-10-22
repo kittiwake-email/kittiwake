@@ -392,6 +392,7 @@ func (s *Service) ListHolds(ctx context.Context) ([]identity.Mailbox, error) {
 // CreateAccountRequest is the admin's view of a new account.
 type CreateAccountRequest struct {
 	Username  string
+	Name      string // display name
 	MailboxID uuid.UUID
 	Roles     []string
 	Password  string // optional initial primary password (plaintext)
@@ -407,7 +408,7 @@ func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (
 	if err := s.authorize(ctx, "account-create", req.Username); err != nil {
 		return identity.Account{}, err
 	}
-	a := identity.Account{Username: req.Username, MailboxID: req.MailboxID, Roles: req.Roles, Enabled: true}
+	a := identity.Account{Username: req.Username, Name: strings.TrimSpace(req.Name), MailboxID: req.MailboxID, Roles: req.Roles, Enabled: true}
 	if req.Enabled != nil {
 		a.Enabled = *req.Enabled
 	}

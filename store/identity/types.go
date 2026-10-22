@@ -134,7 +134,8 @@ type TOTP struct {
 // Account is a set of credentials linked to a mailbox (or an admin).
 type Account struct {
 	ID        uuid.UUID  `json:"id"`
-	Username  string     `json:"username"` // lowercase, usually user@domain
+	Username  string     `json:"username"`       // lowercase, usually user@domain
+	Name      string     `json:"name,omitempty"` // display name, used as the From: name of every identity
 	Domain    string     `json:"domain"`
 	MailboxID uuid.UUID  `json:"mailbox_id"`
 	Roles     []string   `json:"roles"`

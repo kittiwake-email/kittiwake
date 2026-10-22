@@ -3,12 +3,12 @@ package jmap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"time"
 
 	"github.com/google/uuid"
 
-	"dovetail/service/actor"
 	"dovetail/service/submit"
 )
 
@@ -46,15 +46,10 @@ func (s *Server) identities(ctx context.Context, mb uuid.UUID) ([]map[string]any
 	if err != nil {
 		return nil, err
 	}
-	act := actor.From(ctx)
 	out := make([]map[string]any, 0, len(list))
 	for _, id := range list {
-		name := ""
-		if id.Email == act.Username {
-			name = act.Username
-		}
 		out = append(out, map[string]any{
-			"id": id.ID, "name": name, "email": id.Email, "replyTo": nil, "bcc": nil,
+			"id": id.ID, "name": id.Name, "email": id.Email, "replyTo": nil, "bcc": nil,
 			"textSignature": "", "htmlSignature": "", "mayDelete": false,
 		})
 	}
@@ -68,13 +63,65 @@ func (s *Server) identityChanges(ctx context.Context, _ *requestState, args map[
 	return nil, &methodError{Type: "cannotCalculateChanges"}
 }
 
-// identitySet refuses everything: identities come from accounts and aliases
-// managed through the admin API.
+// identitySet: identities come from the account and its aliases, so
+// creating or destroying one is refused. Updating is allowed for "name"
+// only, which sets the account's display name (shared by all its
+// identities).
 func (s *Server) identitySet(ctx context.Context, _ *requestState, args map[string]any) (map[string]any, *methodError) {
-	if _, merr := s.accountFor(ctx, args); merr != nil {
+	mb, merr := s.accountFor(ctx, args)
+	if merr != nil {
 		return nil, merr
 	}
-	return nil, &methodError{Type: "forbidden", Description: "identities are managed by the administrator"}
+	notCreated := map[string]any{}
+	if create, _ := args["create"].(map[string]any); create != nil {
+		for cid := range create {
+			notCreated[cid] = setError("forbidden", "identities come from the account and its aliases")
+		}
+	}
+	notDestroyed := map[string]any{}
+	if destroy, _ := args["destroy"].([]any); destroy != nil {
+		for _, d := range destroy {
+			notDestroyed[fmt.Sprint(d)] = setError("forbidden", "identities come from the account and its aliases")
+		}
+	}
+	updated := map[string]any{}
+	notUpdated := map[string]any{}
+	if update, _ := args["update"].(map[string]any); update != nil {
+		known := map[string]bool{}
+		if list, err := s.cfg.Submit.Identities(ctx, mb); err == nil {
+			for _, id := range list {
+				known[id.ID] = true
+			}
+		}
+		for id, patchAny := range update {
+			patch, _ := patchAny.(map[string]any)
+			if !known[id] {
+				notUpdated[id] = setError("notFound", "")
+				continue
+			}
+			name, hasName := patch["name"].(string)
+			var bad []string
+			for k := range patch {
+				if k != "name" {
+					bad = append(bad, k)
+				}
+			}
+			if len(bad) > 0 || !hasName {
+				notUpdated[id] = setError("invalidProperties", "only name can be changed", bad...)
+				continue
+			}
+			if _, err := s.cfg.Submit.SetName(ctx, name); err != nil {
+				notUpdated[id] = mapErr(err).toMap()
+				continue
+			}
+			updated[id] = nil
+		}
+	}
+	return map[string]any{
+		"accountId": mb.String(), "oldState": "0", "newState": "0",
+		"created": map[string]any{}, "updated": updated, "destroyed": []any{},
+		"notCreated": notCreated, "notUpdated": notUpdated, "notDestroyed": notDestroyed,
+	}, nil
 }
 
 func (s *Server) emailSubmissionGet(ctx context.Context, _ *requestState, args map[string]any) (map[string]any, *methodError) {

@@ -187,8 +187,11 @@ parse-and-store path as inbound mail. Arbitrary messages can be added to a folde
 `Email/import` or `Email/set` (drafts), and IMAP APPEND.
 
 The `From` address (and `Sender`, if present) must be one of the account's identities: its
-own address and the aliases that point at its mailbox. Submissions with another `From` are
-rejected. Dovetail adds its own `Received:` header naming the authenticated account so the MTA
+own address and the aliases that point at its mailbox. Another account attached to the same
+mailbox is not an identity of this one, so on a shared mailbox each account sends as itself
+or as the shared aliases, never as a colleague. Submissions with another `From` are
+rejected (`EmailSubmission/set` fails the submission, the audit log records the attempt).
+JMAP `Identity/get` lists these identities, all with the account's display name. Dovetail adds its own `Received:` header naming the authenticated account so the MTA
 logs can be tied to the audit log.
 
 ## Message size limit
@@ -574,7 +577,10 @@ delivery to the mailbox.
 
 **Accounts** are linked to a mailbox. Multiple accounts can point to the same mailbox,
 allowing multiple credentials to access one mailbox. An account consists of a username
-(usually the e-mail address), zero or more passwords and optionally a TOTP secret. Every
+(usually the e-mail address), a display name, zero or more passwords and optionally a TOTP
+secret. The display name is the `From:` name of every identity of the account; the account
+sets it itself (`PATCH /v1/me`, or JMAP `Identity/set` on any of its identities) and an
+admin can set it too. Every
 password is marked primary or application, carries a **comment** (what it is for) and an
 optional **expiry** (null = never): a helpdesk can hand out a temporary password that stops
 working by itself, next to the permanent one. Expired passwords are dropped the next time a

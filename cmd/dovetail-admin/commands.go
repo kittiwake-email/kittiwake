@@ -403,6 +403,7 @@ func (a *cli) account(args []string) error {
 	case "create":
 		fs := newFlagSet("account create")
 		username := fs.String("username", "", "username (e-mail address)")
+		name := fs.String("name", "", "display name (From name of the account's identities)")
 		mailbox := fs.String("mailbox", "", "mailbox uuid")
 		roles := fs.String("roles", "read,write,send", "comma-separated roles")
 		pwStdin := fs.Bool("password-stdin", false, "read the primary password from stdin")
@@ -414,6 +415,9 @@ func (a *cli) account(args []string) error {
 			return errors.New("--username is required")
 		}
 		req := admin.AccountRequest{Username: *username, MailboxID: *mailbox, Roles: splitList(*roles)}
+		if *name != "" {
+			req.Name = name
+		}
 		if *pwStdin {
 			pw, err := readPasswordStdin()
 			if err != nil {
@@ -490,6 +494,8 @@ func (a *cli) account(args []string) error {
 		fs := newFlagSet("account set")
 		roles := fs.String("roles", "", "comma-separated roles")
 		mailbox := fs.String("mailbox", "", "move to this mailbox uuid")
+		name := fs.String("name", "", "display name (\"\" is not settable here; use --clear-name)")
+		clearName := fs.Bool("clear-name", false, "remove the display name")
 		en, dis := enableFlags(fs)
 		if err := fs.Parse(rest); err != nil {
 			return err
@@ -499,7 +505,13 @@ func (a *cli) account(args []string) error {
 			return err
 		}
 		req := admin.AccountRequest{Roles: splitList(*roles), MailboxID: *mailbox, Enabled: enabled}
-		if req.Roles == nil && req.MailboxID == "" && req.Enabled == nil {
+		if *clearName {
+			empty := ""
+			req.Name = &empty
+		} else if *name != "" {
+			req.Name = name
+		}
+		if req.Roles == nil && req.MailboxID == "" && req.Enabled == nil && req.Name == nil {
 			return errors.New("nothing to change")
 		}
 		acct, err := a.c.UpdateAccount(a.ctx, id, req)

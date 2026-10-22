@@ -110,6 +110,27 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Me" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [self]
+      summary: Change the display name
+      description: The display name is the From name of every identity (own address and aliases).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 256 }
+      responses:
+        "200":
+          description: Updated account view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/me/sessions:
     get:
       tags: [self]
@@ -900,6 +921,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         username: { type: string }
+        name: { type: string, description: Display name }
         mailbox_id: { type: string, format: uuid }
         roles: { type: array, items: { type: string } }
         credential: { type: string, enum: [password, app-password, token, session] }
@@ -1036,6 +1058,7 @@ components:
       type: object
       properties:
         username: { type: string, description: Create only }
+        name: { type: string, description: Display name (the From name of the account's identities) }
         mailbox_id: { type: string, format: uuid, description: On PATCH, relinks the account }
         roles: { type: array, items: { type: string, enum: [read, write, send] } }
         password: { type: string, description: Create only, initial primary password }
@@ -1047,6 +1070,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         username: { type: string }
+        name: { type: string, description: Display name }
         domain: { type: string }
         mailbox_id: { type: string, format: uuid }
         roles: { type: array, items: { type: string } }

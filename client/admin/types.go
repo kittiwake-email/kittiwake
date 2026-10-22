@@ -146,6 +146,7 @@ type Password struct {
 type Account struct {
 	ID          string     `json:"id"`
 	Username    string     `json:"username"`
+	Name        string     `json:"name"`
 	Domain      string     `json:"domain"`
 	MailboxID   string     `json:"mailbox_id"`
 	Roles       []string   `json:"roles"`
@@ -160,6 +161,7 @@ type Account struct {
 // patches (Roles, Enabled, MailboxID) an account.
 type AccountRequest struct {
 	Username          string     `json:"username,omitempty"`
+	Name              *string    `json:"name,omitempty"`
 	MailboxID         string     `json:"mailbox_id,omitempty"`
 	Roles             []string   `json:"roles,omitempty"`
 	Password          string     `json:"password,omitempty"`

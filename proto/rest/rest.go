@@ -28,6 +28,7 @@ import (
 	"dovetail/service/admin"
 	"dovetail/service/auth"
 	"dovetail/service/export"
+	"dovetail/service/submit"
 	"dovetail/store/audit"
 	"dovetail/store/identity"
 	"dovetail/store/index"
@@ -50,6 +51,8 @@ type Config struct {
 	// Export and ExportDir enable mailbox export (worker task) and import.
 	Export    *export.Service
 	ExportDir string
+	// Submit is optional; it backs PATCH /v1/me (display name).
+	Submit *submit.Service
 }
 
 // Server serves the REST endpoints.
@@ -122,6 +125,7 @@ func (s *Server) AccountHandler() http.Handler {
 	)
 	reg(self,
 		route{"GET /v1/me", s.me},
+		route{"PATCH /v1/me", s.mePatch},
 		route{"GET /v1/me/sessions", s.meSessions},
 		route{"DELETE /v1/me/sessions/{id}", s.meRevokeSession},
 		route{"PUT /v1/me/password", s.mePassword},
@@ -537,6 +541,7 @@ func passwordViews(pw []identity.Password) []passwordView {
 type meView struct {
 	ID          uuid.UUID      `json:"id"`
 	Username    string         `json:"username"`
+	Name        string         `json:"name"`
 	MailboxID   uuid.UUID      `json:"mailbox_id"`
 	Roles       []string       `json:"roles"`
 	Credential  string         `json:"credential"`
@@ -558,10 +563,35 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, r, err)
 			return
 		}
+		out.Name = v.Value.Name
 		out.TOTPEnabled = v.Value.TOTP != nil && v.Value.TOTP.Confirmed
 		out.Passwords = passwordViews(v.Value.Passwords)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// mePatch changes what an account may change about itself: the display name.
+func (s *Server) mePatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name *string `json:"name"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if req.Name == nil {
+		s.fail(w, r, badRequest("name is required"))
+		return
+	}
+	if s.cfg.Submit == nil {
+		s.fail(w, r, badRequest("not available on this listener"))
+		return
+	}
+	if _, err := s.cfg.Submit.SetName(r.Context(), *req.Name); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.me(w, r)
 }
 
 type sessionView struct {
@@ -937,6 +967,7 @@ func (s *Server) holdList(w http.ResponseWriter, r *http.Request) {
 type accountView struct {
 	ID          uuid.UUID      `json:"id"`
 	Username    string         `json:"username"`
+	Name        string         `json:"name"`
 	Domain      string         `json:"domain"`
 	MailboxID   uuid.UUID      `json:"mailbox_id"`
 	Roles       []string       `json:"roles"`
@@ -953,13 +984,14 @@ func viewAccount(a identity.Account) accountView {
 		roles = []string{}
 	}
 	return accountView{
-		ID: a.ID, Username: a.Username, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Enabled: a.Enabled,
+		ID: a.ID, Username: a.Username, Name: a.Name, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Enabled: a.Enabled,
 		TOTPEnabled: a.TOTP != nil && a.TOTP.Confirmed, Passwords: passwordViews(a.Passwords), Created: a.Created, Updated: a.Updated,
 	}
 }
 
 type accountRequest struct {
 	Username          string     `json:"username,omitempty"`
+	Name              *string    `json:"name,omitempty"`
 	MailboxID         *uuid.UUID `json:"mailbox_id,omitempty"`
 	Roles             []string   `json:"roles,omitempty"`
 	Password          string     `json:"password,omitempty"`
@@ -975,6 +1007,9 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cr := admin.CreateAccountRequest{Username: req.Username, Roles: req.Roles, Password: req.Password, PasswordComment: req.PasswordComment, PasswordExpiresAt: req.PasswordExpiresAt, Enabled: req.Enabled}
+	if req.Name != nil {
+		cr.Name = *req.Name
+	}
 	if req.MailboxID != nil {
 		cr.MailboxID = *req.MailboxID
 	}
@@ -1072,13 +1107,16 @@ func (s *Server) accountPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := a
-	if req.Roles != nil || req.Enabled != nil {
+	if req.Roles != nil || req.Enabled != nil || req.Name != nil {
 		out, err = s.admin.UpdateAccount(r.Context(), a.ID, func(x *identity.Account) error {
 			if req.Roles != nil {
 				x.Roles = req.Roles
 			}
 			if req.Enabled != nil {
 				x.Enabled = *req.Enabled
+			}
+			if req.Name != nil {
+				x.Name = strings.TrimSpace(*req.Name)
 			}
 			return nil
 		})

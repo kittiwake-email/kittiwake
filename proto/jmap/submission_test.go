@@ -111,8 +111,23 @@ func TestIdentitiesAndSessionWithSubmit(t *testing.T) {
 	if len(list) != 2 || list[0].(map[string]any)["email"] != "wido@example.org" || list[1].(map[string]any)["id"] != "info@example.org" {
 		t.Fatalf("identities: %v", list)
 	}
-	if list[0].(map[string]any)["name"] != "wido@example.org" || list[1].(map[string]any)["name"] != "" || list[1].(map[string]any)["mayDelete"] != false {
+	if list[0].(map[string]any)["name"] != "" || list[1].(map[string]any)["name"] != "" || list[1].(map[string]any)["mayDelete"] != false {
 		t.Fatalf("identity fields: %v", list)
+	}
+	// Identity/set may change the name only; it is the account's display
+	// name, so every identity shows it afterwards.
+	r = f.usingSubmission(call{"Identity/set", f.acctArgs(map[string]any{"update": map[string]any{"info@example.org": map[string]any{"name": "Wido"}}}), "s"})
+	if u := first(r, t, "Identity/set")["updated"].(map[string]any); len(u) != 1 {
+		t.Fatalf("Identity/set update: %v", r[0].args)
+	}
+	r = f.usingSubmission(call{"Identity/get", f.acctArgs(nil), "id"})
+	list = first(r, t, "Identity/get")["list"].([]any)
+	if list[0].(map[string]any)["name"] != "Wido" || list[1].(map[string]any)["name"] != "Wido" {
+		t.Fatalf("name after Identity/set: %v", list)
+	}
+	r = f.usingSubmission(call{"Identity/set", f.acctArgs(map[string]any{"update": map[string]any{"info@example.org": map[string]any{"email": "x@example.org"}}}), "s"})
+	if nu := first(r, t, "Identity/set")["notUpdated"].(map[string]any); nu["info@example.org"].(map[string]any)["type"] != "invalidProperties" {
+		t.Fatalf("Identity/set email change: %v", r[0].args)
 	}
 	r = f.usingSubmission(call{"Identity/get", f.acctArgs(map[string]any{"ids": []string{"info@example.org", "nope"}}), "id"})
 	ig := first(r, t, "Identity/get")
@@ -120,8 +135,8 @@ func TestIdentitiesAndSessionWithSubmit(t *testing.T) {
 		t.Fatalf("identity by id: %v", ig)
 	}
 	r = f.usingSubmission(call{"Identity/set", f.acctArgs(map[string]any{"create": map[string]any{"x": map[string]any{"email": "x@example.org"}}}), "s"})
-	if r[0].name != "error" || r[0].args["type"] != "forbidden" {
-		t.Fatalf("Identity/set: %v", r[0])
+	if nc := first(r, t, "Identity/set")["notCreated"].(map[string]any); nc["x"].(map[string]any)["type"] != "forbidden" {
+		t.Fatalf("Identity/set create: %v", r[0].args)
 	}
 	r = f.usingSubmission(call{"Identity/changes", f.acctArgs(map[string]any{"sinceState": "0"}), "c"})
 	if r[0].name != "error" || r[0].args["type"] != "cannotCalculateChanges" {

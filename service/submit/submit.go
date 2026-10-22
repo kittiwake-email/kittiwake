@@ -100,8 +100,11 @@ type Identity struct {
 	Name  string
 }
 
-// Identities lists the addresses the mailbox may use as From: the usernames
-// of its accounts and the aliases that deliver to it (catch-alls excluded).
+// Identities lists the addresses the acting account may use as From: its
+// own username and the aliases that deliver to its mailbox (catch-alls
+// excluded), all carrying the account's display name. Other accounts
+// attached to the same mailbox are not identities of this one. An admin
+// inspecting a mailbox sees the identities of every account on it.
 func (s *Service) Identities(ctx context.Context, mb uuid.UUID) ([]Identity, error) {
 	a := actor.From(ctx)
 	if !(a.MailboxID == mb || a.IsAdminReader()) {
@@ -109,28 +112,57 @@ func (s *Service) Identities(ctx context.Context, mb uuid.UUID) ([]Identity, err
 	}
 	var out []Identity
 	seen := map[string]bool{}
-	add := func(addr string) {
+	add := func(addr, name string) {
 		if addr == "" || strings.HasPrefix(addr, "@") || seen[addr] {
 			return
 		}
 		seen[addr] = true
-		out = append(out, Identity{ID: addr, Email: addr})
+		out = append(out, Identity{ID: addr, Email: addr, Name: name})
 	}
-	users, _, err := s.ids.ListMailboxAccounts(ctx, mb, "", 1000)
-	if err != nil {
-		return nil, err
-	}
-	for _, u := range users {
-		add(u)
+	name := ""
+	if a.AccountID != uuid.Nil {
+		acct, err := s.ids.GetAccountByUsernameCached(ctx, a.Username)
+		if err != nil {
+			return nil, err
+		}
+		name = acct.Name
+		add(acct.Username, name)
+	} else {
+		users, _, err := s.ids.ListMailboxAccounts(ctx, mb, "", 1000)
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range users {
+			add(u, "")
+		}
 	}
 	aliases, err := s.ids.ListMailboxAliases(ctx, mb)
 	if err != nil {
 		return nil, err
 	}
 	for _, al := range aliases {
-		add(al)
+		add(al, name)
 	}
 	return out, nil
+}
+
+// SetName changes the acting account's display name (the From: name of
+// all its identities).
+func (s *Service) SetName(ctx context.Context, name string) (identity.Account, error) {
+	a := actor.From(ctx)
+	if a.AccountID == uuid.Nil {
+		return identity.Account{}, ErrForbidden
+	}
+	name = strings.TrimSpace(name)
+	if len(name) > 256 || strings.ContainsAny(name, "\r\n") {
+		return identity.Account{}, fmt.Errorf("%w: name", ErrInvalid)
+	}
+	acct, err := s.ids.UpdateAccount(ctx, a.AccountID, func(x *identity.Account) error { x.Name = name; return nil })
+	if err != nil {
+		return identity.Account{}, err
+	}
+	s.audit.Log(ctx, auditor.Event{Mailbox: acct.MailboxID, Action: "name-change", Detail: name})
+	return acct, nil
 }
 
 // Request is an outbound submission.
