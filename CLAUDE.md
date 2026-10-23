@@ -129,6 +129,14 @@ These are settled. Do not design around them.
   Placement is random among connected storage entries open for placement; an unreachable
   storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
   every storage; a removal task carries the storage id.
+- **Every multi-object write undoes itself; sweeps are insurance.** A write that touches
+  several RADOS objects has one commit point (the folder record) and compensates everything it
+  wrote when it fails before it (`index.unappend`, `delivery.undoStore`). Sweeps (attachment
+  GC with dangling-reference checks and version-conditional deletes, weekly orphan sweep incl.
+  lone `.raw` objects, hourly upload sweep, audit purge) only catch crashes; never make a new
+  write path depend on a sweep, and never add a sweep that walks a pool more often than the
+  orphan sweep. Tests inject failures with a wrapping `rados.IOContext` (see
+  `service/delivery/undo_test.go`).
 - **Admin API is the only way identity data is created/changed.** `kittiwake admin` does only
   bootstrap/token; operators use `kittiwake-admin` (client/admin). Do not add admin features
   to cmd/kittiwake; add them to the API + spec + client.
