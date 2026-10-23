@@ -41,6 +41,11 @@ type Backend interface {
 	ListDomainAccounts(ctx context.Context, domain, prefix, after string, max int) (usernames []string, more bool, err error)
 	CreateAlias(ctx context.Context, al Alias) (Alias, error)
 	ListMailboxAliases(ctx context.Context, id uuid.UUID) ([]string, error)
+	// ListAliasesTo lists the aliases that have address (normalized) as a
+	// destination address: the reverse of address destinations, for
+	// sender identities. Defined for addresses in hosted domains; for any
+	// other address a backend may return nothing.
+	ListAliasesTo(ctx context.Context, address string) ([]string, error)
 	GetAlias(ctx context.Context, address string) (Versioned[Alias], error)
 	UpdateAlias(ctx context.Context, address string, fn func(*Alias) error) (Alias, error)
 	DeleteAlias(ctx context.Context, address string) error
@@ -222,6 +227,9 @@ func (s *Store) ListDomainAccounts(ctx context.Context, domain, prefix, after st
 }
 func (s *Store) ListMailboxAliases(ctx context.Context, id uuid.UUID) ([]string, error) {
 	return s.b.ListMailboxAliases(ctx, id)
+}
+func (s *Store) ListAliasesTo(ctx context.Context, address string) ([]string, error) {
+	return s.b.ListAliasesTo(ctx, address)
 }
 func (s *Store) GetAlias(ctx context.Context, address string) (Versioned[Alias], error) {
 	return s.b.GetAlias(ctx, address)

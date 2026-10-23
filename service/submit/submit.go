@@ -40,6 +40,11 @@ var (
 	ErrInvalid      = errors.New("submit: invalid message")
 )
 
+// AccountHeader carries the sending account's UUID on every outbound
+// message so the relay (Postfix header checks, milters) can tie it to an
+// account. Copies supplied by the client are removed first.
+const AccountHeader = "X-Kittiwake-Account"
+
 // Config for the service.
 type Config struct {
 	RelayHost string // host:port of the SMTP relay (Postfix)
@@ -51,10 +56,14 @@ type Config struct {
 	TLS                   string
 	TLSServerName         string
 	TLSInsecureSkipVerify bool
-	Hostname              string // EHLO name and Received: host
-	MaxMessageSize        int64
-	Timeout               time.Duration
-	MaxRecipients         int
+	// XClient passes the account UUID (LOGIN) and client address (ADDR) to
+	// the relay with Postfix XCLIENT on every session; see config.SMTP.
+	XClient        bool
+	Hostname       string // EHLO name and Received: host
+	MaxMessageSize int64
+	Timeout        time.Duration
+	MaxRecipients  int
+	MaxAliasDepth  int // bounds the alias chains followed for identities
 }
 
 // Relay delivers a message to the MTA. The default implementation speaks
@@ -86,6 +95,9 @@ func New(cfg Config, ids *identity.Store, idx *index.Store, del *delivery.Servic
 	if cfg.MaxRecipients <= 0 {
 		cfg.MaxRecipients = 100
 	}
+	if cfg.MaxAliasDepth <= 0 {
+		cfg.MaxAliasDepth = 5
+	}
 	if cfg.Hostname == "" {
 		cfg.Hostname = "kittiwake"
 	}
@@ -106,10 +118,14 @@ type Identity struct {
 }
 
 // Identities lists the addresses the acting account may use as From: its
-// own username and the aliases that deliver to its mailbox (catch-alls
-// excluded), all carrying the account's display name. Other accounts
-// attached to the same mailbox are not identities of this one. An admin
-// inspecting a mailbox sees the identities of every account on it.
+// own username and the enabled aliases that reach it, all carrying the
+// account's display name. An alias reaches it with the mailbox as a
+// destination or with an address destination that is the account's own
+// address or another such alias (chains up to MaxAliasDepth); catch-alls
+// never count. Other accounts attached to the same mailbox are not
+// identities of this one, nor are aliases that only reach the mailbox
+// through them. An admin inspecting a mailbox sees the identities of every
+// account on it.
 func (s *Service) Identities(ctx context.Context, mb uuid.UUID) ([]Identity, error) {
 	a := actor.From(ctx)
 	if !(a.MailboxID == mb || a.IsAdminReader()) {
@@ -117,36 +133,77 @@ func (s *Service) Identities(ctx context.Context, mb uuid.UUID) ([]Identity, err
 	}
 	var out []Identity
 	seen := map[string]bool{}
-	add := func(addr, name string) {
-		if addr == "" || strings.HasPrefix(addr, "@") || seen[addr] {
-			return
-		}
-		seen[addr] = true
-		out = append(out, Identity{ID: addr, Email: addr, Name: name})
-	}
 	name := ""
+	var frontier []string // addresses whose address-destination aliases still need listing
 	if a.AccountID != uuid.Nil {
 		acct, err := s.ids.GetAccountByUsernameCached(ctx, a.Username)
 		if err != nil {
 			return nil, err
 		}
 		name = acct.Name
-		add(acct.Username, name)
+		seen[acct.Username] = true
+		out = append(out, Identity{ID: acct.Username, Email: acct.Username, Name: name})
+		frontier = append(frontier, acct.Username)
 	} else {
 		users, _, err := s.ids.ListMailboxAccounts(ctx, mb, "", 1000)
 		if err != nil {
 			return nil, err
 		}
 		for _, u := range users {
-			add(u, "")
+			if !seen[u] {
+				seen[u] = true
+				out = append(out, Identity{ID: u, Email: u})
+				frontier = append(frontier, u)
+			}
 		}
 	}
-	aliases, err := s.ids.ListMailboxAliases(ctx, mb)
+	// addAlias records an enabled, non-catch-all alias; it reports whether
+	// the alias is new, so its own reverse listing is followed.
+	addAlias := func(addr string) (bool, error) {
+		if addr == "" || strings.HasPrefix(addr, "@") || seen[addr] {
+			return false, nil
+		}
+		seen[addr] = true
+		al, err := s.ids.GetAliasCached(ctx, addr)
+		if err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		if !al.Enabled {
+			return false, nil
+		}
+		out = append(out, Identity{ID: addr, Email: addr, Name: name})
+		return true, nil
+	}
+	direct, err := s.ids.ListMailboxAliases(ctx, mb)
 	if err != nil {
 		return nil, err
 	}
-	for _, al := range aliases {
-		add(al, name)
+	for _, addr := range direct {
+		if ok, err := addAlias(addr); err != nil {
+			return nil, err
+		} else if ok {
+			frontier = append(frontier, addr)
+		}
+	}
+	for depth := 0; depth < s.cfg.MaxAliasDepth && len(frontier) > 0; depth++ {
+		var next []string
+		for _, dest := range frontier {
+			to, err := s.ids.ListAliasesTo(ctx, dest)
+			if err != nil {
+				return nil, err
+			}
+			for _, addr := range to {
+				if ok, err := addAlias(addr); err != nil {
+					return nil, err
+				} else if ok {
+					next = append(next, addr)
+				}
+			}
+		}
+		frontier = next
 	}
 	return out, nil
 }
@@ -168,6 +225,23 @@ func (s *Service) SetName(ctx context.Context, name string) (identity.Account, e
 	}
 	s.audit.Log(ctx, auditor.Event{Mailbox: acct.MailboxID, Action: "name-change", Detail: name})
 	return acct, nil
+}
+
+// CheckSender reports whether the acting account may use addr as its
+// envelope sender, so an SMTP adapter can refuse MAIL FROM before the
+// client uploads the message. Send checks again.
+func (s *Service) CheckSender(ctx context.Context, mb uuid.UUID, addr string) error {
+	ids, err := s.Identities(ctx, mb)
+	if err != nil {
+		return err
+	}
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	for _, id := range ids {
+		if id.Email == addr {
+			return nil
+		}
+	}
+	return ErrBadSender
 }
 
 // Request is an outbound submission.
@@ -220,6 +294,22 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 	msg, err := mail.ReadMessage(bytes.NewReader(req.Raw))
 	if err != nil {
 		return fail("unparseable", fmt.Errorf("%w: %v", ErrInvalid, err))
+	}
+	now := s.Now().UTC()
+	// RFC 6409 §8.3/8.4: the submission server may add a missing
+	// Message-ID and Date. The Sent copy gets the same headers.
+	var add []string
+	if msg.Header.Get("Message-ID") == "" {
+		add = append(add, fmt.Sprintf("Message-ID: <%s@%s>", uuid.NewString(), s.cfg.Hostname))
+	}
+	if msg.Header.Get("Date") == "" {
+		add = append(add, "Date: "+now.Format(time.RFC1123Z))
+	}
+	if len(add) > 0 {
+		req.Raw = append([]byte(strings.Join(add, "\r\n")+"\r\n"), req.Raw...)
+		if msg, err = mail.ReadMessage(bytes.NewReader(req.Raw)); err != nil {
+			return fail("unparseable", fmt.Errorf("%w: %v", ErrInvalid, err))
+		}
 	}
 	ids, err := s.Identities(ctx, req.MailboxID)
 	if err != nil {
@@ -282,19 +372,23 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 			return fail("bad recipient "+r, fmt.Errorf("%w: recipient %q", ErrInvalid, r))
 		}
 	}
-	// Strip Bcc from what leaves the building; prepend our Received header.
-	outgoing := stripHeader(req.Raw, "Bcc")
-	now := s.Now().UTC()
-	received := fmt.Sprintf("Received: from [%s] by %s (Kittiwake) with %s id %s for <%s>; %s\r\n",
-		a.ClientIP, s.cfg.Hostname, strings.ToUpper(a.Protocol), a.SessionID, from, now.Format(time.RFC1123Z))
-	outgoing = append([]byte(received), outgoing...)
+	// Strip Bcc and any client-supplied account header from what leaves the
+	// building; prepend our Received and account headers.
+	outgoing := stripHeader(stripHeader(req.Raw, "Bcc"), AccountHeader)
+	id := ""
+	if a.SessionID != "" {
+		id = " id " + a.SessionID
+	}
+	received := fmt.Sprintf("Received: from [%s] by %s (Kittiwake) with %s%s for <%s>; %s\r\n",
+		a.ClientIP, s.cfg.Hostname, withProtocol(a.Protocol), id, from, now.Format(time.RFC1123Z))
+	outgoing = append([]byte(received+AccountHeader+": "+a.AccountID.String()+"\r\n"), outgoing...)
 
 	rctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	if err := s.relay.Send(rctx, from, to, outgoing); err != nil {
 		metrics.Deliveries.WithLabelValues("submit-relay-error").Inc()
 		s.audit.Log(ctx, auditor.Event{Mailbox: req.MailboxID, Action: "send", Detail: fmt.Sprintf("message-id=%s relay: %v", strings.Trim(msg.Header.Get("Message-ID"), "<> "), err), Result: audit.ResultError})
-		return Result{}, fmt.Errorf("%w: %v", ErrRelay, err)
+		return Result{}, fmt.Errorf("%w: %w", ErrRelay, err)
 	}
 	res := Result{EnvelopeFrom: from, Recipients: to, SentAt: now}
 	metrics.Deliveries.WithLabelValues("submitted").Inc()
@@ -312,6 +406,15 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	return res, nil
+}
+
+// withProtocol is the Received: "with" keyword for a protocol: ESMTPSA
+// (RFC 3848) for authenticated SMTP submission, the protocol name otherwise.
+func withProtocol(proto string) string {
+	if proto == "submission" {
+		return "ESMTPSA"
+	}
+	return strings.ToUpper(proto)
 }
 
 func firstAddress(v string) string {
@@ -377,24 +480,20 @@ type smtpRelay struct{ cfg Config }
 // ErrNoStartTLS: smtp.tls is required and the relay does not offer it.
 var ErrNoStartTLS = errors.New("submit: relay does not offer STARTTLS")
 
-// connect dials the relay and negotiates STARTTLS according to the TLS
-// mode. go-smtp only exposes STARTTLS as part of the initial handshake, so
-// an opportunistic connection to a relay without STARTTLS is redone in
-// plain text (one extra round trip for the rare plain relay).
-func (r *smtpRelay) connect(ctx context.Context) (*smtp.Client, error) {
+func (r *smtpRelay) dial(ctx context.Context) (net.Conn, error) {
 	d := net.Dialer{Timeout: 30 * time.Second}
-	dial := func() (net.Conn, error) { return d.DialContext(ctx, "tcp", r.cfg.RelayHost) }
-	mode := r.cfg.TLS
-	if mode == "" {
-		mode = "opportunistic"
+	return d.DialContext(ctx, "tcp", r.cfg.RelayHost)
+}
+
+func (r *smtpRelay) mode() string {
+	if r.cfg.TLS == "" {
+		return "opportunistic"
 	}
-	if mode == "off" {
-		conn, err := dial()
-		if err != nil {
-			return nil, err
-		}
-		return smtp.NewClient(conn), nil
-	}
+	return r.cfg.TLS
+}
+
+// tlsConfig is the STARTTLS client configuration for the TLS mode.
+func (r *smtpRelay) tlsConfig() *tls.Config {
 	host, _, err := net.SplitHostPort(r.cfg.RelayHost)
 	if err != nil {
 		host = r.cfg.RelayHost
@@ -403,32 +502,14 @@ func (r *smtpRelay) connect(ctx context.Context) (*smtp.Client, error) {
 	if r.cfg.TLSServerName != "" {
 		tc.ServerName = r.cfg.TLSServerName
 	}
-	if mode == "opportunistic" || r.cfg.TLSInsecureSkipVerify {
+	if r.mode() == "opportunistic" || r.cfg.TLSInsecureSkipVerify {
 		tc.InsecureSkipVerify = true //nolint:gosec // opportunistic encryption, documented
 	}
-	conn, err := dial()
-	if err != nil {
-		return nil, err
-	}
-	c, err := smtp.NewClientStartTLS(conn, tc)
-	if err == nil {
-		return c, nil
-	}
-	if !strings.Contains(err.Error(), "doesn't support STARTTLS") {
-		return nil, err
-	}
-	if mode == "required" {
-		return nil, ErrNoStartTLS
-	}
-	conn, err = dial()
-	if err != nil {
-		return nil, err
-	}
-	return smtp.NewClient(conn), nil
+	return tc
 }
 
 func (r *smtpRelay) Send(ctx context.Context, from string, to []string, data []byte) error {
-	c, err := r.connect(ctx)
+	c, err := r.connect(ctx, actor.From(ctx))
 	if err != nil {
 		return err
 	}
@@ -436,7 +517,7 @@ func (r *smtpRelay) Send(ctx context.Context, from string, to []string, data []b
 	if err := c.Hello(r.cfg.Hostname); err != nil {
 		return err
 	}
-	if r.cfg.Username != "" {
+	if r.cfg.Username != "" && !r.cfg.XClient {
 		if err := c.Auth(sasl.NewPlainClient("", r.cfg.Username, r.cfg.Password)); err != nil {
 			return err
 		}

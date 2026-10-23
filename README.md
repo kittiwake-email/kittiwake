@@ -138,6 +138,8 @@ Each mode is a separately scalable component:
 - `pop3` – POP3 server for legacy clients
 - `jmap` – JMAP (mailbox API) with the OAuth token and self-service endpoints clients need
   next to it; user-facing
+- `submission` – SMTP message submission (RFC 6409) for mail clients; HAProxy terminates
+  TLS on port 465
 - `admin` – the admin REST API; operator-facing, on its own listener
 - `postfix` – socketmap lookup service for Postfix (domains, recipients, aliases)
 - `worker` – background task execution (trash purge, attachment garbage collection, quota
@@ -220,6 +222,7 @@ Supported protocols:
 - IMAP: IMAP4rev1 plus IDLE, UIDPLUS and MOVE to start; more extensions later as needed
 - POP3: serves INBOX only; UIDL is derived from the folder UID and UIDVALIDITY; DELE is lazy
   (see Retention)
+- SMTP submission (outbound, RFC 6409) on implicit TLS (RFC 8314, port 465 at HAProxy)
 - Postfix socketmap (lookups for the MTA)
 
 IMAP and POP3 must work but are not the primary target; they serve legacy clients. Each
@@ -259,17 +262,64 @@ name (`tls_server_name` when the certificate carries another name,
 host. With `required`, SASL credentials never travel in plain text. The
 platform does not queue or retry outbound mail itself beyond the submission; that is the
 MTA's job. If the relay rejects or is unreachable the API returns an error and nothing is
-stored. A copy of every sent message is stored in the Sent folder, going through the same
-parse-and-store path as inbound mail. Arbitrary messages can be added to a folder with JMAP
+stored. A copy of every message sent through JMAP is stored in the Sent folder, going
+through the same parse-and-store path as inbound mail. Arbitrary messages can be added to a folder with JMAP
 `Email/import` or `Email/set` (drafts), and IMAP APPEND.
 
 The `From` address (and `Sender`, if present) must be one of the account's identities: its
-own address and the aliases that point at its mailbox. Another account attached to the same
-mailbox is not an identity of this one, so on a shared mailbox each account sends as itself
-or as the shared aliases, never as a colleague. Submissions with another `From` are
+own address and the enabled aliases that reach it, either with the mailbox as a destination
+or with an address destination that is the account's address or another such alias (chains
+up to `mail.max_alias_depth`). Catch-alls and disabled aliases never count. Another account
+attached to the same mailbox is not an identity of this one, nor is an alias that only
+reaches the mailbox through that account's address, so on a shared mailbox each account
+sends as itself or as the shared aliases, never as a colleague. The reverse lookup of
+address destinations is an indexed query (MariaDB) or a listing on the destination domain
+(RADOS backend); destinations outside a hosted domain are not followed. Submissions with another `From` are
 rejected (`EmailSubmission/set` fails the submission, the audit log records the attempt).
 JMAP `Identity/get` lists these identities, all with the account's display name. Kittiwake adds its own `Received:` header naming the authenticated account so the MTA
 logs can be tied to the audit log.
+
+### SMTP submission
+
+Mail clients send through the `submission` mode: an SMTP server (RFC 6409) that hands every
+message to the same submit service as JMAP, so identity checks, hold, size limit, audit and
+relay behave identically. HAProxy terminates **implicit TLS on port 465** (RFC 8314) and
+forwards with PROXY v2; the daemon speaks no TLS. STARTTLS on 587 is not offered (HAProxy
+cannot terminate it); it may come later. With `submission.require_tls_proxy` (default on)
+AUTH is only offered when the PROXY header carries the SSL TLV (HAProxy
+`send-proxy-v2-ssl`), so a password never crosses a plain-text client connection.
+
+- **Authentication:** SASL `PLAIN`, `LOGIN` (Outlook and devices), `OAUTHBEARER` and
+  `XOAUTH2`, as on IMAP: a TOTP account's primary password is refused, application passwords
+  and session tokens work. There is no per-account service switch: the `send` role is what
+  permits submission (and JMAP sending); an account without it cannot log in here.
+- **Envelope:** `MAIL FROM` must be one of the account's identities and is checked before the
+  client uploads the message; the null sender `<>` is refused. Recipients are not looked up;
+  the relay decides. Header `From`/`Sender` are checked at `DATA` like JMAP.
+- **Synchronous relay:** the client gets `250` only after the relay accepted the message. A
+  relay rejection is passed back with the relay's own code; an unreachable relay is `451`.
+- **Headers:** a missing `Message-ID` or `Date` is added (RFC 6409 §8); the `Received:` line
+  says `with ESMTPSA` (RFC 3848).
+- **No Sent copy by default** (`submission.save_to_sent: false`): SMTP clients store their
+  own over IMAP, and a second copy would duplicate it. With it off, submission does no RADOS
+  I/O at all apart from the buffered audit write.
+
+### Rate limiting and the relay
+
+Kittiwake does not rate-limit sending (stateless daemons have no shared counters); the relay
+does, and how is decided per environment. Kittiwake gives it what it needs to act per
+account, for JMAP and submission alike:
+
+- every outbound message carries `X-Kittiwake-Account: <account uuid>` (a copy supplied by
+  the client is removed first), for header checks, milters (rspamd) and log correlation;
+- with `smtp.xclient: true`, every relay session starts with Postfix
+  [XCLIENT](https://www.postfix.org/XCLIENT_README.html) `LOGIN=<account uuid>
+  ADDR=<client address>`: Postfix then sees the account as `sasl_username` (for policy
+  services such as postfwd or policyd, which run before the message body exists and so cannot
+  see headers) and logs the real client address instead of Kittiwake's. The relay must list
+  the Kittiwake hosts in `smtpd_authorized_xclient_hosts` and permit relaying for
+  authenticated senders; XCLIENT replaces `smtp.username`/`password`. See
+  `contrib/postfix/`.
 
 ## Message size limit
 
@@ -278,13 +328,14 @@ A configurable maximum message size is enforced at LMTP, JMAP blob upload, `Emai
 
 ## TLS
 
-TLS is not handled by this daemon; a proxy like HAProxy does this.
+TLS is not handled by this daemon; a proxy like HAProxy does this. For SMTP submission that
+means implicit TLS (port 465) only; see "SMTP submission".
 
 ## Client IP passthrough
 
 Because HAProxy sits in front, the daemon would only ever see the proxy's address. HAProxy
-forwards every connection with the PROXY protocol, so all listeners (IMAP, POP3, LMTP and the
-HTTP API) accept PROXY protocol v1 and v2 and take the real client address from it. PROXY
+forwards every connection with the PROXY protocol, so all listeners (IMAP, POP3, LMTP,
+submission and the HTTP API) accept PROXY protocol v1 and v2 and take the real client address from it. PROXY
 protocol can be required per listener so a connection without the header is rejected.
 "Optional" mode (header parsed if present) delays the banner of server-speaks-first protocols
 (IMAP, POP3, LMTP) by a short wait for every client that sends no header, so it is only for
@@ -790,7 +841,7 @@ Accounts and API tokens carry a set of roles. The role set is:
 - `read` – list folders, read messages and attachments, search (JMAP get/query/changes)
 - `write` – change flags, move/copy/delete messages, manage folders, import messages (JMAP
   set)
-- `send` – submit outbound mail (JMAP `EmailSubmission`)
+- `send` – submit outbound mail (JMAP `EmailSubmission` and SMTP submission)
 A normal full-access account has `read`, `write` and `send`. Accounts cannot carry admin
 roles; see "Admin tokens". A token's roles may only narrow
 the account's roles; a token claiming a role the account lacks is rejected.
@@ -899,6 +950,8 @@ Accounts can require a time-based one-time password (TOTP, RFC 6238) with their 
   storing the password.
 - JMAP and the REST endpoints authenticate with a bearer token (session access token or
   long-lived API token) or HTTP basic auth.
+- SMTP submission authenticates like IMAP (`PLAIN`, `LOGIN`, `OAUTHBEARER`, `XOAUTH2`) and
+  additionally requires the `send` role.
 
 Session access tokens are JWTs and cost no I/O to verify. An API or admin token costs one or
 two RADOS reads. A password costs two reads plus an argon2id verification, which at the
@@ -1045,8 +1098,9 @@ The daemon takes a single YAML file as configuration:
 - Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
 - Ceph: `config_file` and `options` applied to every storage connection (the Ceph
   clusters themselves are registered in the database as storage); pool names only for the memory backend
-- Outbound SMTP relay host, STARTTLS mode (off, opportunistic, required) and optional SASL
-  credentials
+- Outbound SMTP relay host, STARTTLS mode (off, opportunistic, required), optional SASL
+  credentials or Postfix XCLIENT
+- SMTP submission: Sent copy (default off), AUTH only behind a TLS proxy (default on)
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
@@ -1146,6 +1200,9 @@ than the schema it talks to (a daemon refuses to start on a schema version it do
 - IMAP4rev1 with IDLE, UIDPLUS, MOVE, SPECIAL-USE, NAMESPACE, UNSELECT, SASL PLAIN /
   OAUTHBEARER / XOAUTH2; POP3 with UIDL, TOP, SASL
 - Outbound submission via SMTP relay with identity enforcement and Sent copies
+- SMTP submission mode (RFC 6409, implicit TLS at HAProxy) with PLAIN/LOGIN/OAUTHBEARER/
+  XOAUTH2; account header and optional Postfix XCLIENT for per-account rate limiting at the
+  relay
 - Legal hold (read-only / sealed, delivery and sending switches, purge suspension)
 - Maildir++ export (tar, manifest, audit log) and import (directory or archive), as CLI,
   worker task and admin API

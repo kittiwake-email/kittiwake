@@ -100,6 +100,7 @@ type Conn struct {
 	r      *bufio.Reader
 	remote net.Addr
 	local  net.Addr
+	tls    bool
 }
 
 // NewConn reads the PROXY header from c according to mode.
@@ -188,11 +189,13 @@ func (pc *Conn) parseV2() error {
 	if cmd == 0 { // LOCAL: health checks from the proxy itself
 		return nil
 	}
+	addrLen := 0
 	switch fam >> 4 {
 	case 1: // AF_INET
 		if n < 12 {
 			return errors.New("proxyproto: short v2 inet body")
 		}
+		addrLen = 12
 		pc.remote = &net.TCPAddr{IP: net.IP(body[0:4]), Port: int(binary.BigEndian.Uint16(body[8:10]))}
 		pc.local = &net.TCPAddr{IP: net.IP(body[4:8]), Port: int(binary.BigEndian.Uint16(body[10:12]))}
 	case 2: // AF_INET6
@@ -201,16 +204,48 @@ func (pc *Conn) parseV2() error {
 		}
 		pc.remote = &net.TCPAddr{IP: net.IP(body[0:16]), Port: int(binary.BigEndian.Uint16(body[32:34]))}
 		pc.local = &net.TCPAddr{IP: net.IP(body[16:32]), Port: int(binary.BigEndian.Uint16(body[34:36]))}
-	case 0, 3: // UNSPEC / UNIX: keep socket addresses
+		addrLen = 36
+	case 3: // UNIX: keep socket addresses
+		addrLen = min(n, 216)
+	case 0: // UNSPEC: keep socket addresses
 	default:
 		return errors.New("proxyproto: unknown v2 family")
 	}
+	pc.tls = sslTLV(body[addrLen:])
 	return nil
+}
+
+// sslTLV reports whether the TLVs after the address block carry
+// PP2_TYPE_SSL with PP2_CLIENT_SSL set: the client spoke TLS to the proxy
+// (HAProxy send-proxy-v2-ssl).
+func sslTLV(b []byte) bool {
+	for len(b) >= 3 {
+		typ, n := b[0], int(binary.BigEndian.Uint16(b[1:3]))
+		if len(b) < 3+n {
+			return false
+		}
+		if typ == 0x20 && n >= 1 && b[3]&0x01 != 0 {
+			return true
+		}
+		b = b[3+n:]
+	}
+	return false
 }
 
 func (pc *Conn) Read(b []byte) (int, error) { return pc.r.Read(b) }
 func (pc *Conn) RemoteAddr() net.Addr       { return pc.remote }
 func (pc *Conn) LocalAddr() net.Addr        { return pc.local }
+
+// TLS reports whether the proxy said the client connection was TLS (an
+// SSL TLV in a v2 header).
+func (pc *Conn) TLS() bool { return pc.tls }
+
+// TLSOf reports whether c is a PROXY connection whose client spoke TLS to
+// the proxy.
+func TLSOf(c net.Conn) bool {
+	pc, ok := c.(*Conn)
+	return ok && pc.tls
+}
 
 // ProxyAddr returns the address of the proxy itself (the socket peer).
 func (pc *Conn) ProxyAddr() net.Addr { return pc.Conn.RemoteAddr() }

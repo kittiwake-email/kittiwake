@@ -15,25 +15,26 @@ import (
 
 // Config is the whole configuration file.
 type Config struct {
-	// Modes to run in this process: lmtp, imap, pop3, jmap, admin,
-	// socketmap, worker. Optional: a systemd instance passes its mode with --modes
+	// Modes to run in this process: lmtp, imap, pop3, jmap, submission,
+	// admin, socketmap, worker. Optional: a systemd instance passes its mode with --modes
 	// instead; the list is for running several modes in one process.
 	Modes []string `yaml:"modes"`
 
-	Ceph     Ceph     `yaml:"ceph"`
-	Listen   Listen   `yaml:"listen"`
-	Proxy    Proxy    `yaml:"proxy"`
-	SMTP     SMTP     `yaml:"smtp"`
-	Mail     Mail     `yaml:"mail"`
-	Quota    Quota    `yaml:"quota"`
-	Database Database `yaml:"database"`
-	Node     Node     `yaml:"node"`
-	IMAP     IMAP     `yaml:"imap"`
-	Session  Session  `yaml:"session"`
-	Cache    Cache    `yaml:"cache"`
-	Audit    Audit    `yaml:"audit"`
-	Export   Export   `yaml:"export"`
-	Log      Log      `yaml:"log"`
+	Ceph       Ceph       `yaml:"ceph"`
+	Listen     Listen     `yaml:"listen"`
+	Proxy      Proxy      `yaml:"proxy"`
+	SMTP       SMTP       `yaml:"smtp"`
+	Submission Submission `yaml:"submission"`
+	Mail       Mail       `yaml:"mail"`
+	Quota      Quota      `yaml:"quota"`
+	Database   Database   `yaml:"database"`
+	Node       Node       `yaml:"node"`
+	IMAP       IMAP       `yaml:"imap"`
+	Session    Session    `yaml:"session"`
+	Cache      Cache      `yaml:"cache"`
+	Audit      Audit      `yaml:"audit"`
+	Export     Export     `yaml:"export"`
+	Log        Log        `yaml:"log"`
 }
 
 // Ceph is the storage connection and pool layout.
@@ -65,13 +66,16 @@ type Pools struct {
 
 // Listen holds one listener per mode plus the management listener.
 type Listen struct {
-	LMTP      Listener `yaml:"lmtp"`
-	IMAP      Listener `yaml:"imap"`
-	POP3      Listener `yaml:"pop3"`
-	JMAP      Listener `yaml:"jmap"`      // JMAP, OAuth token and self-service endpoints
-	Admin     Listener `yaml:"admin"`     // admin REST API, operators only
-	Socketmap Listener `yaml:"socketmap"` // MTA recipient/domain/alias lookups (Postfix socketmap protocol)
-	Worker    Listener `yaml:"worker"`    // no listener of its own; only its management address
+	LMTP Listener `yaml:"lmtp"`
+	IMAP Listener `yaml:"imap"`
+	POP3 Listener `yaml:"pop3"`
+	JMAP Listener `yaml:"jmap"` // JMAP, OAuth token and self-service endpoints
+	// Submission: SMTP message submission (RFC 6409) behind HAProxy, which
+	// terminates implicit TLS on port 465 (RFC 8314).
+	Submission Listener `yaml:"submission"`
+	Admin      Listener `yaml:"admin"`     // admin REST API, operators only
+	Socketmap  Listener `yaml:"socketmap"` // MTA recipient/domain/alias lookups (Postfix socketmap protocol)
+	Worker     Listener `yaml:"worker"`    // no listener of its own; only its management address
 	// Management is the metrics/health listener of a process that runs
 	// several modes, or of a mode whose entry has no management address.
 	Management Listener `yaml:"management"`
@@ -101,6 +105,8 @@ func (l Listen) ByMode(mode string) Listener {
 		return l.POP3
 	case "jmap":
 		return l.JMAP
+	case "submission":
+		return l.Submission
 	case "admin":
 		return l.Admin
 	case "socketmap":
@@ -145,6 +151,25 @@ type SMTP struct {
 	// TLSInsecureSkipVerify: with "required", still insist on STARTTLS but
 	// accept any certificate (lab relays with self-signed certificates).
 	TLSInsecureSkipVerify bool `yaml:"tls_insecure_skip_verify"`
+	// XClient: open every relay session with Postfix XCLIENT, passing the
+	// sending account's UUID as LOGIN (Postfix sasl_username, for policy
+	// services and logs) and the real client address as ADDR, so the relay
+	// can rate-limit per account. The relay must list Kittiwake in
+	// smtpd_authorized_xclient_hosts; it then treats the session as
+	// authenticated, so username/password are not used with it.
+	XClient bool `yaml:"xclient"`
+}
+
+// Submission is the SMTP submission mode.
+type Submission struct {
+	// SaveToSent stores a copy of every message in the Sent folder. Off by
+	// default: SMTP clients save their own copy over IMAP.
+	SaveToSent bool `yaml:"save_to_sent"`
+	// RequireTLSProxy offers AUTH only on connections whose PROXY v2 header
+	// says the client spoke TLS to the proxy (HAProxy send-proxy-v2-ssl),
+	// so a password never crosses a plain-text client connection. Default
+	// true; turn off for development without a proxy.
+	RequireTLSProxy bool `yaml:"require_tls_proxy"`
 }
 
 // Mail holds message handling policy.
@@ -308,12 +333,14 @@ func Default() Config {
 			IMAP:       Listener{Address: "[::]:143", ProxyProtocol: "optional", Management: "[::1]:9092"},
 			POP3:       Listener{Address: "[::]:110", ProxyProtocol: "optional", Management: "[::1]:9093"},
 			JMAP:       Listener{Address: "[::]:8080", ProxyProtocol: "optional", Management: "[::1]:9094"},
+			Submission: Listener{Address: "[::]:587", ProxyProtocol: "optional", Management: "[::1]:9098"},
 			Admin:      Listener{Address: "[::1]:8081", ProxyProtocol: "off", Management: "[::1]:9095"},
 			Socketmap:  Listener{Address: "[::1]:2525", ProxyProtocol: "off", Management: "[::1]:9096"},
 			Worker:     Listener{Management: "[::1]:9097"},
 			Management: Listener{Address: "[::1]:9090", ProxyProtocol: "off"},
 		},
-		SMTP: SMTP{RelayHost: "[::1]:25", TLS: "opportunistic"},
+		SMTP:       SMTP{RelayHost: "[::1]:25", TLS: "opportunistic"},
+		Submission: Submission{RequireTLSProxy: true},
 		Mail: Mail{
 			MaxMessageSize:      50 << 20,
 			InlineAttachmentMax: 4 << 10,
@@ -362,10 +389,10 @@ func Parse(b []byte) (Config, error) {
 }
 
 // ValidModes is the set of accepted mode names.
-var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "admin": true, "socketmap": true, "worker": true}
+var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "submission": true, "admin": true, "socketmap": true, "worker": true}
 
 // AllModes lists every mode name.
-var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "admin", "socketmap", "worker"}
+var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "submission", "admin", "socketmap", "worker"}
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
@@ -374,12 +401,15 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: smtp.tls must be off, opportunistic or required, got %q", c.SMTP.TLS)
 	}
+	if c.SMTP.XClient && c.SMTP.Username != "" {
+		return errors.New("config: smtp.xclient and smtp.username exclude each other: with XCLIENT the relay authorises Kittiwake by address and the session carries the account")
+	}
 	for _, m := range c.Modes {
 		if !ValidModes[m] {
 			return fmt.Errorf("config: unknown mode %q", m)
 		}
 	}
-	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "admin": c.Listen.Admin, "socketmap": c.Listen.Socketmap, "management": c.Listen.Management} {
+	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "submission": c.Listen.Submission, "admin": c.Listen.Admin, "socketmap": c.Listen.Socketmap, "management": c.Listen.Management} {
 		switch l.ProxyProtocol {
 		case "", "off", "optional", "required":
 		default:

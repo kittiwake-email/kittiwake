@@ -219,6 +219,25 @@ func testAliases(t *testing.T, f Factory) {
 	if len(mal) != 2 || mal[0] != "@example.org" || mal[1] != "info@example.org" {
 		t.Fatalf("mailbox aliases: %v", mal)
 	}
+	// Reverse of address destinations: chains, and destinations outside a hosted domain.
+	if _, err := s.CreateAlias(ctx, identity.Alias{Address: "team@example.org", Enabled: true, Destinations: []identity.Destination{{Address: "info@example.org"}, {Address: "Ext@Other.example"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if to, err := s.ListAliasesTo(ctx, "WIDO@example.org"); err != nil || len(to) != 1 || to[0] != "info@example.org" {
+		t.Fatalf("aliases to wido: %v %v", to, err)
+	}
+	if to, _ := s.ListAliasesTo(ctx, "info@example.org"); len(to) != 1 || to[0] != "team@example.org" {
+		t.Fatalf("aliases to info: %v", to)
+	}
+	if _, err := s.ListAliasesTo(ctx, "ext@other.example"); err != nil { // defined only for hosted addresses
+		t.Fatalf("aliases to an external address: %v", err)
+	}
+	if err := s.DeleteAlias(ctx, "team@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if to, _ := s.ListAliasesTo(ctx, "info@example.org"); len(to) != 0 {
+		t.Fatalf("aliases to info after delete: %v", to)
+	}
 	mb2, _ := s.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = s.UpdateAlias(ctx, "info@example.org", func(a *identity.Alias) error {
 		a.Destinations = []identity.Destination{{MailboxID: mb2.ID}}
@@ -229,6 +248,9 @@ func testAliases(t *testing.T, f Factory) {
 	}
 	if mal, _ = s.ListMailboxAliases(ctx, mb2.ID); len(mal) != 1 || mal[0] != "info@example.org" {
 		t.Fatalf("new mailbox aliases: %v", mal)
+	}
+	if to, _ := s.ListAliasesTo(ctx, "wido@example.org"); len(to) != 0 {
+		t.Fatalf("aliases to wido after retarget: %v", to)
 	}
 	_, _ = s.UpdateAlias(ctx, "info@example.org", func(a *identity.Alias) error {
 		a.Destinations = []identity.Destination{{MailboxID: mb.ID}, {Address: "wido@example.org"}}
@@ -253,6 +275,9 @@ func testAliases(t *testing.T, f Factory) {
 	}
 	if mal, _ := s.ListMailboxAliases(ctx, mb.ID); len(mal) != 1 || mal[0] != "@example.org" {
 		t.Fatalf("mailbox aliases after delete: %v", mal)
+	}
+	if to, _ := s.ListAliasesTo(ctx, "wido@example.org"); len(to) != 0 {
+		t.Fatalf("aliases to wido after delete: %v", to)
 	}
 }
 

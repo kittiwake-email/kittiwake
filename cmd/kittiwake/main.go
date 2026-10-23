@@ -185,6 +185,8 @@ func runServe(args []string) error {
 				cfg.Listen.POP3.Management = ""
 			case "jmap":
 				cfg.Listen.JMAP.Management = ""
+			case "submission":
+				cfg.Listen.Submission.Management = ""
 			case "admin":
 				cfg.Listen.Admin.Management = ""
 			case "socketmap":

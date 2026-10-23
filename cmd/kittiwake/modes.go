@@ -8,11 +8,31 @@ import (
 	"kittiwake/app"
 	"kittiwake/proto/imap"
 	"kittiwake/proto/pop3"
+	"kittiwake/proto/submission"
 )
 
-// protocolModes registers the IMAP and POP3 servers with the app.
+// protocolModes registers the IMAP, POP3 and submission servers with the app.
 func protocolModes() []app.ModeFunc {
-	return []app.ModeFunc{imapMode, pop3Mode}
+	return []app.ModeFunc{imapMode, pop3Mode, submissionMode}
+}
+
+func submissionMode(ctx context.Context, a *app.App, start func(string, func() error)) error {
+	if !a.Cfg.HasMode("submission") {
+		return nil
+	}
+	host, _ := os.Hostname()
+	srv := submission.New(submission.Config{
+		Hostname: host, MaxMessageSize: a.Cfg.Mail.MaxMessageSize,
+		SaveToSent: a.Cfg.Submission.SaveToSent, RequireTLSProxy: a.Cfg.Submission.RequireTLSProxy,
+	}, a.Services.Auth, a.Services.Submit, a.Log)
+	ln, err := app.Listen(a.Cfg.Listen.Submission)
+	if err != nil {
+		return fmt.Errorf("submission listen: %w", err)
+	}
+	a.AddCloser(srv.Shutdown)
+	a.MarkHandled("submission")
+	start("submission", func() error { return srv.Serve(ln) })
+	return nil
 }
 
 func pop3Mode(ctx context.Context, a *app.App, start func(string, func() error)) error {

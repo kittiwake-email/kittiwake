@@ -57,6 +57,7 @@ listen:
   imap:       {address: "[::]:143",   proxy_protocol: optional, management: "[::1]:9092"}
   pop3:       {address: "[::]:110",   proxy_protocol: optional, management: "[::1]:9093"}
   jmap:       {address: "[::]:8080",  proxy_protocol: optional, management: "[::1]:9094"}
+  submission: {address: "[::]:587",   proxy_protocol: optional, management: "[::1]:9098"}   # SMTP submission; HAProxy terminates TLS on 465 (send-proxy-v2-ssl)
   admin:      {address: "[::1]:8081", proxy_protocol: off,      management: "[::1]:9095"}
   socketmap:  {address: "[::1]:2525", proxy_protocol: off,      management: "[::1]:9096"}   # MTA lookups (Postfix socketmap protocol)
   worker:     {management: "[::1]:9097"}                                                    # no listener of its own
@@ -71,6 +72,14 @@ smtp:
   # tls_server_name: mail.example.org   # certificate name when it differs from relay_host
   # tls_insecure_skip_verify: false     # required, but accept any certificate (lab relays)
   # username / password for SASL PLAIN (after STARTTLS)
+  # xclient: false             # Postfix XCLIENT on every relay session: LOGIN=<account uuid> (sasl_username for
+  #                             # policy services and logs), ADDR=<client address>. Needs smtpd_authorized_xclient_hosts
+  #                             # on the relay; excludes username/password. Every message also carries
+  #                             # X-Kittiwake-Account: <account uuid>.
+
+submission:
+  save_to_sent: false          # SMTP clients save their own Sent copy over IMAP
+  require_tls_proxy: true      # offer AUTH only when the PROXY v2 header says the client used TLS (HAProxy send-proxy-v2-ssl)
 
 mail:
   max_message_size: 52428800   # 50 MiB

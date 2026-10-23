@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS alias_destinations (
   address    VARCHAR(320)    NULL,
   PRIMARY KEY (alias_id, position),
   KEY ix_alias_destinations_mailbox (mailbox_id),
+  KEY ix_alias_destinations_address (address),
   CONSTRAINT fk_alias_destinations_alias FOREIGN KEY (alias_id) REFERENCES aliases (id) ON DELETE CASCADE,
   CONSTRAINT fk_alias_destinations_mailbox FOREIGN KEY (mailbox_id) REFERENCES mailboxes (id)
 ) ENGINE=InnoDB;

@@ -27,5 +27,25 @@ lmtp_destination_recipient_limit = 1    # one recipient per LMTP transaction
 #   X-Spam-Flag: YES
 
 # Submission: Kittiwake submits outbound mail to smtp.relay_host; point that at
-# this Postfix instance's submission port and allow it in mynetworks or with
-# SASL credentials.
+# a dedicated relay service of this Postfix instance (master.cf) and allow it in
+# mynetworks or with SASL credentials.
+#
+# Per-account rate limiting (smtp.xclient: true in kittiwake.yaml): Kittiwake
+# starts each relay session with XCLIENT LOGIN=<account uuid> ADDR=<client ip>,
+# so Postfix treats the session as authenticated by that account
+# (sasl_username) and logs the real client. XCLIENT LOGIN only takes effect
+# with SASL enabled on that smtpd (verified on Postfix 3.8); the exceptions
+# networks keep AUTH itself from being offered to anyone. On the relay service
+# only:
+#
+# 1025 inet n - y - - smtpd
+#   -o syslog_name=postfix/relay
+#   -o smtpd_authorized_xclient_hosts=<kittiwake hosts>
+#   -o smtpd_sasl_auth_enable=yes
+#   -o smtpd_sasl_exceptions_networks=0.0.0.0/0,[::]/0
+#   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+#   -o smtpd_recipient_restrictions=check_policy_service,inet:127.0.0.1:10040,permit_sasl_authenticated,reject
+#
+# A policy service (postfwd, policyd-rate-limit, ...) keys its limits on
+# sasl_username. Every message also carries "X-Kittiwake-Account: <uuid>" for
+# header_checks, milters (rspamd) and log correlation.

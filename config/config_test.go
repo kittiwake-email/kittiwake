@@ -98,3 +98,19 @@ func TestSecretFile(t *testing.T) {
 		t.Fatalf("%q %v", v, err)
 	}
 }
+
+func TestSubmissionConfig(t *testing.T) {
+	cfg, err := Parse([]byte("modes: [submission]\nceph: {backend: memory}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Submission.RequireTLSProxy || cfg.Submission.SaveToSent || cfg.Listen.ManagementAddress([]string{"submission"}) != "[::1]:9098" {
+		t.Fatalf("submission defaults: %+v %+v", cfg.Submission, cfg.Listen.Submission)
+	}
+	if _, err := Parse([]byte("ceph: {backend: memory}\nsmtp: {xclient: true, username: u}\n")); err == nil {
+		t.Fatal("xclient with SASL credentials accepted")
+	}
+	if _, err := Parse([]byte("ceph: {backend: memory}\nlisten: {submission: {proxy_protocol: bogus}}\n")); err == nil {
+		t.Fatal("bad submission proxy_protocol accepted")
+	}
+}

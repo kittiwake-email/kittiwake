@@ -96,3 +96,37 @@ func TestRequiredWithoutHeader(t *testing.T) {
 		t.Fatal("bogus mode")
 	}
 }
+
+func TestV2SSLTLV(t *testing.T) {
+	build := func(tlvs []byte) []byte {
+		hdr := append([]byte{}, v2Sig...)
+		hdr = append(hdr, 0x21, 0x21)
+		body := make([]byte, 36)
+		copy(body[0:16], net.ParseIP("2001:db8::10").To16())
+		copy(body[16:32], net.ParseIP("2001:db8::20").To16())
+		body = append(body, tlvs...)
+		hdr = binary.BigEndian.AppendUint16(hdr, uint16(len(body)))
+		return append(hdr, body...)
+	}
+	// An ALPN TLV, then PP2_TYPE_SSL with PP2_CLIENT_SSL and a version sub-TLV.
+	ssl := []byte{0x01, 0x00, 0x04, 's', 'm', 't', 'p', 0x20, 0x00, 0x0c, 0x01, 0, 0, 0, 0, 0x21, 0x00, 0x04, 'T', 'L', 'S', '1'}
+	c, err := pipeConn(t, build(ssl), Required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.TLS() || !TLSOf(c) || readData(t, c) != "DATA" {
+		t.Fatal("SSL TLV not seen")
+	}
+	for name, tlvs := range map[string][]byte{"none": nil, "not ssl": {0x20, 0x00, 0x05, 0x00, 0, 0, 0, 0}, "truncated": {0x20, 0x00, 0x09, 0x01}} {
+		c, err := pipeConn(t, build(tlvs), Required)
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		if c.TLS() {
+			t.Fatalf("%s: TLS reported", name)
+		}
+	}
+	if TLSOf(&net.TCPConn{}) {
+		t.Fatal("plain conn reported TLS")
+	}
+}

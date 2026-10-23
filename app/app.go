@@ -282,7 +282,8 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 	sv.Submit = submit.New(submit.Config{
 		RelayHost: cfg.SMTP.RelayHost, Username: cfg.SMTP.Username, Password: smtpPass,
 		TLS: cfg.SMTP.TLS, TLSServerName: cfg.SMTP.TLSServerName, TLSInsecureSkipVerify: cfg.SMTP.TLSInsecureSkipVerify,
-		Hostname: hostname(), MaxMessageSize: cfg.Mail.MaxMessageSize,
+		XClient:  cfg.SMTP.XClient,
+		Hostname: hostname(), MaxMessageSize: cfg.Mail.MaxMessageSize, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
 	}, st.Identity, st.Index, sv.Delivery, aud, nil, log)
 	sv.Export = export.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Audit, sv.Delivery, aud, log)
 	a.Stores, a.Services = st, sv

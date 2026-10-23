@@ -6,7 +6,7 @@ Guidance for coding agents (Claude Code, Codex and others) working in this repos
 
 `README.md` is the authoritative design document, agreed with the owner; read it before
 designing anything. See its "Status" section for what is implemented (nearly everything in
-the mail design: LMTP, JMAP incl. submission, IMAP, POP3, REST/admin, sessions/TOTP, workers,
+the mail design: LMTP, JMAP incl. submission, SMTP submission, IMAP, POP3, REST/admin, sessions/TOTP, workers,
 legal hold, Maildir export/import) and what is not (CONDSTORE, WebSocket, search backend,
 reconciliation worker, DAV, Ceph integration tests).
 
@@ -67,7 +67,7 @@ auth/         crypto primitives: password schemes, TOTP, Ed25519 JWT, refresh to
 store/        identity, index, message, attach, audit, session, queue (object layouts live here)
 service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, admin, export
               (business logic + authorisation + audit; protocol adapters call ONLY these)
-proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3
+proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3, submission
 app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
 cmd/kittiwake  serve | check-config | admin (bootstrap, token only) | version
 cmd/kittiwake-admin  operator CLI over client/admin (typed Go client for the admin API)
@@ -106,7 +106,7 @@ These are settled. Do not design around them.
   carries actor, client IP and protocol. Each layer is tested against the mock of the layer
   below. The service interfaces are the project's public Go API.
 
-- **One Go binary (`kittiwake`), multiple modes:** `lmtp`, `imap`, `pop3`, `jmap` (JMAP +
+- **One Go binary (`kittiwake`), multiple modes:** `lmtp`, `imap`, `pop3`, `submission` (SMTP, RFC 6409), `jmap` (JMAP +
   OAuth + /v1/me), `admin` (/v1/admin only, own listener), `socketmap`, `worker` (+ `dav` later), plus an
   `admin` subcommand that talks to the metadata database directly (bootstrap, export/import). Modes combine in one process or split across many.
 - **Mail data in Ceph RADOS, metadata in MariaDB, no Redis.** Stateless daemons via librados
@@ -203,7 +203,11 @@ These are settled. Do not design around them.
   services they may use (`imap`, `pop3`, `jmap`); the check happens at login per protocol.
   IMAP/POP3 also accept OAUTHBEARER/XOAUTH2 with a session access token.
 - **Sending:** `From` must be one of the account's identities (own address + aliases to its
-  mailbox). Sent copy goes to Sent. Relay failure = API error, nothing stored.
+  mailbox). Sent copy goes to Sent (JMAP; submission only with `save_to_sent`). Relay failure
+  = API error, nothing stored. JMAP and SMTP submission share `submit.Send`; the `send` role
+  permits both (no service switch). Submission is implicit TLS at HAProxy (465) only, no
+  STARTTLS, no null sender. Rate limiting is the relay's: every message carries
+  `X-Kittiwake-Account: <uuid>` and `smtp.xclient` passes LOGIN=<uuid>/ADDR via XCLIENT.
 - **Domains, aliases, catch-all** are first-class. LMTP resolution: exact address → alias
   (bounded depth, may fan out) → catch-all → reject. Same answer served to Postfix.
 - **Lifecycle:** accounts belong to a domain and point at a mailbox; deleting an account

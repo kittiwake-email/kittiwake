@@ -657,7 +657,68 @@ func (s *Rados) CreateAlias(ctx context.Context, al Alias) (Alias, error) {
 	if err := s.setMailboxAliasListings(ctx, address, nil, al.Destinations); err != nil {
 		return Alias{}, err
 	}
+	if err := s.setAddressAliasListings(ctx, address, nil, al.Destinations); err != nil {
+		return Alias{}, err
+	}
 	return al, nil
+}
+
+// aliasToKey is the reverse listing of an address destination, kept on the
+// destination's domain object: `aliasto/<destination>/<alias>`. A domain
+// never contains "/", so the destination prefix is unambiguous.
+func aliasToKey(dest, alias string) string { return "aliasto/" + dest + "/" + alias }
+
+// setAddressAliasListings maintains `aliasto/` on the domain objects of the
+// alias's address destinations. Destinations outside a hosted domain have
+// no domain object and are not listed.
+func (s *Rados) setAddressAliasListings(ctx context.Context, address string, old, cur []Destination) error {
+	addrs := func(ds []Destination) map[string]string {
+		out := map[string]string{}
+		for _, d := range ds {
+			if d.Address == "" {
+				continue
+			}
+			if na, dom, err := NormalizeAddress(d.Address); err == nil {
+				out[na] = dom
+			}
+		}
+		return out
+	}
+	was, now := addrs(old), addrs(cur)
+	for dest, dom := range now {
+		if _, err := s.domains.Write(ctx, dom, rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{aliasToKey(dest, address): nil})); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return mapErr(err)
+		}
+	}
+	for dest, dom := range was {
+		if _, ok := now[dest]; ok {
+			continue
+		}
+		if _, err := s.domains.Write(ctx, dom, rados.NewWriteTx().OmapRemove(aliasToKey(dest, address))); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return mapErr(err)
+		}
+	}
+	return nil
+}
+
+// ListAliasesTo lists the aliases with address as a destination address.
+func (s *Rados) ListAliasesTo(ctx context.Context, address string) ([]string, error) {
+	na, dom, err := NormalizeAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	kv, _, err := listOmap(ctx, s.domains, dom, aliasToKey(na, ""), "", 0)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(kv))
+	for _, e := range kv {
+		out = append(out, e.Key)
+	}
+	return out, nil
 }
 
 // setMailboxAliasListings maintains the reverse listing `alias/<address>` on
@@ -754,6 +815,9 @@ func (s *Rados) UpdateAlias(ctx context.Context, address string, fn func(*Alias)
 		if err := s.setMailboxAliasListings(ctx, address, cur.Value.Destinations, al.Destinations); err != nil {
 			return Alias{}, err
 		}
+		if err := s.setAddressAliasListings(ctx, address, cur.Value.Destinations, al.Destinations); err != nil {
+			return Alias{}, err
+		}
 		return al, nil
 	}
 	return Alias{}, ErrConflict
@@ -773,6 +837,9 @@ func (s *Rados) DeleteAlias(ctx context.Context, address string) error {
 		return mapErr(err)
 	}
 	if err := s.setMailboxAliasListings(ctx, address, cur.Value.Destinations, nil); err != nil {
+		return err
+	}
+	if err := s.setAddressAliasListings(ctx, address, cur.Value.Destinations, nil); err != nil {
 		return err
 	}
 	return mapErr(s.aliases.Delete(ctx, address))

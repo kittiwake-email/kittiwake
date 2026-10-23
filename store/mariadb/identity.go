@@ -696,6 +696,29 @@ func (d *DB) ListMailboxAliases(ctx context.Context, id uuid.UUID) ([]string, er
 	return out, rows.Err()
 }
 
+// ListAliasesTo lists the aliases with address as a destination address
+// (index ix_alias_destinations_address).
+func (d *DB) ListAliasesTo(ctx context.Context, address string) ([]string, error) {
+	na, _, err := identity.NormalizeAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := d.r().QueryContext(ctx, "SELECT DISTINCT a.address FROM aliases a JOIN alias_destinations ad ON ad.alias_id = a.id WHERE ad.address = ? ORDER BY a.address", na)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) GetAlias(ctx context.Context, address string) (identity.Versioned[identity.Alias], error) {
 	address, _, err := identity.NormalizeAliasAddress(address)
 	if err != nil {
