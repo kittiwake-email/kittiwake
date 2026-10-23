@@ -314,7 +314,9 @@ func (s *Service) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 			return s.fail(ctx, id, "mailbox-delete", id.String(), err)
 		}
 	}
-	s.ok(ctx, id, "mailbox-delete", id.String(), "data removal scheduled")
+	// Platform-level: the mailbox's own audit objects are about to go, and
+	// a buffered write to them would recreate one after the removal.
+	s.ok(ctx, uuid.Nil, "mailbox-delete", id.String(), "data removal scheduled")
 	return nil
 }
 
