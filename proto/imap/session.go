@@ -454,6 +454,9 @@ func (s *session) Unselect() error {
 }
 
 func (s *session) selectedView() (*selected, error) {
+	if err := s.srv.mb.CheckAccess(s.ctx, s.mb); err != nil {
+		return nil, s.srv.mapErr(err, "access")
+	}
 	if s.sel == nil {
 		return nil, badErr("No mailbox selected")
 	}

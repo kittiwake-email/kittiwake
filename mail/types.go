@@ -51,6 +51,8 @@ type Part struct {
 
 // Document is the parsed JSON representation of a message.
 type Document struct {
+	Wire           *WirePart `json:"wire,omitempty"`
+	RawStored      *bool     `json:"raw_stored,omitempty"`
 	Version        int       `json:"version"`
 	Size           int64     `json:"size"`          // size of the rendered message (served by IMAP/JMAP)
 	OriginalSize   int64     `json:"original_size"` // size of the bytes received

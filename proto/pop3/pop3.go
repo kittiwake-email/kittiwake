@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -466,7 +467,7 @@ func (ss *session) load(ctx context.Context, mb uuid.UUID) error {
 	ss.msgs = nil
 	var after uint32
 	for {
-		recs, more, err := ss.srv.mb.List(ctx, mb, inbox.ID, after, 1000)
+		recs, more, err := ss.srv.mb.ListDesc(ctx, mb, inbox.ID, after, 1000)
 		if err != nil {
 			return err
 		}
@@ -478,6 +479,7 @@ func (ss *session) load(ctx context.Context, mb uuid.UUID) error {
 			break
 		}
 	}
+	sort.Slice(ss.msgs, func(i, j int) bool { return ss.msgs[i].rec.UID < ss.msgs[j].rec.UID })
 	return nil
 }
 

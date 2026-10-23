@@ -93,7 +93,7 @@ func (c *credCache) get(key string, now time.Time, ttl time.Duration) (actor.Act
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
-	if !ok || now.Sub(e.at) >= ttl {
+	if !ok || now.Sub(e.at) >= ttl || (!e.actor.ExpiresAt.IsZero() && !now.Before(e.actor.ExpiresAt)) {
 		return actor.Actor{}, false
 	}
 	a := e.actor
@@ -332,12 +332,16 @@ func (s *Service) checkTOTP(ctx context.Context, acct *identity.Account, code st
 		return nil
 	}
 	// Recovery code?
-	if i := cryptoauth.VerifyRecoveryCode(acct.TOTP.Recovery, code); i >= 0 {
+	if cryptoauth.VerifyRecoveryCode(acct.TOTP.Recovery, code) >= 0 {
 		_, err := s.ids.UpdateAccount(ctx, acct.ID, func(a *identity.Account) error {
-			if a.TOTP == nil || i >= len(a.TOTP.Recovery) {
-				return nil
+			if a.TOTP == nil {
+				return ErrTOTPInvalid
 			}
-			a.TOTP.Recovery = append(a.TOTP.Recovery[:i], a.TOTP.Recovery[i+1:]...)
+			i := cryptoauth.VerifyRecoveryCode(a.TOTP.Recovery, code)
+			if i < 0 {
+				return ErrTOTPInvalid
+			}
+			a.TOTP.Recovery = append(a.TOTP.Recovery[:i:i], a.TOTP.Recovery[i+1:]...)
 			return nil
 		})
 		return err
@@ -577,7 +581,7 @@ func (s *Service) VerifyAccessToken(ctx context.Context, token string) (actor.Ac
 	}
 	return actor.Actor{
 		AccountID: c.AccountID, Username: c.Username, MailboxID: c.MailboxID, Roles: c.Roles,
-		Credential: "session", SessionID: c.SessionID,
+		Credential: "session", SessionID: c.SessionID, ExpiresAt: c.ExpiresAt,
 	}, nil
 }
 
@@ -612,7 +616,7 @@ func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor
 		}
 		return actor.Actor{
 			Username: "admin:" + t.Comment, Roles: append([]string(nil), t.Roles...),
-			Credential: "admin-token", TokenID: t.ID, TokenNote: t.Comment,
+			Credential: "admin-token", TokenID: t.ID, TokenNote: t.Comment, ExpiresAt: t.ExpiresAt,
 		}, nil
 	}
 	av, err := s.ids.GetAccount(ctx, t.AccountID)
@@ -638,6 +642,7 @@ func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor
 	}
 	a := s.actorFor(&acct, roles, "token", t.ID, "", "", "")
 	a.TokenNote = t.Comment
+	a.ExpiresAt = t.ExpiresAt
 	return a, nil
 }
 
@@ -655,7 +660,7 @@ func (s *Service) VerifyBearer(ctx context.Context, token string) (actor.Actor, 
 // TOTP-enabled account is refused with ErrTOTPRequired; application
 // passwords always work.
 func (s *Service) VerifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error) {
-	key := passwordKey(strings.ToLower(strings.TrimSpace(username)), password)
+	key := identity.ServiceFor(proto) + ":" + passwordKey(strings.ToLower(strings.TrimSpace(username)), password)
 	if a, ok := s.cache.get(key, s.Now(), s.cfg.CacheTTL); ok {
 		a.Protocol, a.ClientIP = proto, clientIP
 		return a, nil
@@ -700,6 +705,9 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 		cred = "app-password"
 	}
 	a := s.actorFor(&acct, acct.Roles, cred, "", "", proto, clientIP)
+	if pw.ExpiresAt != nil {
+		a.ExpiresAt = *pw.ExpiresAt
+	}
 	metrics.Auth.WithLabelValues(proto, "ok").Inc()
 	s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: acct.MailboxID, Action: "login"})
 	if cryptoauth.NeedsRehash(pw.Hash) {
@@ -722,10 +730,21 @@ func (s *Service) VerifyOAuthBearer(ctx context.Context, username, token, proto,
 		s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: a.MailboxID, Action: "login-failed", Detail: "bearer username mismatch", Result: audit.ResultDenied})
 		return actor.Actor{}, ErrInvalidCredentials
 	}
-	if acct, err := s.ids.GetAccountByUsernameCached(ctx, a.Username); err == nil && !serviceAllowed(&acct, proto) {
-		s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: a.MailboxID, Action: "login-failed", Detail: "service " + identity.ServiceFor(proto) + " not enabled", Result: audit.ResultDenied})
+	acct, err := s.ids.GetAccountByUsernameCached(ctx, a.Username)
+	if err != nil || acct.ID != a.AccountID {
+		return actor.Actor{}, ErrInvalidCredentials
+	}
+	if !acct.Enabled {
+		return actor.Actor{}, ErrAccountDisabled
+	}
+	if !serviceAllowed(&acct, proto) {
 		return actor.Actor{}, ErrServiceDisabled
 	}
+	a.Protocol = proto
+	if err := actor.CheckAccount(ctx, s.ids, a, "", s.Now()); err != nil {
+		return actor.Actor{}, ErrInvalidCredentials
+	}
+
 	a.Protocol, a.ClientIP = proto, clientIP
 	s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: a.MailboxID, Action: "login"})
 	return a, nil
@@ -992,4 +1011,10 @@ func (s *Service) RemovePassword(ctx context.Context, acctID uuid.UUID, pwID str
 	s.cache.invalidateAccount(acctID)
 	s.audit.Log(ctx, auditor.Event{Mailbox: a.MailboxID, Action: "password-remove", Target: pwID, Subject: subjectIfOther(ctx, a.Username)})
 	return nil
+}
+
+// ValidateActor applies current account policy after the HTTP listener has set
+// the protocol, using the identity cache shared with mailbox authorization.
+func (s *Service) ValidateActor(ctx context.Context, a actor.Actor) error {
+	return actor.CheckAccount(ctx, s.ids, a, "", s.Now())
 }

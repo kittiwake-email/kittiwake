@@ -1,5 +1,7 @@
 package rados
 
+import "encoding/json"
+
 // WriteTx is an atomic write transaction on a single object. Steps are
 // applied in order; if any assertion fails, nothing is applied.
 //
@@ -99,3 +101,38 @@ func (t *WriteTx) Remove() *WriteTx {
 
 // Len returns the number of steps.
 func (t *WriteTx) Len() int { return len(t.steps) }
+
+// Append appends another transaction's steps without modifying it.
+func (t *WriteTx) Append(other *WriteTx) *WriteTx {
+	t.steps = append(t.steps, other.steps...)
+	return t
+}
+
+// JournalStep is the durable representation of a write transaction step.
+type JournalStep struct {
+	Kind    int               `json:"kind"`
+	Data    []byte            `json:"data,omitempty"`
+	Name    string            `json:"name,omitempty"`
+	Version uint64            `json:"version,omitempty"`
+	KV      map[string][]byte `json:"kv,omitempty"`
+	Keys    []string          `json:"keys,omitempty"`
+}
+
+func (t *WriteTx) MarshalJSON() ([]byte, error) {
+	out := make([]JournalStep, len(t.steps))
+	for i, s := range t.steps {
+		out[i] = JournalStep{int(s.kind), s.data, s.name, s.version, s.kv, s.keys}
+	}
+	return json.Marshal(out)
+}
+func (t *WriteTx) UnmarshalJSON(b []byte) error {
+	var in []JournalStep
+	if err := json.Unmarshal(b, &in); err != nil {
+		return err
+	}
+	t.steps = nil
+	for _, s := range in {
+		t.steps = append(t.steps, txStep{kind: txKind(s.Kind), data: s.Data, name: s.Name, version: s.Version, kv: s.KV, keys: s.Keys})
+	}
+	return nil
+}

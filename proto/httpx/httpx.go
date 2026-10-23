@@ -165,6 +165,14 @@ func Auth(a Authenticator, protocol string, trusted []net.IPNet, realm string) f
 				return
 			}
 			act.Protocol, act.ClientIP = protocol, ip
+			if validator, ok := a.(interface {
+				ValidateActor(context.Context, actor.Actor) error
+			}); ok {
+				if err := validator.ValidateActor(r.Context(), act); err != nil {
+					WriteProblem(w, http.StatusForbidden, "about:blank", "account access revoked")
+					return
+				}
+			}
 			next.ServeHTTP(w, r.WithContext(actor.With(r.Context(), act)))
 		})
 	}

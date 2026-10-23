@@ -428,6 +428,13 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 			break
 		}
 		for i, e := range entries {
+			live, err := w.idx.IsLive(ctx, mb, e.MessageID, index.Location{FolderID: e.FolderID, UID: e.UID}.String())
+			if err != nil {
+				return err
+			}
+			if live {
+				return fmt.Errorf("retention entry still indexed: %s", e.MessageID)
+			}
 			if _, err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
 				return err
 			}
@@ -499,7 +506,7 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 	if err == nil {
 		for _, f := range root.Folders {
 			for {
-				recs, _, err := w.idx.ListFolder(ctx, mb, f.ID, 0, w.cfg.ScanBatch)
+				recs, _, err := w.idx.ListFolderDesc(ctx, mb, f.ID, 0, w.cfg.ScanBatch)
 				if err != nil || len(recs) == 0 {
 					break
 				}
@@ -581,55 +588,32 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 // attachmentGC deletes attachment objects nobody references any more, on
 // every connected storage.
 func (w *Worker) attachmentGC(ctx context.Context) error {
-	type ref struct {
-		storage int64
-		hash    string
+	return w.atts.Candidates(ctx, func(cid int64, hash string) (bool, error) { return w.collectAttachment(ctx, cid, hash, false) })
+}
+
+func (w *Worker) collectAttachment(ctx context.Context, cid int64, hash string, reconcile bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	var hashes []ref
-	if err := w.atts.List(ctx, func(cid int64, h string) error { hashes = append(hashes, ref{cid, h}); return nil }); err != nil {
-		return err
+	info, err := w.atts.GCInfo(ctx, cid, hash)
+	if errors.Is(err, attach.ErrNotFound) {
+		return true, nil
 	}
-	deleted, dangling := 0, 0
-	for _, h := range hashes {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		info, err := w.atts.StatOn(ctx, h.storage, h.hash)
+	if err != nil {
+		return false, err
+	}
+	if w.Now().Sub(info.Touched) < w.cfg.AttachmentGCGrace {
+		return false, nil
+	}
+	if reconcile && info.Refs > 0 {
+		sctx := storage.WithID(ctx, cid)
+		_, err := w.atts.DropDanglingRefs(ctx, cid, hash, func(_ context.Context, mb, msg uuid.UUID) (bool, error) { return w.msgs.Exists(sctx, mb, msg) }, info.Version)
 		if err != nil {
-			if errors.Is(err, attach.ErrNotFound) {
-				continue
-			}
-			return err
-		}
-		if w.Now().Sub(info.Touched) < w.cfg.AttachmentGCGrace {
-			continue // still being written to or just changed: next time
-		}
-		if info.Refs > 0 {
-			// References from messages that never committed (a delivery
-			// that died after the attachment write) would pin the object
-			// forever: check that every referencing message exists.
-			sctx := storage.WithID(ctx, h.storage)
-			n, err := w.atts.DropDanglingRefs(ctx, h.storage, h.hash, func(_ context.Context, mb, msg uuid.UUID) (bool, error) {
-				return w.msgs.Exists(sctx, mb, msg)
-			})
-			if err != nil {
-				return err
-			}
-			dangling += n
-			if n < info.Refs {
-				continue // still referenced
-			}
-		}
-		ok, err := w.atts.DeleteIfUnreferenced(ctx, h.storage, h.hash, w.cfg.AttachmentGCGrace)
-		if err != nil {
-			return err
-		}
-		if ok {
-			deleted++
+			return false, err
 		}
 	}
-	w.log.Info("attachment gc", slog.Int("scanned", len(hashes)), slog.Int("deleted", deleted), slog.Int("dangling_refs", dangling))
-	return nil
+	_, err = w.atts.DeleteIfUnreferenced(ctx, cid, hash, w.cfg.AttachmentGCGrace)
+	return err == nil, err
 }
 
 // orphanSweep removes message objects that no index entry and no retention
@@ -638,20 +622,32 @@ func (w *Worker) attachmentGC(ctx context.Context) error {
 // orphan is the trace of a torn write that may have left the counters off.
 func (w *Worker) orphanSweep(ctx context.Context) error {
 	cutoff := w.Now().Add(-w.cfg.OrphanAge)
-	retention := map[uuid.UUID]map[uuid.UUID]bool{}
-	inRetention := func(cid int64, mb, msg uuid.UUID) bool {
-		set, ok := retention[mb]
-		if !ok {
-			set = map[uuid.UUID]bool{}
-			entries, _, _, err := w.idx.ListRetention(storage.WithID(ctx, cid), mb, time.Time{}, 0)
-			if err == nil {
-				for _, e := range entries {
-					set[e.MessageID] = true
-				}
-			}
-			retention[mb] = set
+	inRetention := func(cid int64, mb, msg uuid.UUID) (bool, error) {
+		entries, _, _, err := w.idx.ListRetention(storage.WithID(ctx, cid), mb, time.Time{}, 0)
+		if err != nil {
+			return false, err
 		}
-		return set[msg]
+		for _, e := range entries {
+			if e.MessageID == msg {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	protected := func(i message.Info) (bool, error) {
+		cctx := storage.WithID(ctx, i.StorageID)
+		m, err := w.ids.GetMailbox(ctx, i.Mailbox)
+		if err == nil && m.Value.Hold != nil {
+			return true, nil
+		}
+		if err != nil && !errors.Is(err, identity.ErrNotFound) {
+			return false, err
+		}
+		live, err := w.idx.IsLive(cctx, i.Mailbox, i.Message, i.Location)
+		if err != nil || live {
+			return live, err
+		}
+		return inRetention(i.StorageID, i.Mailbox, i.Message)
 	}
 	var orphans []message.Info
 	err := w.msgs.List(ctx, func(i message.Info) error {
@@ -662,16 +658,11 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 			orphans = append(orphans, i)
 			return nil
 		}
-		// The object's own storage answers; the mailbox record may be gone.
-		cctx := storage.WithID(ctx, i.StorageID)
-		if loc, err := index.ParseLocation(i.Location); err == nil {
-			if rec, err := w.idx.GetRecord(cctx, i.Mailbox, loc.FolderID, loc.UID); err == nil && rec.MessageID == i.Message {
-				return nil
-			} else if err != nil && !errors.Is(err, index.ErrNotFound) {
-				return err
-			}
+		keep, err := protected(i)
+		if err != nil {
+			return err
 		}
-		if inRetention(i.StorageID, i.Mailbox, i.Message) {
+		if keep {
 			return nil
 		}
 		orphans = append(orphans, i)
@@ -682,6 +673,13 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 	}
 	touched := map[uuid.UUID]bool{}
 	for _, o := range orphans {
+		keep, err := protected(o)
+		if err != nil {
+			return err
+		}
+		if keep {
+			continue
+		}
 		if _, err := w.deleteMessage(storage.WithID(ctx, o.StorageID), o.Mailbox, o.Message); err != nil {
 			return err
 		}
@@ -693,7 +691,8 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		}
 	}
 	w.log.Info("orphan sweep", slog.Int("removed", len(orphans)), slog.Int("mailboxes_recalculated", len(touched)))
-	return nil
+	// Full dangling-reference reconciliation runs only with the infrequent sweep.
+	return w.atts.List(ctx, func(cid int64, hash string) error { _, err := w.collectAttachment(ctx, cid, hash, true); return err })
 }
 
 // purgeAudit drops audit objects older than the retention: the admin log

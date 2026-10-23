@@ -85,9 +85,9 @@ func TestFailedDeliveryLeavesNothing(t *testing.T) {
 	if err != nil || info.Refs != 1 {
 		t.Fatalf("attachment refs after the failed delivery: %+v %v, want 1", info, err)
 	}
-	// The log shows a create and a destroy for the failed message, nothing else.
+	// A failed preparation never becomes visible in the change log.
 	changes, _, _, _ := idx.Changes(ctx, mb.ID, before.ModSeq, 10)
-	if len(changes) != 2 || changes[0].Op != index.OpCreated || changes[1].Op != index.OpDestroyed || changes[0].ID != changes[1].ID {
+	if len(changes) != 0 {
 		t.Fatalf("change log after the failed delivery: %+v", changes)
 	}
 }

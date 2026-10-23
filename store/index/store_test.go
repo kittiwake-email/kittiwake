@@ -274,7 +274,7 @@ func TestShardsAndAppendHook(t *testing.T) {
 	if err != nil || gotUID != rr.UID || gotMod != rr.ModSeq {
 		t.Fatalf("hook: %d/%d vs %d/%d %v", gotUID, gotMod, rr.UID, rr.ModSeq, err)
 	}
-	// A failing hook indexes nothing but consumes the UID.
+	// A failing preparation publishes neither the record nor its UID.
 	_, err = s.Append(ctx, mb, inbox, rec(1, ""), func(uint32, uint64) error { return errors.New("disk on fire") })
 	if err == nil {
 		t.Fatal("hook error not propagated")
@@ -283,8 +283,8 @@ func TestShardsAndAppendHook(t *testing.T) {
 		t.Fatalf("record indexed despite hook failure: %d", len(recs))
 	}
 	r, _ = s.GetRoot(ctx, mb)
-	if r.FolderByID(inbox).UIDNext != 3 {
-		t.Fatalf("uid not consumed: %d", r.FolderByID(inbox).UIDNext)
+	if r.FolderByID(inbox).UIDNext != 2 {
+		t.Fatalf("uid consumed before preparation: %d", r.FolderByID(inbox).UIDNext)
 	}
 	// Records straddling a shard boundary: fake UIDNext to 65535 and append 3.
 	_, _ = s.updateRoot(ctx, mb, func(r *Root) error { r.FolderByID(inbox).UIDNext = 65535; return nil })

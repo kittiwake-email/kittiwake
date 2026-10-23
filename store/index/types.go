@@ -17,6 +17,8 @@ import (
 var (
 	ErrNotFound  = errors.New("index: not found")
 	ErrExists    = errors.New("index: already exists")
+	ErrOverQuota = errors.New("index: hard quota exceeded")
+	ErrPending   = errors.New("index: mutation pending recovery")
 	ErrConflict  = errors.New("index: concurrent modification")
 	ErrInvalid   = errors.New("index: invalid")
 	ErrNotEmpty  = errors.New("index: folder not empty")
@@ -120,6 +122,7 @@ type Usage struct {
 
 // Root is the mailbox root object's data.
 type Root struct {
+	Mutation     *mutation `json:"mutation,omitempty"`
 	Version      int       `json:"version"`
 	MailboxID    uuid.UUID `json:"mailbox_id"`
 	Folders      []*Folder `json:"folders"`

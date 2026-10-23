@@ -29,7 +29,7 @@ import (
 
 // Errors.
 var (
-	ErrForbidden = errors.New("mailbox: forbidden")
+	ErrForbidden = actor.ErrForbidden
 	ErrHold      = errors.New("mailbox: on legal hold, read-only")
 	ErrSealed    = errors.New("mailbox: sealed")
 	ErrNotFound  = errors.New("mailbox: not found")
@@ -76,6 +76,9 @@ func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attac
 // the mailbox state allows it. write=true also enforces legal hold.
 func (s *Service) authorize(ctx context.Context, mb uuid.UUID, role string, write bool) (identity.Mailbox, error) {
 	a := actor.From(ctx)
+	if err := actor.CheckAccount(ctx, s.ids, a, role, s.Now()); err != nil {
+		return identity.Mailbox{}, ErrForbidden
+	}
 	// Cached: one client's command stream re-reads the same mailbox for
 	// every command; a suspend or hold applies within the identity cache TTL.
 	m, err := s.ids.GetMailboxCached(ctx, mb)
@@ -116,6 +119,12 @@ func (s *Service) deny(ctx context.Context, mb uuid.UUID, action, target string,
 }
 
 // ---- folders ----
+
+// CheckAccess validates an existing connection without reading message data.
+func (s *Service) CheckAccess(ctx context.Context, mb uuid.UUID) error {
+	_, err := s.authorize(ctx, mb, identity.RoleRead, false)
+	return err
+}
 
 // Root returns the mailbox root (folders, counters, modseq).
 func (s *Service) Root(ctx context.Context, mb uuid.UUID) (index.Root, error) {
@@ -187,7 +196,7 @@ func (s *Service) DeleteFolder(ctx context.Context, mb uuid.UUID, id string, rem
 	}
 	if removeMessages {
 		for {
-			recs, _, err := s.idx.ListFolder(ctx, mb, id, 0, 500)
+			recs, _, err := s.idx.ListFolderDesc(ctx, mb, id, 0, 500)
 			if err != nil {
 				return s.deny(ctx, mb, "folder-delete", id, mapIndexErr(err))
 			}
@@ -240,6 +249,16 @@ func (s *Service) List(ctx context.Context, mb uuid.UUID, folderID string, after
 // locate resolves a message uuid to its index location via the message
 // object's xattr (no per-message omap entry needed).
 func (s *Service) locate(ctx context.Context, mb uuid.UUID, msg uuid.UUID) (index.Location, error) {
+	l, known, err := s.idx.Location(ctx, mb, msg)
+	if err != nil {
+		return index.Location{}, mapIndexErr(err)
+	}
+	if known {
+		if l.FolderID == "" {
+			return l, ErrNotFound
+		}
+		return l, nil
+	}
 	loc, err := s.msgs.Location(ctx, mb, msg)
 	if err != nil {
 		if errors.Is(err, message.ErrNotFound) {
@@ -247,7 +266,7 @@ func (s *Service) locate(ctx context.Context, mb uuid.UUID, msg uuid.UUID) (inde
 		}
 		return index.Location{}, err
 	}
-	l, err := index.ParseLocation(loc)
+	l, err = index.ParseLocation(loc)
 	if err != nil {
 		return index.Location{}, ErrNotFound
 	}
@@ -310,12 +329,7 @@ func (s *Service) Raw(ctx context.Context, mb uuid.UUID, msg uuid.UUID) ([]byte,
 // raw returns the kept original bytes when present, else renders the
 // message from its document (deterministic; Document.Size is its length).
 func (s *Service) raw(ctx context.Context, mb uuid.UUID, msg uuid.UUID) ([]byte, error) {
-	if kept, err := s.msgs.GetRaw(ctx, mb, msg); err == nil {
-		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-raw", Target: msg.String()})
-		return kept, nil
-	} else if !errors.Is(err, message.ErrNotFound) {
-		return nil, err
-	}
+
 	data, err := s.msgs.GetDoc(ctx, mb, msg)
 	if err != nil {
 		if errors.Is(err, message.ErrNotFound) {
@@ -326,6 +340,14 @@ func (s *Service) raw(ctx context.Context, mb uuid.UUID, msg uuid.UUID) ([]byte,
 	var doc mail.Document
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("mailbox: decode document %s: %w", msg, err)
+	}
+	if doc.RawStored == nil || *doc.RawStored {
+		if kept, err := s.msgs.GetRaw(ctx, mb, msg); err == nil {
+			s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-raw", Target: msg.String()})
+			return kept, nil
+		} else if !errors.Is(err, message.ErrNotFound) || (doc.RawStored != nil && *doc.RawStored) {
+			return nil, err
+		}
 	}
 	out, err := mail.Render(&doc, func(h string) ([]byte, error) { return s.atts.Get(ctx, mb, h) })
 	if err != nil {
@@ -343,6 +365,13 @@ func (s *Service) Attachment(ctx context.Context, mb uuid.UUID, hash string) ([]
 	if len(hash) != 64 {
 		return nil, "", ErrNotFound
 	}
+	ok, err := s.atts.HasMailboxRef(ctx, hash, mb)
+	if err != nil {
+		return nil, "", err
+	}
+	if !ok {
+		return nil, "", ErrNotFound
+	}
 	data, err := s.atts.Get(ctx, mb, hash)
 	if err != nil {
 		if errors.Is(err, attach.ErrNotFound) {
@@ -351,7 +380,7 @@ func (s *Service) Attachment(ctx context.Context, mb uuid.UUID, hash string) ([]
 		return nil, "", err
 	}
 	ct := "application/octet-stream"
-	if info, err := s.atts.Stat(ctx, mb, hash); err == nil && info.ContentType != "" {
+	if info, err := s.atts.Metadata(ctx, mb, hash); err == nil && info.ContentType != "" {
 		ct = info.ContentType
 	}
 	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "fetch-attachment", Target: hash})
@@ -481,12 +510,12 @@ func (s *Service) MoveByUID(ctx context.Context, mb uuid.UUID, folderID string, 
 }
 
 func (s *Service) moveAt(ctx context.Context, mb uuid.UUID, folderID string, uid uint32, toFolder string) (index.Record, error) {
+	old, err := s.idx.GetRecord(ctx, mb, folderID, uid)
+	if err != nil {
+		return index.Record{}, mapIndexErr(err)
+	}
 	rec, err := s.idx.Move(ctx, mb, folderID, uid, toFolder, func(loc index.Location) error {
-		cur, err := s.idx.GetRecord(ctx, mb, folderID, uid)
-		if err != nil {
-			return err
-		}
-		return s.msgs.SetLocation(ctx, mb, cur.MessageID, loc.String())
+		return s.msgs.SetLocation(ctx, mb, old.MessageID, loc.String())
 	})
 	if err != nil {
 		return index.Record{}, mapIndexErr(err)
@@ -518,7 +547,7 @@ func (s *Service) Expunge(ctx context.Context, mb uuid.UUID, folderID string, on
 	var out []uint32
 	var after uint32
 	for {
-		recs, more, err := s.idx.ListFolder(ctx, mb, folderID, after, 500)
+		recs, more, err := s.idx.ListFolderDesc(ctx, mb, folderID, after, 500)
 		if err != nil {
 			return out, mapIndexErr(err)
 		}
@@ -656,7 +685,7 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 	for _, f := range folders {
 		var after uint32
 		for {
-			recs, more, err := s.idx.ListFolder(ctx, mb, f.ID, after, 1000)
+			recs, more, err := s.idx.ListFolderDesc(ctx, mb, f.ID, after, 1000)
 			if err != nil {
 				return QueryResult{}, mapIndexErr(err)
 			}

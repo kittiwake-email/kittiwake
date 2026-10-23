@@ -40,9 +40,10 @@ var (
 	// process (LMTP defers, the MTA retries).
 	ErrUnavailable = errors.New("delivery: mailbox temporarily unavailable")
 	ErrHold        = errors.New("delivery: mailbox on hold, delivery suspended")
-	ErrOverQuota   = errors.New("delivery: mailbox over quota")
+	ErrOverQuota   = index.ErrOverQuota
 	ErrTooLarge    = errors.New("delivery: message too large")
 	ErrAliasLoop   = errors.New("delivery: alias loop or too deep")
+	ErrForbidden   = actor.ErrForbidden
 	ErrNoFolder    = errors.New("delivery: folder not found")
 )
 
@@ -436,6 +437,14 @@ func (s *Service) isSpam(doc *mail.Document) bool {
 // APPEND, drafts, Sent copies) into a folder with the given flags. The
 // actor in ctx is audited. Quota and hold are enforced.
 func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw []byte, flags []string, internalDate time.Time) (Delivered, error) {
+	a := actor.From(ctx)
+	if (!a.IsAdmin() && !a.IsSystem() && (a.MailboxID != mb || !a.HasRole(identity.RoleWrite))) || (a.IsAdminReader() && !a.IsAdmin()) {
+		return Delivered{}, ErrForbidden
+	}
+	if err := actor.CheckAccount(ctx, s.ids, a, identity.RoleWrite, s.Now()); err != nil {
+		return Delivered{}, ErrForbidden
+	}
+
 	if int64(len(raw)) > s.cfg.MaxMessageSize {
 		return Delivered{}, ErrTooLarge
 	}
@@ -471,12 +480,24 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 // the entry. A crash before the index write leaves an orphan object (swept
 // later) but never a dangling index entry.
 func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, parsed *mail.Parsed, raw []byte, flags []string, internalDate time.Time) (Delivered, error) {
+	m, err := s.getMailbox(ctx, mb)
+	if err != nil {
+		return Delivered{}, err
+	}
+	limits := s.effectiveQuota(m.Quota)
+	ctx = index.WithQuota(ctx, limits.HardBytes, limits.HardMessages)
+
 	msgID := uuid.New()
+	keepRaw := s.cfg.KeepRaw == "always" || (s.cfg.KeepRaw == "signed" && parsed.Signed)
+	parsed.Doc.RawStored = &keepRaw
+	if keepRaw {
+		parsed.Doc.Wire = mail.WireMetadata(raw)
+		parsed.Doc.Size = int64(len(raw))
+	}
 	docJSON, err := json.Marshal(parsed.Doc)
 	if err != nil {
 		return Delivered{}, err
 	}
-	keepRaw := s.cfg.KeepRaw == "always" || (s.cfg.KeepRaw == "signed" && parsed.Signed)
 
 	// Attachments (content + reference in one transaction each) are
 	// independent of the index: write them while the index allocates.
@@ -526,7 +547,9 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 		// delivery (quota, storage trouble) leaves no object behind. The
 		// index already undid its counters; the sweeps cover a crash here.
 		<-attDone
-		s.undoStore(ctx, mb, msgID, parsed)
+		if !errors.Is(err, index.ErrPending) {
+			s.undoStore(ctx, mb, msgID, parsed)
+		}
 		if errors.Is(err, index.ErrNotFound) {
 			err = ErrNoFolder
 		}

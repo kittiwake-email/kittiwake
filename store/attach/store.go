@@ -112,6 +112,14 @@ func (s *Store) AddRef(ctx context.Context, hash string, mb, msg uuid.UUID) erro
 
 // RemoveRef drops a message's reference. Missing object or key is not an error.
 func (s *Store) RemoveRef(ctx context.Context, hash string, mb, msg uuid.UUID) error {
+	if len(hash) != 64 {
+		return ErrHash
+	}
+	// Queue first: a crash may leave an extra candidate, never an untracked removal.
+	if _, err := s.pool(ctx, mb).Write(ctx, candidateOID(hash), rados.NewWriteTx().OmapSet(map[string][]byte{hash: nil})); err != nil {
+		return err
+	}
+
 	_, err := s.pool(ctx, mb).Write(ctx, hash, rados.NewWriteTx().AssertExists().OmapRemove(refKey(mb, msg)).SetXattr("touched", []byte(strconv.FormatInt(s.Now().UTC().Unix(), 10))))
 	if errors.Is(err, rados.ErrNotFound) {
 		return nil
@@ -149,6 +157,10 @@ func (s *Store) StatOn(ctx context.Context, storageID int64, hash string) (Info,
 }
 
 func (s *Store) stat(ctx context.Context, io rados.IOContext, hash string) (Info, error) {
+	return s.inspect(ctx, io, hash, 1<<20)
+}
+
+func (s *Store) inspect(ctx context.Context, io rados.IOContext, hash string, maxRefs int) (Info, error) {
 	st, err := io.Stat(ctx, hash)
 	if err != nil {
 		return Info{}, mapErr(err)
@@ -163,7 +175,7 @@ func (s *Store) stat(ctx context.Context, io rados.IOContext, hash string) (Info
 			info.Touched = time.Unix(c, 0).UTC()
 		}
 	}
-	kv, _, err := io.OmapList(ctx, hash, "ref/", "", 1<<20)
+	kv, _, err := io.OmapList(ctx, hash, "ref/", "", maxRefs)
 	if err != nil {
 		return Info{}, mapErr(err)
 	}
@@ -187,7 +199,7 @@ func (s *Store) Refs(ctx context.Context, storageID int64, hash string) ([]strin
 // DeleteIfUnreferenced removes the object when it has no references and was
 // not touched within grace. Returns true if deleted.
 func (s *Store) DeleteIfUnreferenced(ctx context.Context, storageID int64, hash string, grace time.Duration) (bool, error) {
-	info, err := s.StatOn(ctx, storageID, hash)
+	info, err := s.GCInfo(ctx, storageID, hash)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
@@ -215,7 +227,18 @@ func (s *Store) DeleteIfUnreferenced(ctx context.Context, storageID int64, hash 
 // committed). exists answers for a mailbox/message pair on this storage.
 // Returns how many references were dropped; the object itself is then an
 // ordinary unreferenced attachment for DeleteIfUnreferenced.
-func (s *Store) DropDanglingRefs(ctx context.Context, storageID int64, hash string, exists func(ctx context.Context, mb, msg uuid.UUID) (bool, error)) (int, error) {
+func (s *Store) DropDanglingRefs(ctx context.Context, storageID int64, hash string, exists func(ctx context.Context, mb, msg uuid.UUID) (bool, error), expectedVersion ...uint64) (int, error) {
+	st, err := s.poolOf(ctx, storageID).Stat(ctx, hash)
+	if errors.Is(err, rados.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	version := st.Version
+	if len(expectedVersion) > 0 && expectedVersion[0] != version {
+		return 0, nil
+	}
 	refs, err := s.Refs(ctx, storageID, hash)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -240,9 +263,14 @@ func (s *Store) DropDanglingRefs(ctx context.Context, storageID int64, hash stri
 		if ok {
 			continue
 		}
-		if _, err := s.poolOf(ctx, storageID).Write(ctx, hash, rados.NewWriteTx().AssertExists().OmapRemove(refKey(mb, msg))); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		ver, err := s.poolOf(ctx, storageID).Write(ctx, hash, rados.NewWriteTx().AssertVersion(version).OmapRemove(refKey(mb, msg)))
+		if errors.Is(err, rados.ErrVersionMismatch) || errors.Is(err, rados.ErrNotFound) {
+			return dropped, nil
+		}
+		if err != nil {
 			return dropped, mapErr(err)
 		}
+		version = ver
 		dropped++
 	}
 	return dropped, nil
@@ -258,4 +286,74 @@ func (s *Store) List(ctx context.Context, fn func(storageID int64, hash string) 
 			return fn(cid, oid)
 		})
 	})
+}
+
+// HasMailboxRef confines cluster-wide content hashes to an authorized mailbox.
+func (s *Store) HasMailboxRef(ctx context.Context, hash string, mb uuid.UUID) (bool, error) {
+	kv, _, err := s.pool(ctx, mb).OmapList(ctx, hash, "ref/"+mb.String()+"/", "", 1)
+	if errors.Is(err, rados.ErrNotFound) {
+		return false, nil
+	}
+	return len(kv) > 0, err
+}
+
+// Metadata does not enumerate references (which can number in the millions).
+func (s *Store) Metadata(ctx context.Context, mb uuid.UUID, hash string) (Info, error) {
+	x, err := s.pool(ctx, mb).GetXattrs(ctx, hash)
+	if err != nil {
+		return Info{}, mapErr(err)
+	}
+	return Info{Hash: hash, ContentType: string(x["content_type"])}, nil
+}
+
+func candidateOID(hash string) string { return "gc/" + hash[:2] }
+
+// Candidates visits only hashes affected by a reference removal. The shard
+// version prevents cleanup from losing a concurrently enqueued candidate.
+func (s *Store) Candidates(ctx context.Context, fn func(int64, string) (bool, error)) error {
+	return s.r.Each(ctx, storage.RoleAttachments, func(cid int64, io rados.IOContext) error {
+		for shard := 0; shard < 256; shard++ {
+			oid := fmt.Sprintf("gc/%02x", shard)
+			st, err := io.Stat(ctx, oid)
+			if errors.Is(err, rados.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			version := st.Version
+			after := ""
+			for {
+				kv, more, err := io.OmapList(ctx, oid, "", after, 512)
+				if err != nil {
+					return err
+				}
+				for _, entry := range kv {
+					done, err := fn(cid, entry.Key)
+					if err != nil {
+						return err
+					}
+					if done {
+						ver, err := io.Write(ctx, oid, rados.NewWriteTx().AssertVersion(version).OmapRemove(entry.Key))
+						if err == nil {
+							version = ver
+						} else if !errors.Is(err, rados.ErrVersionMismatch) {
+							return err
+						}
+						// On a version conflict leave candidates for the next pass.
+					}
+					after = entry.Key
+				}
+				if !more || len(kv) == 0 {
+					break
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// GCInfo only asks whether a reference exists, never counts a large omap.
+func (s *Store) GCInfo(ctx context.Context, cid int64, hash string) (Info, error) {
+	return s.inspect(ctx, s.poolOf(ctx, cid), hash, 1)
 }

@@ -201,6 +201,9 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 	if !(a.MailboxID == req.MailboxID && a.HasRole(identity.RoleSend)) {
 		return fail("role send required", ErrForbidden)
 	}
+	if err := actor.CheckAccount(ctx, s.ids, a, identity.RoleSend, s.Now()); err != nil {
+		return fail("account access revoked", ErrForbidden)
+	}
 	m, err := s.ids.GetMailboxCached(ctx, req.MailboxID)
 	if err != nil {
 		return Result{}, err

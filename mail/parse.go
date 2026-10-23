@@ -153,6 +153,7 @@ func Parse(raw []byte, opts Options) (*Parsed, error) {
 		return nil, err
 	}
 	doc.Size = int64(len(rendered))
+	doc.Wire = WireMetadata(rendered)
 	return res, nil
 }
 

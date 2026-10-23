@@ -20,7 +20,8 @@ Rolling releases `<yy>.<n>` (26.0, 26.1, …, first of 2027 is 27.1). `app/versi
 ## Commits
 
 Plain commit messages: subject line plus an explanatory body when useful. Never add
-`Claude-Session` or other session/attribution trailers.
+`Claude-Session` or other session/attribution trailers. Never mention the coding assistant,
+model, or agent in commit subjects, bodies, or co-author trailers.
 
 ## Commands
 

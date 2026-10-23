@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"kittiwake/mail"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,5 +312,61 @@ func TestWatch(t *testing.T) {
 	case <-ev:
 	case <-time.After(time.Second):
 		t.Fatal("no notification")
+	}
+}
+
+func TestAttachmentMembershipAndImportAuthorization(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	victim, err := f.ids.CreateMailbox(ctx, identity.Mailbox{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := f.idx.EnsureRoot(ctx, victim.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("From: a@example.org\r\nContent-Type: application/octet-stream\r\n\r\n" + strings.Repeat("private", 2000))
+	parsed, err := mail.Parse(raw, mail.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Attachments) != 1 {
+		t.Fatal("attachment fixture")
+	}
+	_, err = f.del.Import(f.adm, victim.ID, root.Folders[0].ID, raw, nil, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = f.svc.Attachment(f.user, f.mb.ID, parsed.Attachments[0].Hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-mailbox attachment: %v", err)
+	}
+	own, _ := f.idx.EnsureRoot(ctx, f.mb.ID)
+	if _, err = f.del.Import(f.ro, f.mb.ID, own.Folders[0].ID, raw, nil, time.Time{}); !errors.Is(err, delivery.ErrForbidden) {
+		t.Fatalf("read-only import: %v", err)
+	}
+	if _, err = f.del.Import(ctx, f.mb.ID, own.Folders[0].ID, raw, nil, time.Time{}); !errors.Is(err, delivery.ErrForbidden) {
+		t.Fatalf("anonymous import: %v", err)
+	}
+	if _, err = f.del.Import(f.user, f.mb.ID, own.Folders[0].ID, raw, nil, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if data, _, err := f.svc.Attachment(f.user, f.mb.ID, parsed.Attachments[0].Hash); err != nil || len(data) == 0 {
+		t.Fatalf("own attachment: %v", err)
+	}
+}
+func TestExistingActorLosesRevokedAccountAccess(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	a := actor.From(f.user)
+	if _, err := f.svc.Root(f.user, f.mb.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.ids.UpdateAccount(ctx, a.AccountID, func(a *identity.Account) error { a.Enabled = false; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.CheckAccess(f.user, f.mb.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("disabled account still authorized: %v", err)
 	}
 }

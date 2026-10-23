@@ -5,6 +5,7 @@ package actor
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -16,6 +17,7 @@ type Actor struct {
 	MailboxID uuid.UUID // zero for admin accounts and unauthenticated contexts
 	Roles     []string
 	// Credential used: "password", "app-password", "token", "session", "none".
+	ExpiresAt  time.Time // credential expiry; zero for non-expiring connection credentials
 	Credential string
 	TokenID    string
 	TokenNote  string

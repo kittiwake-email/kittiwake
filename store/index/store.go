@@ -23,7 +23,7 @@ import (
 
 const (
 	maxRootAttempts  = 64
-	rootVersion      = 1
+	rootVersion      = 2
 	changeLogKeep    = 10000 // entries kept per mailbox
 	changeTrimEvery  = 256   // trim when modseq crosses a multiple of this
 	maxFolderDepth   = 16
@@ -69,15 +69,39 @@ func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
 	if err != nil {
 		return rados.ErrorContext(err)
 	}
+	if st, ok := ctx.Value(stageKey{}).(*staged); ok {
+		return &stageIO{IOContext: io, stage: st}
+	}
 	return io
 }
 
 func (s *Store) cacheRoot(mb uuid.UUID, vr versionedRoot) {
-	if _, loaded := s.roots.Swap(mb, cachedRoot{vr: vr, at: s.Now()}); !loaded {
-		if s.nroot.Add(1) > maxCachedRoots {
-			// Bounded: drop an arbitrary entry.
-			s.roots.Range(func(k, _ any) bool { s.roots.Delete(k); s.nroot.Add(-1); return false })
+	next := &cachedRoot{vr: vr, at: s.Now()}
+	for {
+		old, ok := s.roots.Load(mb)
+		if ok {
+			if old.(*cachedRoot).vr.version > vr.version {
+				return
+			}
+			if s.roots.CompareAndSwap(mb, old, next) {
+				return
+			}
+		} else if _, loaded := s.roots.LoadOrStore(mb, next); !loaded {
+			if s.nroot.Add(1) > maxCachedRoots {
+				s.roots.Range(func(k, _ any) bool {
+					if _, ok := s.roots.LoadAndDelete(k); ok {
+						s.nroot.Add(-1)
+					}
+					return false
+				})
+			}
+			return
 		}
+	}
+}
+func (s *Store) invalidateRoot(mb uuid.UUID) {
+	if _, ok := s.roots.LoadAndDelete(mb); ok {
+		s.nroot.Add(-1)
 	}
 }
 
@@ -86,7 +110,7 @@ func (s *Store) cached(mb uuid.UUID) (versionedRoot, time.Time, bool) {
 	if !ok {
 		return versionedRoot{}, time.Time{}, false
 	}
-	c := v.(cachedRoot)
+	c := v.(*cachedRoot)
 	return c.vr, c.at, true
 }
 
@@ -157,6 +181,25 @@ type versionedRoot struct {
 }
 
 func (s *Store) getRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, error) {
+	if st, ok := ctx.Value(stageKey{}).(*staged); ok {
+		return versionedRoot{root: st.root, version: st.base.version}, nil
+	}
+	for {
+		vr, err := s.readRoot(ctx, mb)
+		if err != nil {
+			return vr, err
+		}
+		if vr.root.Mutation == nil {
+			s.cacheRoot(mb, vr)
+			return vr, nil
+		}
+		if err := s.recoverMutation(ctx, mb, vr.root.Mutation); err != nil {
+			return versionedRoot{}, err
+		}
+	}
+}
+
+func (s *Store) readRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, error) {
 	data, ver, err := s.pool(ctx, mb).Get(ctx, rootOID(mb))
 	if err != nil {
 		return versionedRoot{}, mapErr(err)
@@ -165,8 +208,10 @@ func (s *Store) getRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, error
 	if err := json.Unmarshal(data, &r); err != nil {
 		return versionedRoot{}, fmt.Errorf("index: decode root %s: %w", mb, err)
 	}
+	if r.Version > rootVersion {
+		return versionedRoot{}, fmt.Errorf("index: unsupported root version %d", r.Version)
+	}
 	vr := versionedRoot{root: r, version: ver}
-	s.cacheRoot(mb, vr)
 	return vr, nil
 }
 
@@ -192,6 +237,16 @@ func (s *Store) GetRootCached(ctx context.Context, mb uuid.UUID, maxAge time.Dur
 // Change-log entries queued with Root.Log are written in the same
 // transaction as the root data.
 func (s *Store) updateRoot(ctx context.Context, mb uuid.UUID, fn func(r *Root) error) (Root, error) {
+	if st, ok := ctx.Value(stageKey{}).(*staged); ok {
+		r := st.root
+		r.Folders = cloneFolders(r.Folders)
+		if err := fn(&r); err != nil {
+			return Root{}, err
+		}
+		st.root = r
+		return r, nil
+	}
+
 	for attempt := 0; attempt < maxRootAttempts; attempt++ {
 		var vr versionedRoot
 		var err error
@@ -235,7 +290,7 @@ func (s *Store) updateRoot(ctx context.Context, mb uuid.UUID, fn func(r *Root) e
 		if !errors.Is(err, rados.ErrVersionMismatch) {
 			return Root{}, mapErr(err)
 		}
-		s.roots.Delete(mb)
+		s.invalidateRoot(mb)
 	}
 	return Root{}, ErrConflict
 }
@@ -356,7 +411,14 @@ func (s *Store) Changes(ctx context.Context, mb uuid.UUID, since uint64, max int
 		if err := json.Unmarshal(e.Value, &c); err != nil {
 			return nil, false, 0, fmt.Errorf("index: decode change: %w", err)
 		}
+		if c.ModSeq > vr.root.ModSeq {
+			more = false
+			break
+		}
 		changes = append(changes, c)
+	}
+	if len(changes) == 0 || changes[0].ModSeq != since+1 {
+		return nil, false, vr.root.ModSeq, ErrNoHorizon
 	}
 	return changes, more, vr.root.ModSeq, nil
 }
@@ -437,7 +499,7 @@ func ValidateFolderName(name string) error {
 }
 
 // CreateFolder creates a folder with the full name (and missing parents).
-func (s *Store) CreateFolder(ctx context.Context, mb uuid.UUID, name, role string) (*Folder, error) {
+func (s *Store) createFolder(ctx context.Context, mb uuid.UUID, name, role string) (*Folder, error) {
 	if err := ValidateFolderName(name); err != nil {
 		return nil, err
 	}
@@ -479,7 +541,7 @@ func (s *Store) CreateFolder(ctx context.Context, mb uuid.UUID, name, role strin
 }
 
 // RenameFolder renames a folder (and its children) to newName.
-func (s *Store) RenameFolder(ctx context.Context, mb uuid.UUID, id, newName string) error {
+func (s *Store) renameFolder(ctx context.Context, mb uuid.UUID, id, newName string) error {
 	if err := ValidateFolderName(newName); err != nil {
 		return err
 	}
@@ -518,7 +580,7 @@ func (s *Store) RenameFolder(ctx context.Context, mb uuid.UUID, id, newName stri
 }
 
 // DeleteFolder removes an empty folder without children.
-func (s *Store) DeleteFolder(ctx context.Context, mb uuid.UUID, id string) error {
+func (s *Store) deleteFolder(ctx context.Context, mb uuid.UUID, id string) error {
 	var shards []string
 	now := s.Now().UTC()
 	_, err := s.updateRoot(ctx, mb, func(r *Root) error {
@@ -574,7 +636,7 @@ func folderShards(mb uuid.UUID, f *Folder) []string {
 }
 
 // UpdateFolder applies fn to folder metadata (subscription, keywords).
-func (s *Store) UpdateFolder(ctx context.Context, mb uuid.UUID, id string, fn func(f *Folder) error) (*Folder, error) {
+func (s *Store) updateFolder(ctx context.Context, mb uuid.UUID, id string, fn func(f *Folder) error) (*Folder, error) {
 	var out *Folder
 	now := s.Now().UTC()
 	_, err := s.updateRoot(ctx, mb, func(r *Root) error {
@@ -777,7 +839,7 @@ func (s *Store) threadFor(ctx context.Context, mb uuid.UUID, rec *Record) (strin
 // point), the thread maps and the change log. If store fails nothing is
 // indexed; the consumed UID is a harmless gap and counters are repaired by
 // Recalculate.
-func (s *Store) Append(ctx context.Context, mb uuid.UUID, fid string, rec Record, store func(uid uint32, modseq uint64) error) (Record, error) {
+func (s *Store) append(ctx context.Context, mb uuid.UUID, fid string, rec Record, store func(uid uint32, modseq uint64) error) (Record, error) {
 	if rec.MessageID == uuid.Nil {
 		return Record{}, fmt.Errorf("%w: record needs a message id", ErrInvalid)
 	}
@@ -795,6 +857,11 @@ func (s *Store) Append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 		f := r.FolderByID(fid)
 		if f == nil {
 			return ErrNotFound
+		}
+		if lim, ok := ctx.Value(quotaKey{}).(quotaLimit); ok {
+			if (lim.Bytes > 0 && (rec.Size > lim.Bytes || r.Usage.Bytes > lim.Bytes-rec.Size)) || (lim.Messages > 0 && r.Usage.Messages >= lim.Messages) {
+				return ErrOverQuota
+			}
 		}
 		r.ModSeq++
 		rec.UID = f.UIDNext
@@ -841,6 +908,9 @@ func (s *Store) Append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 	}
 	if err := pg.wait(); err != nil {
 		s.unappend(ctx, mb, fid, rec, tid)
+		return Record{}, err
+	}
+	if err := s.setLocation(ctx, mb, rec.MessageID, Location{FolderID: fid, UID: rec.UID}); err != nil {
 		return Record{}, err
 	}
 	if err := s.putRecord(ctx, mb, fid, rec); err != nil {
@@ -906,6 +976,9 @@ func (p *parallel) wait() error {
 }
 
 func (s *Store) maybeTrim(ctx context.Context, mb uuid.UUID, modseq uint64) {
+	if ctx.Value(stageKey{}) != nil {
+		return
+	}
 	if modseq%changeTrimEvery == 0 {
 		_ = s.TrimChanges(ctx, mb, changeLogKeep)
 	}
@@ -922,7 +995,7 @@ func containsFold(list []string, v string) bool {
 
 // SetFlags replaces the record's flags with the result of fn and bumps the
 // modseq. Returns the updated record.
-func (s *Store) SetFlags(ctx context.Context, mb uuid.UUID, fid string, uid uint32, fn func(flags []string) []string) (Record, error) {
+func (s *Store) setFlags(ctx context.Context, mb uuid.UUID, fid string, uid uint32, fn func(flags []string) []string) (Record, error) {
 	rec, err := s.getRecord(ctx, mb, fid, uid)
 	if err != nil {
 		return Record{}, err
@@ -987,7 +1060,7 @@ func normalizeFlags(in []string) []string {
 // message uuid (JMAP id) stays the same. relocate is called with the new
 // location before the index is switched (the caller updates the message
 // object's location). Returns the new record.
-func (s *Store) Move(ctx context.Context, mb uuid.UUID, from string, uid uint32, to string, relocate func(loc Location) error) (Record, error) {
+func (s *Store) move(ctx context.Context, mb uuid.UUID, from string, uid uint32, to string, relocate func(loc Location) error) (Record, error) {
 	if from == to {
 		return s.getRecord(ctx, mb, from, uid)
 	}
@@ -1027,10 +1100,8 @@ func (s *Store) Move(ctx context.Context, mb uuid.UUID, from string, uid uint32,
 		return Record{}, err
 	}
 	loc := Location{FolderID: to, UID: rec.UID}
-	if relocate != nil {
-		if err := relocate(loc); err != nil {
-			return Record{}, err
-		}
+	if err := s.setLocation(ctx, mb, rec.MessageID, loc); err != nil {
+		return Record{}, err
 	}
 	if err := s.putRecord(ctx, mb, to, rec); err != nil {
 		return Record{}, err
@@ -1053,7 +1124,7 @@ func (s *Store) Move(ctx context.Context, mb uuid.UUID, from string, uid uint32,
 
 // Remove takes a message out of its folder and parks it in the retention
 // set until purgeAt. The message objects are not touched.
-func (s *Store) Remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32, reason string, purgeAt time.Time) (RetentionEntry, error) {
+func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32, reason string, purgeAt time.Time) (RetentionEntry, error) {
 	rec, err := s.getRecord(ctx, mb, fid, uid)
 	if err != nil {
 		return RetentionEntry{}, err
@@ -1079,6 +1150,9 @@ func (s *Store) Remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 		return nil
 	})
 	if err != nil {
+		return RetentionEntry{}, err
+	}
+	if err := s.setLocation(ctx, mb, rec.MessageID, Location{}); err != nil {
 		return RetentionEntry{}, err
 	}
 	entry := RetentionEntry{MessageID: rec.MessageID, FolderID: fid, UID: uid, Size: rec.Size, DeletedAt: now, PurgeAt: purgeAt.UTC(), Reason: reason}
@@ -1135,7 +1209,7 @@ func (s *Store) ListRetention(ctx context.Context, mb uuid.UUID, before time.Tim
 }
 
 // DropRetention removes retention entries by key (after their objects are purged).
-func (s *Store) DropRetention(ctx context.Context, mb uuid.UUID, keys ...string) error {
+func (s *Store) dropRetention(ctx context.Context, mb uuid.UUID, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -1188,7 +1262,7 @@ func ParseLocation(s string) (Location, error) {
 func (l Location) String() string { return fmt.Sprintf("%s/%d", l.FolderID, l.UID) }
 
 // Recalculate rebuilds folder counters and usage from the folder indexes.
-func (s *Store) Recalculate(ctx context.Context, mb uuid.UUID) (Root, error) {
+func (s *Store) recalculate(ctx context.Context, mb uuid.UUID) (Root, error) {
 	vr, err := s.getRoot(ctx, mb)
 	if err != nil {
 		return Root{}, err
@@ -1199,7 +1273,7 @@ func (s *Store) Recalculate(ctx context.Context, mb uuid.UUID) (Root, error) {
 		var st stats
 		var after uint32
 		for {
-			recs, more, err := s.ListFolder(ctx, mb, f.ID, after, 1000)
+			recs, more, err := s.ListFolderDesc(ctx, mb, f.ID, after, 1000)
 			if err != nil {
 				return Root{}, err
 			}
@@ -1269,6 +1343,6 @@ func (s *Store) DeleteAll(ctx context.Context, mb uuid.UUID) error {
 			return mapErr(err)
 		}
 	}
-	s.roots.Delete(mb)
+	s.invalidateRoot(mb)
 	return nil
 }

@@ -131,27 +131,27 @@ func (io *libradosIOContext) Get(ctx context.Context, oid string) ([]byte, uint6
 		return nil, 0, err
 	}
 	defer io.release(h)
-	st, err := h.Stat(oid)
-	if err != nil {
-		return nil, 0, mapErr(err)
-	}
-	buf := make([]byte, st.Size)
-	n := 0
-	for uint64(n) < st.Size {
-		m, err := h.Read(oid, buf[n:], uint64(n))
+	// Read a complete snapshot in one operation for the usual small object.
+	// If full, retry from offset zero with a larger buffer; never concatenate
+	// bytes from different object versions or trust a preceding Stat's size.
+	for size := 64 << 10; ; size *= 2 {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		buf := make([]byte, size)
+		n, err := h.Read(oid, buf, 0)
 		if err != nil {
 			return nil, 0, mapErr(err)
 		}
-		if m == 0 {
-			break
+		if n == len(buf) {
+			continue
 		}
-		n += m
+		ver, err := h.GetLastVersion()
+		if err != nil {
+			return nil, 0, mapErr(err)
+		}
+		return buf[:n], ver, nil
 	}
-	ver, err := h.GetLastVersion()
-	if err != nil {
-		return nil, 0, mapErr(err)
-	}
-	return buf[:n], ver, nil
 }
 
 func (io *libradosIOContext) Stat(ctx context.Context, oid string) (Stat, error) {

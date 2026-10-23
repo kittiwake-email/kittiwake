@@ -284,7 +284,7 @@ func (s *Service) ExportMailbox(ctx context.Context, mb uuid.UUID, w io.Writer, 
 			fmt.Fprintf(&uidlist, "3 V%d N%d\n", f.UIDValidity, f.UIDNext)
 			var after uint32
 			for {
-				recs, more, err := s.idx.ListFolder(ctx, mb, f.ID, after, 500)
+				recs, more, err := s.idx.ListFolder(ctx, mb, f.ID, after, 0)
 				if err != nil {
 					return sum, err
 				}

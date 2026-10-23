@@ -13,6 +13,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-message/textproto"
 
+	dmail "kittiwake/mail"
 	"kittiwake/service/mailbox"
 	"kittiwake/store/index"
 )
@@ -71,7 +72,7 @@ func (sel *selected) listAll() ([]index.Record, error) {
 	var out []index.Record
 	var after uint32
 	for {
-		recs, more, err := sel.s.srv.mb.List(sel.s.ctx, sel.s.mb, sel.folderID, after, 1000)
+		recs, more, err := sel.s.srv.mb.ListDesc(sel.s.ctx, sel.s.mb, sel.folderID, after, 1000)
 		if err != nil {
 			return nil, sel.s.srv.mapErr(err, "list")
 		}
@@ -83,6 +84,7 @@ func (sel *selected) listAll() ([]index.Record, error) {
 			break
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
 	return out, nil
 }
 
@@ -118,6 +120,9 @@ func (sel *selected) removeUID(uid uint32) {
 // read. A log horizon miss or an implausibly large delta falls back to a
 // full re-list.
 func (sel *selected) sync(w *imapserver.UpdateWriter, allowExpunge bool) error {
+	if err := sel.s.srv.mb.CheckAccess(sel.s.ctx, sel.s.mb); err != nil {
+		return sel.s.srv.mapErr(err, "access")
+	}
 	var flagChanged, added []uint32
 	var current uint64
 	ok := true
@@ -567,8 +572,57 @@ func (sel *selected) move(w *imapserver.MoveWriter, numSet imap.NumSet, dest *in
 // ---- FETCH ----
 
 type fetched struct {
+	doc *dmail.Document
 	rec index.Record
 	raw []byte
+}
+
+func (sel *selected) documentFor(f *fetched) (*dmail.Document, error) {
+	if f.doc != nil {
+		return f.doc, nil
+	}
+	doc, err := sel.s.srv.mb.Document(sel.s.ctx, sel.s.mb, f.rec.MessageID)
+	if err == nil {
+		f.doc = doc
+	}
+	return doc, err
+}
+func (sel *selected) headerFor(f *fetched) ([]byte, error) {
+	doc, err := sel.documentFor(f)
+	if err != nil {
+		return nil, err
+	}
+	if doc.Wire != nil {
+		return []byte(doc.Wire.Header), nil
+	}
+	// Legacy documents may have kept original bytes; preserve exact MIME headers.
+	raw, err := sel.rawFor(f)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+func metadataSection(bs *imap.FetchItemBodySection) bool {
+	return len(bs.Part) == 0 && (bs.Specifier == imap.PartSpecifierHeader || bs.Specifier == imap.PartSpecifierMIME)
+}
+func wireStructure(p *dmail.WirePart) imap.BodyStructure {
+	bs := imapserver.ExtractBodyStructure(strings.NewReader(p.Header))
+	switch b := bs.(type) {
+	case *imap.BodyStructureMultiPart:
+		b.Children = nil
+		for _, c := range p.Children {
+			b.Children = append(b.Children, wireStructure(c))
+		}
+	case *imap.BodyStructureSinglePart:
+		b.Size = p.Size
+		if b.Text != nil {
+			b.Text.NumLines = p.Lines
+		}
+		if p.Message != nil {
+			b.MessageRFC822 = &imap.BodyStructureMessageRFC822{Envelope: envelopeOf([]byte(p.Message.Header)), BodyStructure: wireStructure(p.Message), NumLines: p.Lines}
+		}
+	}
+	return bs
 }
 
 func (sel *selected) rawFor(f *fetched) ([]byte, error) {
@@ -595,7 +649,12 @@ func (sel *selected) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 			markSeen = true
 		}
 	}
-	needRaw := options.Envelope || options.BodyStructure != nil || len(options.BodySection) > 0 || len(options.BinarySection) > 0 || len(options.BinarySectionSize) > 0
+	needRaw := len(options.BinarySection) > 0 || len(options.BinarySectionSize) > 0
+	for _, bs := range options.BodySection {
+		if !metadataSection(bs) {
+			needRaw = true
+		}
+	}
 	for _, uid := range sel.resolve(numSet) {
 		f := &fetched{rec: sel.recs[uid]}
 		if markSeen && !sel.readOnly && !f.rec.HasFlag(index.FlagSeen) {
@@ -624,13 +683,37 @@ func (sel *selected) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 			rw.WriteRFC822Size(f.rec.Size)
 		}
 		if options.Envelope {
-			rw.WriteEnvelope(envelopeOf(f.raw))
+			headers, err := sel.headerFor(f)
+			if err != nil {
+				return sel.s.srv.mapErr(err, "fetch")
+			}
+			rw.WriteEnvelope(envelopeOf(headers))
 		}
 		if options.BodyStructure != nil {
-			rw.WriteBodyStructure(imapserver.ExtractBodyStructure(bytes.NewReader(f.raw)))
+			doc, err := sel.documentFor(f)
+			if err != nil {
+				return sel.s.srv.mapErr(err, "fetch")
+			}
+			if doc.Wire != nil {
+				rw.WriteBodyStructure(wireStructure(doc.Wire))
+			} else {
+				raw, err := sel.rawFor(f)
+				if err != nil {
+					return sel.s.srv.mapErr(err, "fetch")
+				}
+				rw.WriteBodyStructure(imapserver.ExtractBodyStructure(bytes.NewReader(raw)))
+			}
 		}
 		for _, bs := range options.BodySection {
-			buf := imapserver.ExtractBodySection(bytes.NewReader(f.raw), bs)
+			source := f.raw
+			if metadataSection(bs) {
+				var err error
+				source, err = sel.headerFor(f)
+				if err != nil {
+					return sel.s.srv.mapErr(err, "fetch")
+				}
+			}
+			buf := imapserver.ExtractBodySection(bytes.NewReader(source), bs)
 			wc := rw.WriteBodySection(bs, int64(len(buf)))
 			_, werr := wc.Write(buf)
 			cerr := wc.Close()

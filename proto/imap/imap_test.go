@@ -32,14 +32,15 @@ import (
 )
 
 type fixture struct {
-	t    *testing.T
-	addr string
-	ids  *identity.Store
-	idx  *index.Store
-	auth *authsvc.Service
-	del  *delivery.Service
-	mb   identity.Mailbox
-	acct identity.Account
+	attachmentReads func() int
+	t               *testing.T
+	addr            string
+	ids             *identity.Store
+	idx             *index.Store
+	auth            *authsvc.Service
+	del             *delivery.Service
+	mb              identity.Mailbox
+	acct            identity.Account
 }
 
 const (
@@ -57,7 +58,7 @@ func newFixtureCfg(t *testing.T, cfg Config) *fixture {
 	idxp, _ := c.Pool("index")
 	msgp, _ := c.Pool("messages")
 	attp, _ := c.Pool("attachments")
-	f := &fixture{t: t, ids: identity.New(meta), idx: index.New(idxp)}
+	f := &fixture{t: t, ids: identity.New(meta), idx: index.New(idxp), attachmentReads: attp.(interface{ Reads() int }).Reads}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	aud := auditor.New(audit.New(idxp), log, nil)
 	msgs, atts, q := message.New(msgp), attach.New(attp), queue.New(idxp)
@@ -608,5 +609,27 @@ func TestEscapedDelimiterInName(t *testing.T) {
 	}
 	if _, err := c.Select("Clients/A\\2fB Ltd", nil).Wait(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMetadataFetchDoesNotReadAttachmentPayload(t *testing.T) {
+	f := newFixture(t)
+	raw := "From: a@example.org\r\nSubject: attachment\r\nContent-Type: application/octet-stream\r\n\r\n" + strings.Repeat("payload", 20000)
+	f.deliver(raw)
+	c := f.client(nil)
+	defer c.Close()
+	if err := c.Login(user, pass).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	before := f.attachmentReads()
+	_, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{Envelope: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true}, BodySection: []*imap.FetchItemBodySection{{Specifier: imap.PartSpecifierHeader, Peek: true}}}).Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := f.attachmentReads(); after != before {
+		t.Fatalf("metadata read attachment payload: %d extra reads", after-before)
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"kittiwake/mail"
 	"kittiwake/rados"
+	"kittiwake/service/actor"
 	"kittiwake/service/auditor"
 	"kittiwake/store/attach"
 	"kittiwake/store/audit"
@@ -284,7 +285,7 @@ func TestSpamRoutingAndAdmission(t *testing.T) {
 		t.Fatalf("hold with delivery: %v", err)
 	}
 	root, _ = f.idx.GetRoot(ctx, f.mb.ID)
-	if _, err := f.svc.Import(ctx, f.mb.ID, root.FolderByRole(index.RoleDrafts).ID, []byte(simpleMsg), []string{index.FlagDraft}, time.Time{}); !errors.Is(err, ErrHold) {
+	if _, err := f.svc.Import(actor.With(ctx, actor.System("test")), f.mb.ID, root.FolderByRole(index.RoleDrafts).ID, []byte(simpleMsg), []string{index.FlagDraft}, time.Time{}); !errors.Is(err, ErrHold) {
 		t.Fatalf("import on hold: %v", err)
 	}
 	// Too large.
@@ -318,7 +319,7 @@ func TestImportAndFanout(t *testing.T) {
 	ctx := context.Background()
 	root, _ := f.idx.EnsureRoot(ctx, f.mb.ID)
 	drafts := root.FolderByRole(index.RoleDrafts).ID
-	d, err := f.svc.Import(ctx, f.mb.ID, drafts, []byte(simpleMsg), []string{"\\Draft", "\\Seen"}, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	d, err := f.svc.Import(actor.With(ctx, actor.System("test")), f.mb.ID, drafts, []byte(simpleMsg), []string{"\\Draft", "\\Seen"}, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil || d.FolderID != drafts {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestImportAndFanout(t *testing.T) {
 	if !rec.HasFlag(index.FlagDraft) || !rec.HasFlag(index.FlagSeen) || rec.InternalDate.Year() != 2020 {
 		t.Fatalf("import record: %+v", rec)
 	}
-	if _, err := f.svc.Import(ctx, f.mb.ID, "f999", []byte(simpleMsg), nil, time.Time{}); !errors.Is(err, ErrNoFolder) {
+	if _, err := f.svc.Import(actor.With(ctx, actor.System("test")), f.mb.ID, "f999", []byte(simpleMsg), nil, time.Time{}); !errors.Is(err, ErrNoFolder) {
 		t.Fatalf("bad folder: %v", err)
 	}
 	// Alias fanout stores one copy per mailbox, sharing the attachment object.

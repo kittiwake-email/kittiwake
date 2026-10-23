@@ -1,0 +1,107 @@
+Kittiwake scalability, security and integrity review — 2026-10-23
+
+Scope: Go product, with IMAP the initial primary workload. Mail is in Ceph
+RADOS; production identity, sessions and queues are in MariaDB.
+Commit convention: never mention the coding assistant, model or agent in Git
+commits, including subjects, bodies, session trailers and co-author trailers.
+
+Findings (status initially OPEN; update with implementation and evidence):
+01 HIGH: Change log published before folder/message commit; consumers can
+   advance past a record that does not yet exist. Reproduced on memory RADOS.
+02 HIGH: Record mutations are unconditional outside root CAS. Concurrent
+   mark-seen produced total=1/unseen=-1; flags can be lost and records revived.
+03 HIGH: MOVE/REMOVE have no durable recovery. Torn moves misdirect location;
+   failed removals leave retention entries for live mail, later purged.
+04 HIGH: Orphan sweep treats retention lookup failure as empty and does not
+   revalidate deletion candidates; transient errors/concurrent moves risk loss.
+05 MEDIUM: Hard quota admission uses stale/non-atomic usage; recalculation
+   overwrites concurrent counter updates using an earlier scan.
+06 HIGH: Attachment download checks mailbox access, not attachment membership.
+   Cross-mailbox attachment retrieval by hash reproduced on shared storage.
+07 HIGH: delivery.Import omits actor/write authorization. Read-only import
+   reproduced; IMAP APPEND and JMAP Email/import reach it.
+08 HIGH: Established IMAP actors retain revoked account/role/service access;
+   JWT OAuth login ignores disabled accounts and account lookup errors.
+09 HIGH: Recovery code is checked before atomic account update, then removed
+   by stale index; concurrent use can succeed twice or remove another code.
+10 MEDIUM: Password cache key omits protocol, bypassing per-service policy in
+   combined-mode daemons after a successful login on another service.
+11 HIGH: Ascending listing rereads an entire 65,536-entry shard per 1,000-item
+   page. SELECT of a dense 150k folder decodes roughly 9m records. Recalc and
+   general JMAP queries share the path; sessions retain full records.
+12 HIGH: ENVELOPE/BODYSTRUCTURE/header FETCH reconstructs full MIME including
+   external attachments; ordinary raw reads first probe absent .raw objects.
+13 MEDIUM: Daily attachment GC scans all objects and refs; metadata lookup
+   enumerates refs too. Cost grows with all live mail and attachment sharing.
+14 MEDIUM: librados Get uses Stat then old-sized Read; concurrent growth can
+   truncate JSON. Wrapper read count understates actual RADOS round trips.
+
+Initial validation: fresh tests passed in store/index, store/attach,
+service/auth, service/mailbox, service/delivery, proto/imap, proto/jmap, worker.
+Four isolated reproductions confirmed 01, 02, 06, 07. No lab changes in review.
+
+Implementation and validation log:
+- Work started. Preserve existing deployment and storage compatibility where
+  possible; record format changes, residual risks and lab evidence explicitly.
+
+Checkpoint for session restart (2026-10-23): IMPLEMENTATION IN PROGRESS.
+This checkpoint is not ready for deployment. No daemons were deployed/restarted.
+
+Implemented, pending final review and validation:
+- 01/02/03/05: durable per-mailbox root mutation journal, version-fenced target
+  writes, recovery on reads, change publication after target writes, authoritative
+  message locations, quota enforcement inside the root CAS, recalculation retry.
+  Regression tests cover delayed append publication, crash recovery, concurrent
+  flags, concurrent hard quota, interrupted move/remove.
+- 04: orphan deletion fails closed on retention lookup errors and revalidates
+  candidates; retention purge checks the live index before deleting message data.
+- 06/07: attachment membership checks and Import actor/write authorization.
+- 08/09/10: account/role/service revalidation and expiry on established access,
+  OAuth fails closed, atomic recovery-code consumption, protocol-specific cache.
+- 11: internal full scans use descending cursor pages (IMAP sorts UIDs afterward).
+  Public ascending ListFolder compatibility API remains expensive; IMAP sessions
+  still retain full records. Export uses one full listing, retaining memory cost.
+- 12: persist wire MIME metadata; new messages serve envelope/bodystructure/header
+  without attachment payload reads. RawStored avoids absent raw-object probes.
+  Legacy documents and body-section reads still reconstruct full MIME as needed.
+- 13: attachment GC candidate shards replace daily full reference scans; weekly
+  reconciliation remains. Metadata reads omit ref enumeration; GC is version fenced.
+- 14: librados Get starts with a 64KiB read and retries larger full reads from
+  offset zero, avoiding Stat/read truncation and mixed-version concatenation.
+
+Validation at checkpoint:
+- Last full `go test ./...`: two failures, client/admin TestExportDownloadImport
+  and proto/rest TestExportEndpoints (admin import returns actor forbidden).
+  Other packages passed, including new metadata-FETCH and concurrency tests.
+- Fix the admin import regression before declaring this work complete. Inspect
+  export/import actor propagation and worker context; retain authorization checks.
+- Audit send-only actors: submit.Send currently calls delivery.Import, now requiring
+  write. Provide an explicitly authorized Sent-copy path if send-only is supported.
+- Audit JMAP upload/download authorization (proto/jmap/blobs.go); it still uses stores.
+- Full race tests, final build/vet, real-Ceph recovery/read conformance, and final
+  performance comparison remain outstanding.
+
+Storage/rollout cautions and remaining review:
+- Root format is now version 2 with an embedded recoverable mutation. Old writers
+  do not understand the journal: do not mix old and new writers. A quiesced upgrade
+  and updated README/AGENTS architecture documentation are required before rollout.
+- Accepted journal failures return ErrPending; delivery must preserve private
+  message data so recovery can finish. Before acceptance, failures undo private data.
+- Empty target tombstones prevent stale helpers recreating deleted objects (ABA).
+  Review stale-helper fencing and add a regression test; location tombstones persist.
+- Journal target Stats and prepare/finalize root operations add I/O. Measure final
+  costs and consider safe cached-root CAS, root-only fast path, avoiding final reread.
+- Review visibility of GetRecord during prepared mutations and recovery notifications.
+- Current root cache updates are monotonic, preventing delayed writes regressing it.
+- Review serialized WriteTx validation and retention/legal-hold races further.
+
+Lab benchmark evidence (isolated review namespace, client.kittiwake,
+kittiwake.index on kittiwake1; no Ceph nodes accessed):
+- Original HEAD benchmark, benchtime=1x: Append 14,079,674 ns/op; Flags 6,015,682
+  ns/op; Scan150k ascending 114,015,360,580 ns/op; descending 2,165,695,446 ns/op.
+- These are single samples, not a statistically robust before/after comparison.
+- Benchmark source: store/index/benchmark_integration_test.go (integration tag).
+- Baseline source snapshot: /tmp/kittiwake-review-baseline. Compiled binaries
+  /tmp/kittiwake-index-before.test and /tmp/kittiwake-index-after.test exist locally
+  and on kittiwake1. Rebuild after binary: it predates the final cache changes.
+- Run after comparison and repeated append/flags samples, then update labs docs.

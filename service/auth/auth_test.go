@@ -361,11 +361,11 @@ func TestVerificationCache(t *testing.T) {
 	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "correct horse", "imap", "198.51.100.7"); err != nil {
 		t.Fatal(err)
 	}
-	a, err := f.svc.VerifyPassword(ctx, "WIDO@example.org ", "correct horse", "pop3", "198.51.100.8")
+	a, err := f.svc.VerifyPassword(ctx, "WIDO@example.org ", "correct horse", "imap", "198.51.100.8")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.AccountID != f.acct.ID || a.Protocol != "pop3" || a.ClientIP != "198.51.100.8" {
+	if a.AccountID != f.acct.ID || a.Protocol != "imap" || a.ClientIP != "198.51.100.8" {
 		t.Fatalf("cached actor wrong: %+v", a)
 	}
 	if n := countOf(f.auditActions(t, f.mb.ID), "login:ok"); n != 1 {
@@ -523,5 +523,46 @@ func TestSetPasswordHash(t *testing.T) {
 	}
 	if _, err := f.svc.VerifyPassword(ctx, "wido@example.org", "plain-import-1", "imap", ""); err != nil {
 		t.Fatalf("plain import refused: %v", err)
+	}
+}
+
+func TestPasswordCacheCannotCrossDisabledServices(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.svc.cfg.CacheTTL = time.Minute
+	_, err := f.ids.UpdateAccount(ctx, f.acct.ID, func(a *identity.Account) error { a.Services = []string{identity.ServiceIMAP}; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.svc.VerifyPassword(ctx, f.acct.Username, "correct horse", "imap", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.svc.VerifyPassword(ctx, f.acct.Username, "correct horse", "pop3", ""); !errors.Is(err, ErrServiceDisabled) {
+		t.Fatalf("cached service bypass: %v", err)
+	}
+}
+func TestRecoveryCodeCannotReuseStaleSnapshot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	codes, hashes, err := cryptoauth.NewRecoveryCodes(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, err := f.ids.UpdateAccount(ctx, f.acct.ID, func(a *identity.Account) error {
+		a.TOTP = &identity.TOTP{Secret: "JBSWY3DPEHPK3PXP", Recovery: hashes}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.svc.checkTOTP(ctx, &acct, codes[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.svc.checkTOTP(ctx, &acct, codes[0]); !errors.Is(err, ErrTOTPInvalid) {
+		t.Fatalf("reused recovery code: %v", err)
+	}
+	current, _ := f.ids.GetAccount(ctx, acct.ID)
+	if len(current.Value.TOTP.Recovery) != 1 || cryptoauth.VerifyRecoveryCode(current.Value.TOTP.Recovery, codes[1]) < 0 {
+		t.Fatal("another recovery code was consumed")
 	}
 }
