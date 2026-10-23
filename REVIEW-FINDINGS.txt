@@ -105,3 +105,68 @@ kittiwake.index on kittiwake1; no Ceph nodes accessed):
   /tmp/kittiwake-index-before.test and /tmp/kittiwake-index-after.test exist locally
   and on kittiwake1. Rebuild after binary: it predates the final cache changes.
 - Run after comparison and repeated append/flags samples, then update labs docs.
+
+Follow-up implementation — 2026-10-23 (supersedes checkpoint status above)
+
+Core fixes for 01–10, 13 and 14 implemented and tested. Findings 11 and 12
+are mitigated on the primary IMAP paths, with explicit remaining limits below.
+No deployment, daemon restart, commit or push was performed in this follow-up.
+
+Completed follow-up work:
+- Admin imports now pass. Root cause was inconsistent fixture clocks: auth used
+  2026-10-21 while delivery used wall time, correctly rejecting an expired token.
+  Fixed the clocks, not the authorization/expiry enforcement.
+- Added SaveSent, restricted to the actor's own mailbox, send permission, Sent
+  folder and Seen flag. Send-only accounts retain Sent copies without acquiring
+  arbitrary Import privileges. Cross-mailbox and ordinary-import denial tested.
+- JMAP uploads require write permission and respect mailbox state/legal hold;
+  uploaded-blob retrieval requires read access. Regression tests cover role checks.
+- Journal root-only operations use one atomic transaction; cached initial roots
+  are protected by CAS and stale semantic failures re-read before rejection.
+  Target-version reads run concurrently; completion uses the known prepared root
+  version, reading again only after a conflict. No weakening of recovery fences.
+- Delayed recovery helper regression verifies newer flags survive and removed
+  messages stay removed. Stale-root regression verifies newly created folders
+  on another daemon do not cause false rejection.
+- Recovery performed by readers sends best-effort watcher notifications. Clients
+  still use polling as fallback. Invalid serialized transaction opcodes fail closed.
+- Orphan sweeps stream candidates instead of keeping a pool-sized slice. Message
+  enumeration also streams: raw copies get a document existence check instead
+  of retaining all document names. Retention-read failure preserves message data
+  in a fault-injection regression test. Purge rechecks holds between messages.
+- Export uses RawStored to avoid absent-raw probes for new ordinary messages.
+- README/AGENTS updated for format 2, journal commit semantics, object layout,
+  candidate GC, MIME metadata, and the required quiesced upgrade.
+
+Verification:
+- Full `go test ./...` passed after the follow-up fixes.
+- Full `go test -race ./...` passed; affected packages retested under race after
+  subsequent journal/worker/export changes. `go vet ./...` and `go build ./...`
+  passed; final diff/format checks recorded before reporting.
+- Real Ceph librados conformance passed on kittiwake1.
+- Real Ceph recovery after an injected folder-write failure passed, as did
+  concurrent 32KiB/300KiB object replacement versus full reads (100 iterations).
+  All tests used isolated namespaces in kittiwake.index with client.kittiwake.
+- Repeated baseline/final Ceph latency and scan evidence is in labs/docs/LAB.md.
+
+Remaining limits / follow-on work (do not describe as fully resolved):
+- The journal's durability has measurable write cost: index-only Append/SetFlags
+  are slower than the unsafe baseline. More throughput/latency work must preserve
+  the publication and stale-helper invariants. No whole-platform load claim is
+  made from these single-mailbox microbenchmarks.
+- IMAP retains full index records per selected folder to avoid extra FETCH/search
+  reads; a compact shared/session representation remains future memory work.
+  Public ascending ListFolder remains a compatibility API with whole-shard reads;
+  primary internal full scans now use descending cursor pages.
+- Legacy MIME documents lack metadata; body-part FETCH still reconstructs full
+  MIME. Backfill and selective part streaming remain future work, not performed.
+- Reads are not cross-object snapshots; concurrent readers may observe newer
+  records before their changes are published. State tokens come from finalized
+  roots/change logs, so subsequent synchronization must still process those changes.
+- Legal-hold rechecks bound a long purge's exposure but cannot make a MariaDB
+  hold update atomic with a Ceph delete already in flight. Strict cross-store
+  hold barriers would require additional coordination; not introduced here.
+- Location tombstones and per-shard empty-object tombstones are retained for
+  stale-helper safety; safe compaction needs its own protocol.
+- Do not mix old and new writers or roll back after format-2 writes. Quiesce all
+  old writers/workers before a future deployment. No automatic downgrade provided.

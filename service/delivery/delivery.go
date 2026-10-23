@@ -445,6 +445,28 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 		return Delivered{}, ErrForbidden
 	}
 
+	return s.importMessage(ctx, mb, folderID, raw, flags, internalDate)
+}
+
+// SaveSent permits a send-only account to save its own Sent copy. It cannot
+// choose another mailbox, folder or flags; ordinary imports still require write.
+func (s *Service) SaveSent(ctx context.Context, mb uuid.UUID, raw []byte, internalDate time.Time) (Delivered, error) {
+	a := actor.From(ctx)
+	if a.MailboxID != mb || actor.CheckAccount(ctx, s.ids, a, identity.RoleSend, s.Now()) != nil {
+		return Delivered{}, ErrForbidden
+	}
+	root, err := s.idx.EnsureRoot(ctx, mb)
+	if err != nil {
+		return Delivered{}, err
+	}
+	sent := root.FolderByRole(index.RoleSent)
+	if sent == nil {
+		return Delivered{}, index.ErrNotFound
+	}
+	return s.importMessage(ctx, mb, sent.ID, raw, []string{index.FlagSeen}, internalDate)
+}
+
+func (s *Service) importMessage(ctx context.Context, mb uuid.UUID, folderID string, raw []byte, flags []string, internalDate time.Time) (Delivered, error) {
 	if int64(len(raw)) > s.cfg.MaxMessageSize {
 		return Delivered{}, ErrTooLarge
 	}
@@ -545,7 +567,8 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 	if err != nil {
 		// Nothing committed: take back what was written so a failed
 		// delivery (quota, storage trouble) leaves no object behind. The
-		// index already undid its counters; the sweeps cover a crash here.
+		// No counters were published before preparation. An accepted journal
+		// must retain private data so another process can complete it.
 		<-attDone
 		if !errors.Is(err, index.ErrPending) {
 			s.undoStore(ctx, mb, msgID, parsed)

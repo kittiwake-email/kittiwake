@@ -149,12 +149,29 @@ type Info struct {
 // with storage.WithID(ctx, info.StorageID).
 func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 	return s.r.Each(ctx, storage.RoleMessages, func(cid int64, io rados.IOContext) error {
-		docs := map[string]bool{}
-		var raws []string
-		err := io.List(ctx, func(oid string) error {
+		return io.List(ctx, func(oid string) error {
 			if len(oid) == 77 && strings.HasSuffix(oid, ".raw") {
-				raws = append(raws, oid)
-				return nil
+				doc := strings.TrimSuffix(oid, ".raw")
+				mb, e1 := uuid.Parse(doc[:36])
+				msg, e2 := uuid.Parse(doc[37:])
+				if e1 != nil || e2 != nil {
+					return nil
+				}
+				// Raw copies are rare. One extra stat avoids a pool-sized map
+				// of all documents just to recognize raw-only crash leftovers.
+				if _, err := io.Stat(ctx, doc); err == nil {
+					return nil
+				} else if !errors.Is(err, rados.ErrNotFound) {
+					return err
+				}
+				st, err := io.Stat(ctx, oid)
+				if errors.Is(err, rados.ErrNotFound) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				return fn(Info{StorageID: cid, Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime, RawOnly: true})
 			}
 			if len(oid) != 73 || oid[36] != '/' { // uuid/uuid
 				return nil
@@ -164,7 +181,6 @@ func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 			if err1 != nil || err2 != nil {
 				return nil
 			}
-			docs[oid] = true
 			st, err := io.Stat(ctx, oid)
 			if err != nil {
 				if errors.Is(err, rados.ErrNotFound) {
@@ -181,31 +197,6 @@ func (s *Store) List(ctx context.Context, fn func(Info) error) error {
 			}
 			return fn(info)
 		})
-		if err != nil {
-			return err
-		}
-		for _, oid := range raws {
-			doc := strings.TrimSuffix(oid, ".raw")
-			if docs[doc] {
-				continue
-			}
-			mb, err1 := uuid.Parse(doc[:36])
-			msg, err2 := uuid.Parse(doc[37:])
-			if err1 != nil || err2 != nil {
-				continue
-			}
-			st, err := io.Stat(ctx, oid)
-			if err != nil {
-				if errors.Is(err, rados.ErrNotFound) {
-					continue
-				}
-				return mapErr(err)
-			}
-			if err := fn(Info{StorageID: cid, Mailbox: mb, Message: msg, Size: st.Size, Created: st.ModTime, RawOnly: true}); err != nil {
-				return err
-			}
-		}
-		return nil
 	})
 }
 

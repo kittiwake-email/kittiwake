@@ -3,8 +3,10 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -14,7 +16,7 @@ import (
 	"kittiwake/rados"
 )
 
-func benchmarkCeph(b *testing.B) (*Store, rados.IOContext, uuid.UUID, string) {
+func benchmarkCeph(b testing.TB) (*Store, rados.IOContext, uuid.UUID, string) {
 	b.Helper()
 	conf := os.Getenv("KITTIWAKE_TEST_CEPH_CONF")
 	if conf == "" {
@@ -134,5 +136,58 @@ func BenchmarkCephScan150k(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// Exercise durable recovery and complete reads against real librados, using only
+// the isolated benchmark namespace.
+func TestCephReviewRecoveryAndReads(t *testing.T) {
+	s, io, mb, fid := benchmarkCeph(t)
+	ctx := context.Background()
+	p := &failIndexWrite{IOContext: io, oid: folderOID(mb, fid, 1)}
+	p.fail.Store(true)
+	writer := New(p)
+	_, err := writer.Append(ctx, mb, fid, Record{MessageID: uuid.New(), Size: 1024}, nil)
+	if !errors.Is(err, ErrPending) {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := s.GetRoot(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetRecord(ctx, mb, fid, 1); err != nil {
+		t.Fatal(err)
+	}
+	old := bytes.Repeat([]byte("a"), 32<<10)
+	large := bytes.Repeat([]byte("b"), 300<<10)
+	if _, err := io.Write(ctx, "read-race", rados.NewWriteTx().WriteFull(old)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			data := old
+			if i%2 == 0 {
+				data = large
+			}
+			if _, err := io.Write(ctx, "read-race", rados.NewWriteTx().WriteFull(data)); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for i := 0; i < 100; i++ {
+		data, _, err := io.Get(ctx, "read-race")
+		if err != nil {
+			t.Error(err)
+			break
+		}
+		if !bytes.Equal(data, old) && !bytes.Equal(data, large) {
+			t.Errorf("torn read length %d", len(data))
+			break
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

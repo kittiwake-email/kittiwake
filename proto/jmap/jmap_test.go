@@ -895,3 +895,27 @@ func TestMailboxNameWithSlash(t *testing.T) {
 		t.Fatalf("query by slashed name: %v", ids)
 	}
 }
+
+func TestUploadRequiresWriteAndDownloadRequiresRead(t *testing.T) {
+	f := newFixture(t)
+	for _, roles := range [][]string{{"read"}, {"send"}} {
+		a := f.act
+		a.Roles = roles
+		req := httptest.NewRequest(http.MethodPost, "/jmap/upload/"+f.mb.ID.String(), strings.NewReader("test"))
+		req = req.WithContext(actor.With(req.Context(), a))
+		w := httptest.NewRecorder()
+		f.srv.serveUpload(w, req, f.mb.ID.String())
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("roles %v upload: %d", roles, w.Code)
+		}
+	}
+	ctx := context.Background()
+	if err := f.msgs.PutUpload(ctx, f.mb.ID, "u-test", []byte("test"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	a := f.act
+	a.Roles = []string{"write"}
+	if _, _, err := f.srv.blob(actor.With(ctx, a), f.mb.ID, "u-test"); err == nil {
+		t.Fatal("write-only download allowed")
+	}
+}

@@ -193,9 +193,16 @@ func (s *Store) getRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, error
 			s.cacheRoot(mb, vr)
 			return vr, nil
 		}
-		if err := s.recoverMutation(ctx, mb, vr.root.Mutation); err != nil {
+		if err := s.recoverMutation(ctx, mb, vr.root.Mutation, vr); err != nil {
 			return versionedRoot{}, err
 		}
+		// Recovery can be completed by a reader after the original writer died.
+		// Wake protocol watchers even when that writer cannot send its event.
+		go func() {
+			nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			_ = s.Notify(nctx, mb, []byte(`{"type":"recovery"}`))
+		}()
 	}
 }
 
@@ -757,9 +764,8 @@ func (s *Store) ListFolderDesc(ctx context.Context, mb uuid.UUID, fid string, be
 }
 
 // ListFolder lists records with UID > afterUID in UID order. The omap is
-// newest-first, so a shard is read whole and reversed; callers that page
-// through an entire folder (IMAP SELECT, expunge, recalc) read every shard
-// anyway. Use ListFolderDesc for first-page style listings.
+// newest-first, so a shard is read whole and reversed. This compatibility
+// API is expensive for pagination; use ListFolderDesc for full scans and pages.
 func (s *Store) ListFolder(ctx context.Context, mb uuid.UUID, fid string, afterUID uint32, max int) (records []Record, more bool, err error) {
 	vr, err := s.getRoot(ctx, mb)
 	if err != nil {

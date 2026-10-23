@@ -201,3 +201,68 @@ func TestInterruptedMoveAndRemoveRecover(t *testing.T) {
 		})
 	}
 }
+
+// A helper paused before its target write must not overwrite a newer operation.
+func TestDelayedRecoveryHelperIsFenced(t *testing.T) {
+	ctx := context.Background()
+	client := rados.NewMemoryClient()
+	io, _ := client.Pool("index")
+	p := &failIndexWrite{IOContext: io}
+	s := New(p)
+	mb := uuid.New()
+	root, err := s.EnsureRoot(ctx, mb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid := root.Folders[0].ID
+	p.oid = folderOID(mb, fid, 1)
+	p.fail.Store(true)
+	_, err = s.Append(ctx, mb, fid, rec(1, ""), nil)
+	if !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	prepared, err := s.readRoot(ctx, mb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayed := prepared.root.Mutation
+	other := New(io)
+	if _, err := other.GetRoot(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.SetFlags(ctx, mb, fid, 1, func([]string) []string { return []string{FlagSeen, "newer"} }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recoverMutation(ctx, mb, delayed, prepared); err != nil {
+		t.Fatal(err)
+	}
+	got, err := other.GetRecord(ctx, mb, fid, 1)
+	if err != nil || len(got.Flags) != 2 {
+		t.Fatalf("stale helper overwrote flags: %+v %v", got, err)
+	}
+	if _, err := other.Remove(ctx, mb, fid, 1, "test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recoverMutation(ctx, mb, delayed, prepared); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.GetRecord(ctx, mb, fid, 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale helper resurrected message: %v", err)
+	}
+}
+
+func TestStaleCachedRootCannotRejectNewFolder(t *testing.T) {
+	s, mb := newStore(t)
+	ctx := context.Background()
+	if _, err := s.GetRoot(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	other := New(s.pool(ctx, mb))
+	folder, err := other.CreateFolder(ctx, mb, "new elsewhere", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(ctx, mb, folder.ID, rec(1, ""), nil); err != nil {
+		t.Fatalf("stale root rejected new folder: %v", err)
+	}
+}

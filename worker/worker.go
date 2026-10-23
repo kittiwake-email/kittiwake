@@ -435,6 +435,14 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 			if live {
 				return fmt.Errorf("retention entry still indexed: %s", e.MessageID)
 			}
+			// A long batch must observe holds established after it started.
+			v, err := w.ids.GetMailbox(ctx, mb)
+			if err != nil && !errors.Is(err, identity.ErrNotFound) {
+				return err
+			}
+			if err == nil && (v.Value.Hold != nil || (v.Value.Released != nil && w.Now().Sub(*v.Value.Released) < w.cfg.PostHoldGrace)) {
+				return nil
+			}
 			if _, err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
 				return err
 			}
@@ -649,13 +657,10 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		}
 		return inRetention(i.StorageID, i.Mailbox, i.Message)
 	}
-	var orphans []message.Info
+	touched := map[uuid.UUID]bool{}
+	removed := 0
 	err := w.msgs.List(ctx, func(i message.Info) error {
 		if i.Created.After(cutoff) {
-			return nil
-		}
-		if i.RawOnly {
-			orphans = append(orphans, i)
 			return nil
 		}
 		keep, err := protected(i)
@@ -665,32 +670,31 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		if keep {
 			return nil
 		}
-		orphans = append(orphans, i)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	touched := map[uuid.UUID]bool{}
-	for _, o := range orphans {
-		keep, err := protected(o)
+		// Revalidate immediately before deletion without retaining a pool-sized
+		// candidate list. A transient lookup failure aborts the sweep.
+		keep, err = protected(i)
 		if err != nil {
 			return err
 		}
 		if keep {
-			continue
+			return nil
 		}
-		if _, err := w.deleteMessage(storage.WithID(ctx, o.StorageID), o.Mailbox, o.Message); err != nil {
+		if _, err := w.deleteMessage(storage.WithID(ctx, i.StorageID), i.Mailbox, i.Message); err != nil {
 			return err
 		}
-		touched[o.Mailbox] = true
+		touched[i.Mailbox] = true
+		removed++
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	for mb := range touched {
 		if _, err := w.ids.GetMailbox(ctx, mb); err == nil {
 			_, _ = w.queue.Enqueue(ctx, TaskRecalcQuota, mailboxPayload{Mailbox: mb}, time.Time{})
 		}
 	}
-	w.log.Info("orphan sweep", slog.Int("removed", len(orphans)), slog.Int("mailboxes_recalculated", len(touched)))
+	w.log.Info("orphan sweep", slog.Int("removed", removed), slog.Int("mailboxes_recalculated", len(touched)))
 	// Full dangling-reference reconciliation runs only with the infrequent sweep.
 	return w.atts.List(ctx, func(cid int64, hash string) error { _, err := w.collectAttachment(ctx, cid, hash, true); return err })
 }

@@ -46,11 +46,7 @@ func (io *stageIO) Write(ctx context.Context, oid string, tx *rados.WriteTx) (ui
 	defer io.stage.mu.Unlock()
 	w := io.stage.writes[oid]
 	if w == nil {
-		st, err := io.IOContext.Stat(ctx, oid)
-		if err != nil && !errors.Is(err, rados.ErrNotFound) {
-			return 0, err
-		}
-		w = &mutationWrite{OID: oid, Version: st.Version, Exists: err == nil, Tx: rados.NewWriteTx()}
+		w = &mutationWrite{OID: oid, Tx: rados.NewWriteTx()}
 		io.stage.writes[oid] = w
 	}
 	w.Tx.Append(tx)
@@ -60,9 +56,7 @@ func (io *stageIO) Delete(ctx context.Context, oid string) error {
 	if _, err := io.Write(ctx, oid, rados.NewWriteTx().OmapClear().WriteFull(nil)); err != nil {
 		return err
 	}
-	io.stage.mu.Lock()
 	// Keep an empty tombstone object so a delayed CreateExclusive cannot resurrect it.
-	io.stage.mu.Unlock()
 	return nil
 }
 
@@ -74,14 +68,31 @@ func (s *Store) mutate(ctx context.Context, mb uuid.UUID, fn func(context.Contex
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		vr, err := s.getRoot(ctx, mb)
-		if err != nil {
-			return err
+		var vr versionedRoot
+		var err error
+		cached := false
+		if c, _, ok := s.cached(mb); attempt == 0 && ok {
+			vr, cached = c, true
+		} else {
+			vr, err = s.getRoot(ctx, mb)
+			if err != nil {
+				return err
+			}
 		}
 		st := &staged{base: vr, root: vr.root, writes: map[string]*mutationWrite{}}
 		st.root.Folders = cloneFolders(vr.root.Folders)
 		st.root.pending = nil
 		if err := fn(context.WithValue(ctx, stageKey{}, st)); err != nil {
+			// A stale cache must not produce a false quota/folder rejection.
+			if cached {
+				fresh, readErr := s.getRoot(ctx, mb)
+				if readErr != nil {
+					return readErr
+				}
+				if fresh.version != vr.version {
+					continue
+				}
+			}
 			return err
 		}
 		st.root.Version = rootVersion
@@ -93,7 +104,44 @@ func (s *Store) mutate(ctx context.Context, mb uuid.UUID, fn func(context.Contex
 		for _, w := range st.writes {
 			m.Writes = append(m.Writes, w)
 		}
+		// Target versions can be read concurrently. The root CAS rejects the
+		// entire plan if another writer changed any index state meanwhile.
+		var versions parallel
+		for _, w := range m.Writes {
+			versions.go_(func() error {
+				stat, err := s.pool(ctx, mb).Stat(ctx, w.OID)
+				if err != nil && !errors.Is(err, rados.ErrNotFound) {
+					return err
+				}
+				w.Version, w.Exists = stat.Version, err == nil
+				return nil
+			})
+		}
+		if err := versions.wait(); err != nil {
+			return err
+		}
 		sort.Slice(m.Writes, func(i, j int) bool { return m.Writes[i].OID < m.Writes[j].OID })
+		// Root-only mutations need no recovery journal: data and changes fit in
+		// a single atomic transaction.
+		if len(m.Writes) == 0 {
+			tx, err := mutationFinalTx(vr.version, st.root, m.Changes)
+			if err != nil {
+				return err
+			}
+			ver, err := s.pool(ctx, mb).Write(ctx, rootOID(mb), tx)
+			if errors.Is(err, rados.ErrVersionMismatch) {
+				if err := backoff(ctx, attempt+1); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			s.cacheRoot(mb, versionedRoot{root: st.root, version: ver})
+			s.maybeTrim(ctx, mb, st.root.ModSeq)
+			return nil
+		}
 		prepared := vr.root
 		prepared.Version = rootVersion
 		prepared.Mutation = m
@@ -101,7 +149,7 @@ func (s *Store) mutate(ctx context.Context, mb uuid.UUID, fn func(context.Contex
 		if err != nil {
 			return err
 		}
-		_, err = s.pool(ctx, mb).Write(ctx, rootOID(mb), rados.NewWriteTx().AssertVersion(vr.version).WriteFull(data))
+		preparedVersion, err := s.pool(ctx, mb).Write(ctx, rootOID(mb), rados.NewWriteTx().AssertVersion(vr.version).WriteFull(data))
 		if errors.Is(err, rados.ErrVersionMismatch) {
 			if err := backoff(ctx, attempt+1); err != nil {
 				return err
@@ -112,7 +160,7 @@ func (s *Store) mutate(ctx context.Context, mb uuid.UUID, fn func(context.Contex
 			return fmt.Errorf("%w: prepare: %v", ErrPending, err)
 		}
 		s.invalidateRoot(mb)
-		if err := s.recoverMutation(ctx, mb, m); err != nil {
+		if err := s.recoverMutation(ctx, mb, m, versionedRoot{root: prepared, version: preparedVersion}); err != nil {
 			return fmt.Errorf("%w: %v", ErrPending, err)
 		}
 		s.maybeTrim(ctx, mb, st.root.ModSeq)
@@ -121,7 +169,7 @@ func (s *Store) mutate(ctx context.Context, mb uuid.UUID, fn func(context.Contex
 	return ErrConflict
 }
 
-func (s *Store) recoverMutation(ctx context.Context, mb uuid.UUID, m *mutation) error {
+func (s *Store) recoverMutation(ctx context.Context, mb uuid.UUID, m *mutation, known ...versionedRoot) error {
 	io := s.pool(ctx, mb)
 	var pg parallel
 	for _, w := range m.Writes {
@@ -161,9 +209,15 @@ func (s *Store) recoverMutation(ctx context.Context, mb uuid.UUID, m *mutation) 
 		return err
 	}
 	for {
-		vr, err := s.readRoot(ctx, mb)
-		if err != nil {
-			return err
+		var vr versionedRoot
+		var err error
+		if len(known) > 0 {
+			vr, known = known[0], nil
+		} else {
+			vr, err = s.readRoot(ctx, mb)
+			if err != nil {
+				return err
+			}
 		}
 		if vr.root.Mutation == nil || vr.root.Mutation.ID != m.ID {
 			return nil
@@ -176,21 +230,9 @@ func (s *Store) recoverMutation(ctx context.Context, mb uuid.UUID, m *mutation) 
 		if vr.root.Horizon > final.Horizon {
 			final.Horizon = vr.root.Horizon
 		}
-		data, err := json.Marshal(final)
+		tx, err := mutationFinalTx(vr.version, final, m.Changes)
 		if err != nil {
 			return err
-		}
-		tx := rados.NewWriteTx().AssertVersion(vr.version).WriteFull(data)
-		kv := map[string][]byte{}
-		for _, c := range m.Changes {
-			b, err := json.Marshal(c)
-			if err != nil {
-				return err
-			}
-			kv[changeKey(c.ModSeq)] = b
-		}
-		if len(kv) > 0 {
-			tx.OmapSet(kv)
 		}
 		ver, err := io.Write(ctx, rootOID(mb), tx)
 		if errors.Is(err, rados.ErrVersionMismatch) {
@@ -202,6 +244,26 @@ func (s *Store) recoverMutation(ctx context.Context, mb uuid.UUID, m *mutation) 
 		s.cacheRoot(mb, versionedRoot{root: final, version: ver})
 		return nil
 	}
+}
+
+func mutationFinalTx(version uint64, root Root, changes []Change) (*rados.WriteTx, error) {
+	data, err := json.Marshal(root)
+	if err != nil {
+		return nil, err
+	}
+	tx := rados.NewWriteTx().AssertVersion(version).WriteFull(data)
+	kv := map[string][]byte{}
+	for _, c := range changes {
+		b, err := json.Marshal(c)
+		if err != nil {
+			return nil, err
+		}
+		kv[changeKey(c.ModSeq)] = b
+	}
+	if len(kv) > 0 {
+		tx.OmapSet(kv)
+	}
+	return tx, nil
 }
 
 func (s *Store) CreateFolder(ctx context.Context, mb uuid.UUID, name, role string) (out *Folder, err error) {

@@ -130,14 +130,11 @@ These are settled. Do not design around them.
   Placement is random among connected storage entries open for placement; an unreachable
   storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
   every storage; a removal task carries the storage id.
-- **Every multi-object write undoes itself; sweeps are insurance.** A write that touches
-  several RADOS objects has one commit point (the folder record) and compensates everything it
-  wrote when it fails before it (`index.unappend`, `delivery.undoStore`). Sweeps (attachment
-  GC with dangling-reference checks and version-conditional deletes, weekly orphan sweep incl.
-  lone `.raw` objects, hourly upload sweep, audit purge) only catch crashes; never make a new
-  write path depend on a sweep, and never add a sweep that walks a pool more often than the
-  orphan sweep. Tests inject failures with a wrapping `rados.IOContext` (see
-  `service/delivery/undo_test.go`).
+- **Multi-object index mutations use a durable root journal.** Root format 2 prepares a
+  commit decision with CAS, replays version-fenced target writes, then atomically publishes
+  counters/modseq/change log. Private delivery data is undone only before acceptance;
+  ErrPending must preserve it for recovery. Readers help pending mutations complete. Sweeps
+  are crash insurance. Never deploy alongside old writers; see README rollout instructions.
 - **Admin API is the only way identity data is created/changed.** `kittiwake admin` does only
   bootstrap/token; operators use `kittiwake-admin` (client/admin). Do not add admin features
   to cmd/kittiwake; add them to the API + spec + client.
@@ -163,16 +160,18 @@ These are settled. Do not design around them.
   parts under a threshold stay inline as Part.Data.
 - **Attachments** are deduplicated per Ceph cluster by content hash with reference counting
   (omap keys per referencing message on the hash-named object); only a worker deletes orphans.
-- **Delivery order:** attachments, message JSON, raw, index entry + change log (commit
-  point), refs. LMTP acks only after the index write.
+- **Delivery order:** private message/attachment data, prepared root journal, fenced target
+  writes, final root + change log. LMTP acks only after completion. Accepted journal failures
+  return ErrPending and retain data for recovery.
 - **Mailbox index lives in RADOS omap:** root object = small JSON only (folders, counters,
-  modseq, usage; NO omap). Folder records in shards of 65536 UIDs (`<mb>/<fid>`, `<mb>/<fid>.<n>`),
+  modseq, usage, pending journal; bounded change-log omap). Folder records in shards of 65536 UIDs (`<mb>/<fid>`, `<mb>/<fid>.<n>`),
   keys = inverted UID so ascending iteration is newest-first (`ListFolderDesc` is the cheap
   path; `ListFolder` ascending reads whole shards). Compact Record with short JSON tags.
-  Message id → location via the message object's `loc` xattr (`message.Store.Location`).
+  Message id → location via `loc/<uuid>` in hashed thread shards; the message `loc`
+  xattr is a legacy fallback. Removal leaves a location tombstone.
   Thread/Message-ID maps sharded over `<mb>/t.<xx>` (256). Keep omaps bounded.
 - **Change tracking:** every mutation bumps `modseq` and appends to the bounded change log
-  `<mailbox>/changes`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.
+  root omap `c/<modseq>`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.
 - **Workers** consume the task queue in MariaDB (`SELECT ... FOR UPDATE SKIP LOCKED`,
   lease, run-after, retry with backoff, dead-letter state; the memory backend keeps the same
   queue as omap entries). One worker holds a lease row as scheduler for periodic tasks. Reconciliation reports/repairs, never deletes

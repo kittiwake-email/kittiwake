@@ -1,6 +1,9 @@
 package rados
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // WriteTx is an atomic write transaction on a single object. Steps are
 // applied in order; if any assertion fails, nothing is applied.
@@ -129,6 +132,11 @@ func (t *WriteTx) UnmarshalJSON(b []byte) error {
 	var in []JournalStep
 	if err := json.Unmarshal(b, &in); err != nil {
 		return err
+	}
+	for _, s := range in {
+		if s.Kind < int(txCreateExclusive) || s.Kind > int(txRemove) {
+			return fmt.Errorf("rados: unknown journal operation %d", s.Kind)
+		}
 	}
 	t.steps = nil
 	for _, s := range in {

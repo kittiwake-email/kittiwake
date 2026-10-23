@@ -546,3 +546,30 @@ func TestExportMailboxTask(t *testing.T) {
 		t.Fatalf("result: %+v %v", res, err)
 	}
 }
+
+type retentionReadFailure struct{ rados.IOContext }
+
+func (p retentionReadFailure) OmapList(ctx context.Context, oid, prefix, after string, max int) ([]rados.KV, bool, error) {
+	if strings.HasSuffix(oid, "/retention") {
+		return nil, false, errors.New("injected retention read failure")
+	}
+	return p.IOContext.OmapList(ctx, oid, prefix, after, max)
+}
+
+func TestOrphanSweepPreservesDataOnRetentionReadFailure(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := f.st.Messages.Put(ctx, f.mb.ID, id, []byte("{}"), "missing/1"); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(2 * time.Hour)
+	io, _ := f.c.Pool("index")
+	f.w.idx = index.New(retentionReadFailure{io})
+	if err := f.w.orphanSweep(ctx); err == nil {
+		t.Fatal("retention failure ignored")
+	}
+	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, id); err != nil {
+		t.Fatalf("message removed: %v", err)
+	}
+}

@@ -50,6 +50,10 @@ func (s *Server) serveUpload(w http.ResponseWriter, r *http.Request, rest string
 		http.Error(w, "account not found", http.StatusNotFound)
 		return
 	}
+	if err := s.mb.CheckWriteAccess(r.Context(), acct); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadSize))
 	if err != nil {
 		http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
@@ -133,6 +137,9 @@ var errBlobNotFound = errors.New("jmap: blob not found")
 func (s *Server) blob(ctx context.Context, acct uuid.UUID, blobID string) ([]byte, string, error) {
 	switch {
 	case strings.HasPrefix(blobID, "u-"):
+		if err := s.mb.CheckAccess(ctx, acct); err != nil {
+			return nil, "", err
+		}
 		data, typ, err := s.cfg.Uploads.GetUpload(ctx, acct, blobID)
 		if err != nil {
 			if errors.Is(err, message.ErrNotFound) {

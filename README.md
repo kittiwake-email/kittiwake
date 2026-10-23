@@ -30,15 +30,13 @@ request has to read a whole folder. Concretely:
   independently; all state is in RADOS
 
 **Storage is cheap, I/O is expensive.** Every RADOS round trip is counted. The write path
-for one delivered message is three sequential round trips on the critical path: the root
-transaction (UID, modseq, counters and the change-log entry in one write), the message
-object written concurrently with the thread-map entries, and the folder index entry. Reads
-that would repeat per message (domain, account, alias, mailbox, root for the quota check)
-are cached per process for a few seconds (the `cache` section; see "Caches" below). Audit
-records are batched into one omap
-write per object per second. Notifications and search events are off the critical path, and
-search events are not written at all until a search backend consumes them. Protocol
-adapters apply what they just wrote themselves instead of reading it back.
+for a delivery includes private message/attachment writes, concurrent target-version reads,
+a root compare-and-set that prepares a recoverable mutation, concurrent index target writes,
+and a final root transaction that publishes counters, modseq and changes together. A cached
+root can avoid the initial read; a conflict retries the plan against current state. Changes
+confined to the root use one atomic write. This adds durable recovery work compared with the
+old non-transactional path; current measurements are in the lab notes. Identity lookups are
+cached for a few seconds, audit writes are batched, and notifications run off the critical path.
 
 Measure on the lab cluster (see the `kittiwake-labs` repository) before and after storage
 changes. Reference
@@ -394,6 +392,11 @@ never race on a counter. A worker deletes an attachment only when its reference 
 and the object has not been touched for a grace period. Creation uses RADOS exclusive-create
 so two simultaneous first uploads of the same attachment resolve cleanly.
 
+New message documents also store wire MIME headers, encoded sizes and line counts. IMAP
+ENVELOPE, BODYSTRUCTURE and top-level header FETCH use these without reading attachment
+payloads. Legacy documents fall back to reconstruction; body-part FETCH still reconstructs
+full MIME. A RawStored marker avoids probing missing raw objects for ordinary new messages.
+
 ## Crash safety
 
 Each message object carries its mailbox UUID, creation time and location in xattrs so an
@@ -408,11 +411,11 @@ Mail data:
   `<folder-id>/<uid>`); kept original bytes, only for signed mail:
   `<mailbox-uuid>/<message-uuid>.raw`
 - Attachment: `<sha256-hex>` in the attachments pool
-- Mailbox root: `<mailbox-uuid>` in the index pool (folders, counters, modseq; **no omap**)
+- Mailbox root: `<mailbox-uuid>` in the index pool (folders, counters, modseq, pending mutation; bounded change-log omap)
 - Folder index shards: `<mailbox-uuid>/<folder-id>` for UIDs below 65536, then
   `<mailbox-uuid>/<folder-id>.<n>` per further block of 65536 UIDs
 - Thread and Message-ID maps: `<mailbox-uuid>/t.<xx>`, 256 shards by hash of the key
-- Change log: `<mailbox-uuid>/changes` in the index pool, omap keyed by modseq (bounded)
+- Change log: `c/<modseq>` omap keys on the mailbox root (bounded)
 - Retention set (expunged and trashed messages waiting for purge): `<mailbox-uuid>/retention`
   in the index pool, omap keyed by purge-at timestamp
 - Audit: `<mailbox-uuid>/audit/<YYYY-MM-DD>` and `audit/admin/<YYYY-MM-DD>` in the index pool
@@ -422,7 +425,8 @@ backend keeps them in the index pool: `sessions/<account-id>`, `keys/jwt`,
 `totp/<account-id>`, `queue/<task-type>`).
 
 Per message this is **one object plus its deduplicated attachments**, one omap entry in its
-folder shard and one in its thread shard. Nothing else grows with the message count.
+folder shard, thread membership, and an authoritative location entry in a hashed thread shard.
+Location tombstones survive expunge to prevent stale message xattrs from reviving mail.
 
 ## Mailbox index
 
@@ -435,15 +439,17 @@ listing), laid out so that no object's omap grows beyond a bounded size:
   list (folders now, calendars and address books later), per-folder UIDVALIDITY and UIDNEXT
   counters, the mailbox-wide `modseq` counter and quota usage totals, advanced with atomic
   RADOS write transactions so concurrent processes never hand out the same UID or modseq. It
-  carries no per-message omap entries.
+  carries a bounded change-log omap and, while a mutation is pending, its recovery journal.
 - **Folder index shards.** Each folder's records live in omap objects of at most 65536 UIDs.
   Keys are the inverted UID, so plain ascending omap iteration yields the newest message
   first: the first page of a folder is a single read of a single object, however large the
   folder. Values are compact (message uuid, thread id, flags, size, dates, modseq, subject,
   from, has-attachments; ~150 bytes). A full-folder walk (IMAP SELECT, expunge, recalc)
-  reads shards of at most 65536 entries each.
-- **Message lookup by id** (JMAP ids are message uuids) reads the `loc` xattr of the message
-  object; moves update it. No per-message map on the root.
+  uses descending cursor pages and sorts UIDs where ascending order is required. The legacy
+  ascending ListFolder API still reads whole shards; do not use it for paginated scans.
+- **Message lookup by id** uses `loc/<uuid>` entries in the hashed thread-map objects.
+  Moves update them within the recoverable mutation; removals write a tombstone. The message
+  object's `loc` xattr is only a compatibility hint for legacy messages.
 - **Thread and Message-ID maps** are sharded over 256 objects per mailbox by key hash:
   `m/<message-id>` → thread id (for threading new deliveries) and `t/<thread-id>/<uuid>` →
   location (JMAP `Thread/get`).
@@ -456,15 +462,28 @@ listing), laid out so that no object's omap grows beyond a bounded size:
 **Change tracking.** JMAP's `/changes` methods (and IMAP CONDSTORE/QRESYNC later) need every
 mailbox to have a monotonically increasing modification sequence and a change log. The
 mailbox root object keeps the `modseq` counter, each folder index record stores the modseq of
-its last change, and a bounded change log (`<mailbox-uuid>/changes`, omap keyed by modseq)
+its last change, and a bounded change log (root omap keys `c/<modseq>`)
 records created/updated/destroyed ids. Clients with a state older than the log's horizon get
 `cannotCalculateChanges` and resync.
 
-**Delivery writes**, in order: attachments (idempotent, deduplicated), the root transaction
-that allocates UID and modseq and updates counters, the message object at its final
-location, the folder index entry (the commit point), the thread map entries, the change log.
-A crash before the index entry leaves an orphan object for the sweep but never a dangling
-entry.
+**Delivery commit and recovery.** The message and attachment data are written before the
+root CAS accepts a mutation journal. Before acceptance, failures undo private data. Once
+accepted, the journal is a durable commit decision: failures return a pending error and
+must preserve message data. Any subsequent reader or writer can complete version-fenced
+folder, thread, location and retention writes. Only then does a root CAS publish counters,
+modseq and changes atomically. Delayed helpers cannot overwrite newer mutations. Empty
+index objects are retained as tombstones where deletion could permit stale exclusive creates.
+
+**Root format 2 rollout.** Stop all old writers and workers before starting this version;
+old binaries do not understand pending journals. Back up the data and validate recovery in
+the lab first. Roots upgrade lazily on mutation. Do not roll back to an old writer after
+format-2 writes. No automatic downgrade or mixed-version deployment is supported.
+
+Reads are not cross-object snapshots: a record read concurrent with a mutation may see newer
+record data before its root state is published. Synchronization clients must advance only
+to the published root/change-log state and process subsequent changes. Reading the root
+helps complete pending mutations; recovery also wakes watchers. Notifications are best effort,
+with protocol polling as fallback.
 
 Limitations accepted for now: no cross-mailbox queries, and search is limited to header
 matching over the index until the full-text search component exists.
@@ -582,21 +601,15 @@ The `worker` mode executes background tasks:
 - Identity reconciliation (repair domain/mailbox/account listings)
 - Search indexing events (no-op until a backend is configured)
 
-**No object outlives its purpose.** Every write that touches more than one RADOS object has
-a single commit point (the folder index record) and undoes itself when it fails before that
-point: a delivery or import that cannot write its message object, raw object or attachment
-takes back the root counters and change-log entry, the thread membership, the message
-objects and the attachment references, so a failed delivery leaves nothing behind. Deleting a
-mailbox removes its messages, raw objects, retention set, index objects, uploads and daily
-audit objects. What only a crash in that window can leave behind is caught by the sweeps,
-each written so that it never walks more than it has to:
+**Recovery and cleanup.** Multi-object index mutations use the durable root journal described
+above. Private message data is undone only before journal acceptance; pending mutations
+are completed, not rolled back. Mailbox removal deletes message, index, upload and audit data.
+Sweeps provide crash cleanup rather than committing normal writes:
 
-- **Attachment GC** (daily) lists the attachment pool, skips objects touched within the
-  grace period, verifies that every reference of the rest points at an existing message
-  (a reference from a delivery that died after the attachment write would otherwise pin
-  the object forever), drops the dangling ones and deletes objects without references. The
-  delete is conditional on the object version it examined, so a reference added by a
-  concurrent delivery is never lost to the collector.
+- **Attachment GC** (daily) walks 256 candidate shards populated before reference removal,
+  rather than every live attachment. It checks age and existence of references and uses
+  version-fenced deletion. Weekly reconciliation walks attachments to remove dangling
+  references and discover crash leftovers. Metadata reads do not enumerate references.
 - **Orphan sweep** (weekly by default; one stat per message object, so it is the only
   sweep that scales with the total message count) removes message documents without an
   index or retention entry and `.raw` objects without a document, once they are older than

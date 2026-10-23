@@ -70,6 +70,7 @@ func newFixture(t *testing.T) *fixture {
 	adm.Now = now
 	msgs, atts := message.New(msgp), attach.New(attp)
 	f.del = delivery.New(f.ids, f.idx, msgs, atts, q, aud, log, delivery.Config{})
+	f.del.Now = func() time.Time { return f.now }
 	exp := export.New(f.ids, f.idx, msgs, atts, auditStore, f.del, aud, log)
 	dir := t.TempDir()
 	srv := rest.New(rest.Config{Realm: "test", DefaultQuota: identity.QuotaLimits{HardBytes: 1 << 30}, Identity: f.ids, Export: exp, ExportDir: dir}, authSvc, adm, auditStore, q, log)

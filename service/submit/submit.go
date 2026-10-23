@@ -304,17 +304,11 @@ func (s *Service) Send(ctx context.Context, req Request) (Result, error) {
 		slog.String("mailbox", req.MailboxID.String()), slog.String("account", a.Username), slog.Int("bytes", len(outgoing)))
 
 	if req.SaveToSent == nil || *req.SaveToSent {
-		root, err := s.idx.EnsureRoot(ctx, req.MailboxID)
+		d, err := s.del.SaveSent(ctx, req.MailboxID, req.Raw, now)
 		if err != nil {
-			return res, nil // sent; the copy is best effort
-		}
-		if sent := root.FolderByRole(index.RoleSent); sent != nil {
-			d, err := s.del.Import(ctx, req.MailboxID, sent.ID, req.Raw, []string{index.FlagSeen}, now)
-			if err != nil {
-				s.log.WarnContext(ctx, "sent copy failed", slog.String("mailbox", req.MailboxID.String()), slog.String("error", err.Error()))
-			} else {
-				res.SentCopy = &d
-			}
+			s.log.WarnContext(ctx, "sent copy failed", slog.String("mailbox", req.MailboxID.String()), slog.String("error", err.Error()))
+		} else {
+			res.SentCopy = &d
 		}
 	}
 	return res, nil

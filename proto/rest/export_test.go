@@ -47,6 +47,7 @@ func TestExportEndpoints(t *testing.T) {
 	msgs, atts := message.New(msgp), attach.New(attp)
 	q := queue.New(idxp)
 	del := delivery.New(f.ids, idx, msgs, atts, q, aud, log, delivery.Config{})
+	del.Now = func() time.Time { return f.now }
 	exp := export.New(f.ids, idx, msgs, atts, auditStore, del, aud, log)
 	dir := t.TempDir()
 	f.srv.cfg.Export, f.srv.cfg.ExportDir, f.srv.queue = exp, dir, q

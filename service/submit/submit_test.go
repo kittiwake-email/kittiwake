@@ -206,3 +206,20 @@ func TestStripHeader(t *testing.T) {
 		t.Fatal("no header block")
 	}
 }
+
+func TestSendOnlySavesSentButCannotImport(t *testing.T) {
+	f := newFixture(t)
+	a := actor.From(f.user)
+	a.Roles = []string{identity.RoleSend}
+	ctx := actor.With(context.Background(), a)
+	res, err := f.svc.Send(ctx, Request{MailboxID: f.mb.ID, Raw: []byte(outgoing)})
+	if err != nil || res.SentCopy == nil {
+		t.Fatalf("send-only Sent copy: %+v %v", res, err)
+	}
+	if _, err := f.svc.del.Import(ctx, f.mb.ID, res.SentCopy.FolderID, []byte(outgoing), nil, time.Time{}); !errors.Is(err, delivery.ErrForbidden) {
+		t.Fatalf("send-only import: %v", err)
+	}
+	if _, err := f.svc.del.SaveSent(ctx, uuid.New(), []byte(outgoing), time.Time{}); !errors.Is(err, delivery.ErrForbidden) {
+		t.Fatalf("cross-mailbox Sent copy: %v", err)
+	}
+}

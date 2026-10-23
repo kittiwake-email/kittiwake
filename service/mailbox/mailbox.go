@@ -126,6 +126,12 @@ func (s *Service) CheckAccess(ctx context.Context, mb uuid.UUID) error {
 	return err
 }
 
+// CheckWriteAccess validates upload permission, mailbox state and legal hold.
+func (s *Service) CheckWriteAccess(ctx context.Context, mb uuid.UUID) error {
+	_, err := s.authorize(ctx, mb, identity.RoleWrite, true)
+	return err
+}
+
 // Root returns the mailbox root (folders, counters, modseq).
 func (s *Service) Root(ctx context.Context, mb uuid.UUID) (index.Root, error) {
 	if _, err := s.authorize(ctx, mb, identity.RoleRead, false); err != nil {
