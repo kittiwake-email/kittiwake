@@ -74,8 +74,8 @@ func (d *DB) Claim(ctx context.Context, typ, worker string, max int, lease time.
 		until := now.Add(lease)
 		for i := range tasks {
 			tasks[i].Attempts++
-			tasks[i].LeaseKey = tasks[i].ID
-			if _, err := tx.ExecContext(ctx, "UPDATE tasks SET state = 'leased', attempts = ?, lease_worker = ?, lease_until = ? WHERE id = ?", tasks[i].Attempts, worker, until, tasks[i].ID); err != nil {
+			tasks[i].LeaseKey = uuid.NewString()
+			if _, err := tx.ExecContext(ctx, "UPDATE tasks SET state = 'leased', attempts = ?, lease_worker = ?, lease_until = ?, lease_token = ? WHERE id = ?", tasks[i].Attempts, worker, until, tasks[i].LeaseKey, tasks[i].ID); err != nil {
 				return err
 			}
 		}
@@ -87,41 +87,44 @@ func (d *DB) Claim(ctx context.Context, typ, worker string, max int, lease time.
 	return tasks, nil
 }
 
-func (d *DB) Complete(ctx context.Context, t queue.Task) error {
-	_, err := d.exec(ctx, "DELETE FROM tasks WHERE id = ? AND state = 'leased'", t.ID)
-	return err
-}
-
-func (d *DB) Fail(ctx context.Context, t queue.Task, cause error) (bool, error) {
-	now := d.Now().UTC()
-	dead := t.Attempts >= d.MaxAttempts
-	if dead {
-		_, err := d.exec(ctx, "UPDATE tasks SET state = 'dead', last_error = ?, lease_worker = NULL, lease_until = NULL WHERE id = ?", cause.Error(), t.ID)
-		return true, err
-	}
-	_, err := d.exec(ctx, "UPDATE tasks SET state = 'pending', last_error = ?, run_after = ?, lease_worker = NULL, lease_until = NULL WHERE id = ?", cause.Error(), now.Add(d.Backoff(t.Attempts)), t.ID)
-	return false, err
-}
-
-// Extend renews the lease while the task is still leased; zero rows
-// means the lease expired and Claim handed the task to another worker.
-func (d *DB) Extend(ctx context.Context, t *queue.Task, lease time.Duration) error {
-	now := d.Now().UTC()
-	res, err := d.exec(ctx, "UPDATE tasks SET lease_until = ? WHERE id = ? AND state = 'leased' AND lease_until > ?", now.Add(lease), t.ID, now)
+// leasedExec fences every state transition to this claim, including after takeover.
+func (d *DB) leasedExec(ctx context.Context, t queue.Task, statement string, args ...any) error {
+	args = append(args, t.ID, t.LeaseKey, d.Now().UTC())
+	res, err := d.exec(ctx, statement+" WHERE id = ? AND state = 'leased' AND lease_token = ? AND lease_until > ?", args...)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return queue.ErrLeaseLost
 	}
 	return nil
 }
 
-// Release returns a claimed task to pending, due now, without counting
-// a failure.
-func (d *DB) Release(ctx context.Context, t queue.Task) error {
-	_, err := d.exec(ctx, "UPDATE tasks SET state = 'pending', run_after = ?, lease_worker = NULL, lease_until = NULL WHERE id = ? AND state = 'leased'", d.Now().UTC(), t.ID)
+func (d *DB) Complete(ctx context.Context, t queue.Task) error {
+	return d.leasedExec(ctx, t, "DELETE FROM tasks")
+}
+func (d *DB) Fail(ctx context.Context, t queue.Task, cause error) (bool, error) {
+	dead := t.Attempts >= d.MaxAttempts
+	if dead {
+		return true, d.leasedExec(ctx, t, "UPDATE tasks SET state = 'dead', last_error = ?, lease_worker = NULL, lease_until = NULL, lease_token = NULL", cause.Error())
+	}
+	return false, d.leasedExec(ctx, t, "UPDATE tasks SET state = 'pending', last_error = ?, run_after = ?, lease_worker = NULL, lease_until = NULL, lease_token = NULL", cause.Error(), d.Now().UTC().Add(d.Backoff(t.Attempts)))
+}
+func (d *DB) Extend(ctx context.Context, t *queue.Task, lease time.Duration) error {
+	// Rotate the token too: even a renewal with the same expiry changes a row.
+	next := uuid.NewString()
+	err := d.leasedExec(ctx, *t, "UPDATE tasks SET lease_until = ?, lease_token = ?", d.Now().UTC().Add(lease), next)
+	if err == nil {
+		t.LeaseKey = next
+	}
 	return err
+}
+func (d *DB) Release(ctx context.Context, t queue.Task) error {
+	return d.leasedExec(ctx, t, "UPDATE tasks SET state = 'pending', run_after = ?, lease_worker = NULL, lease_until = NULL, lease_token = NULL", d.Now().UTC())
 }
 
 func (d *DB) Stats(ctx context.Context, typ string) (queue.Stats, error) {

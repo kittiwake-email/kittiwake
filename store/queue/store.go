@@ -139,7 +139,7 @@ func pendingKey(runAfter time.Time, id string) string {
 	return fmt.Sprintf("pending/%020d/%s", runAfter.Unix(), id)
 }
 func leaseKey(expiry time.Time, id string) string {
-	return fmt.Sprintf("lease/%020d/%s", expiry.Unix(), id)
+	return fmt.Sprintf("lease/%020d/%s", expiry.Unix(), id+"/"+uuid.NewString())
 }
 func deadKey(id string) string { return "dead/" + id }
 
@@ -240,8 +240,7 @@ func (s *Rados) Claim(ctx context.Context, typ, worker string, max int, lease ti
 
 // Complete removes a claimed task.
 func (s *Rados) Complete(ctx context.Context, t Task) error {
-	_, err := s.io.Write(ctx, queueOID(t.Type), rados.NewWriteTx().OmapRemove(t.LeaseKey))
-	return err
+	return s.writeLeased(ctx, t, rados.NewWriteTx().OmapRemove(t.LeaseKey))
 }
 
 // Fail records the error and re-queues with backoff, or dead-letters the
@@ -259,48 +258,53 @@ func (s *Rados) Fail(ctx context.Context, t Task, cause error) (bool, error) {
 		b, _ := json.Marshal(&t)
 		tx.OmapSet(map[string][]byte{pendingKey(t.RunAfter, t.ID): b})
 	}
-	_, err := s.io.Write(ctx, queueOID(t.Type), tx)
+	err := s.writeLeased(ctx, t, tx)
 	return dead, err
 }
 
 // Extend renews the lease: the lease entry moves to a key with the new
 // expiry. A missing entry means the lease expired and was reclaimed.
 func (s *Rados) Extend(ctx context.Context, t *Task, lease time.Duration) error {
-	oid := queueOID(t.Type)
-	cookie := "extend-" + t.ID
+	next := leaseKey(s.Now().UTC().Add(lease), t.ID)
+	b, _ := json.Marshal(t)
+	err := s.writeLeased(ctx, *t, rados.NewWriteTx().OmapRemove(t.LeaseKey).OmapSet(map[string][]byte{next: b}))
+	if err == nil {
+		t.LeaseKey = next
+	}
+	return err
+}
+
+func (s *Rados) Release(ctx context.Context, t Task) error {
+	t.RunAfter = s.Now().UTC()
+	b, _ := json.Marshal(&t)
+	return s.writeLeased(ctx, t, rados.NewWriteTx().OmapRemove(t.LeaseKey).OmapSet(map[string][]byte{pendingKey(t.RunAfter, t.ID): b}))
+}
+
+func (s *Rados) writeLeased(ctx context.Context, t Task, tx *rados.WriteTx) error {
+	oid, cookie := queueOID(t.Type), uuid.NewString()
 	if err := s.io.Lock(ctx, oid, "claim", cookie, 30*time.Second); err != nil {
-		if errors.Is(err, rados.ErrLocked) {
-			return ErrLocked
-		}
 		return err
 	}
 	defer func() { _ = s.io.Unlock(ctx, oid, "claim", cookie) }()
+	var expiry int64
+	if _, err := fmt.Sscanf(t.LeaseKey, "lease/%d/", &expiry); err != nil || !time.Unix(expiry, 0).After(s.Now()) {
+		return ErrLeaseLost
+	}
+	st, err := s.io.Stat(ctx, oid)
+	if err != nil {
+		return err
+	}
 	cur, err := s.io.OmapGet(ctx, oid, []string{t.LeaseKey})
-	if err != nil && !errors.Is(err, rados.ErrNotFound) {
+	if err != nil {
 		return err
 	}
 	if _, ok := cur[t.LeaseKey]; !ok {
 		return ErrLeaseLost
 	}
-	next := leaseKey(s.Now().UTC().Add(lease), t.ID)
-	if next == t.LeaseKey {
-		return nil
+	_, err = s.io.Write(ctx, oid, rados.NewWriteTx().AssertVersion(st.Version).Append(tx))
+	if errors.Is(err, rados.ErrVersionMismatch) {
+		return ErrLocked
 	}
-	b, _ := json.Marshal(t)
-	if _, err := s.io.Write(ctx, oid, rados.NewWriteTx().OmapRemove(t.LeaseKey).OmapSet(map[string][]byte{next: b})); err != nil {
-		return err
-	}
-	t.LeaseKey = next
-	return nil
-}
-
-// Release returns a claimed task to pending, due now.
-func (s *Rados) Release(ctx context.Context, t Task) error {
-	lease := t.LeaseKey
-	t.RunAfter = s.Now().UTC()
-	t.LeaseKey = ""
-	b, _ := json.Marshal(&t)
-	_, err := s.io.Write(ctx, queueOID(t.Type), rados.NewWriteTx().OmapRemove(lease).OmapSet(map[string][]byte{pendingKey(t.RunAfter, t.ID): b}))
 	return err
 }
 

@@ -198,7 +198,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) RunOnce(ctx context.Context) bool {
 	busy := false
 	for _, typ := range AllTypes {
-		tasks, err := w.queue.Claim(ctx, typ, w.ID, 10, w.cfg.LeaseDuration)
+		tasks, err := w.queue.Claim(ctx, typ, w.ID, 1, w.cfg.LeaseDuration)
 		if err != nil {
 			if !errors.Is(err, queue.ErrLocked) && ctx.Err() == nil {
 				w.log.Warn("claim failed", slog.String("type", typ), slog.String("error", err.Error()))
@@ -264,10 +264,10 @@ func (w *Worker) execute(ctx context.Context, task queue.Task) {
 	// Queue bookkeeping must outlive a cancelled run context.
 	qctx, qcancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer qcancel()
+	if lost {
+		return // the task belongs to another worker, even if handle returned success
+	}
 	if err != nil {
-		if lost {
-			return // the task belongs to another worker now
-		}
 		if ctx.Err() != nil {
 			if rerr := w.queue.Release(qctx, task); rerr != nil {
 				w.log.Warn("task release failed", slog.String("type", task.Type), slog.String("id", task.ID), slog.String("error", rerr.Error()))

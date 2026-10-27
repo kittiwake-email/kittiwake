@@ -183,6 +183,18 @@ func testLeaseRenewal(t *testing.T, f Factory) {
 	if err := s.Extend(ctx, &task, time.Minute); !errors.Is(err, queue.ErrLeaseLost) {
 		t.Fatalf("extend after takeover: %v, want ErrLeaseLost", err)
 	}
+	if err := s.Complete(ctx, task); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("stale complete: %v", err)
+	}
+	if _, err := s.Fail(ctx, task, errors.New("stale")); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("stale fail: %v", err)
+	}
+	if err := s.Release(ctx, task); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("stale release: %v", err)
+	}
+	if st, _ := s.Stats(ctx, "remove"); st.Leased != 1 || st.Pending != 0 || st.Dead != 0 {
+		t.Fatalf("takeover corrupted: %+v", st)
+	}
 	// Release: back to pending, due now, attempts kept, no error recorded.
 	_, _ = s.Enqueue(ctx, "release", map[string]string{"mailbox": "c"}, time.Time{})
 	tasks, _ = s.Claim(ctx, "release", "w1", 1, time.Minute)
