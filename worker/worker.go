@@ -754,7 +754,7 @@ func (w *Worker) schedule(ctx context.Context) {
 	if due("purge", w.cfg.PurgeInterval) {
 		n := 0
 		_ = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
-			if _, err := w.queue.Enqueue(ctx, TaskPurgeTrash, mailboxPayload{Mailbox: id}, time.Time{}); err == nil {
+			if err := w.enqueuePeriodic(ctx, TaskPurgeTrash, id.String(), mailboxPayload{Mailbox: id}); err == nil {
 				n++
 			}
 			return nil
@@ -763,15 +763,26 @@ func (w *Worker) schedule(ctx context.Context) {
 	}
 	for _, typ := range []string{TaskAttachmentGC, TaskPurgeAudit} {
 		if due(typ, w.cfg.GCInterval) {
-			_, _ = w.queue.Enqueue(ctx, typ, struct{}{}, time.Time{})
+			_ = w.enqueuePeriodic(ctx, typ, "", struct{}{})
 			w.log.Info("scheduled", slog.String("task", typ))
 		}
 	}
 	if due(TaskOrphanSweep, w.cfg.OrphanSweepInterval) {
-		_, _ = w.queue.Enqueue(ctx, TaskOrphanSweep, struct{}{}, time.Time{})
+		_ = w.enqueuePeriodic(ctx, TaskOrphanSweep, "", struct{}{})
 		w.log.Info("scheduled", slog.String("task", TaskOrphanSweep))
 	}
 	if due(TaskUploadSweep, w.cfg.PurgeInterval) {
-		_, _ = w.queue.Enqueue(ctx, TaskUploadSweep, struct{}{}, time.Time{})
+		_ = w.enqueuePeriodic(ctx, TaskUploadSweep, "", struct{}{})
 	}
+}
+
+// Production queues atomically coalesce periodic ticks across scheduler leaders.
+func (w *Worker) enqueuePeriodic(ctx context.Context, typ, scope string, payload any) error {
+	if q, ok := w.queue.(interface {
+		EnqueuePeriodic(context.Context, string, string, any) error
+	}); ok {
+		return q.EnqueuePeriodic(ctx, typ, scope, payload)
+	}
+	_, err := w.queue.Enqueue(ctx, typ, payload, time.Time{})
+	return err
 }

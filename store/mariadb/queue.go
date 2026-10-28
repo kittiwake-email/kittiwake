@@ -2,6 +2,7 @@ package mariadb
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -110,7 +111,7 @@ func (d *DB) Complete(ctx context.Context, t queue.Task) error {
 func (d *DB) Fail(ctx context.Context, t queue.Task, cause error) (bool, error) {
 	dead := t.Attempts >= d.MaxAttempts
 	if dead {
-		return true, d.leasedExec(ctx, t, "UPDATE tasks SET state = 'dead', last_error = ?, lease_worker = NULL, lease_until = NULL, lease_token = NULL", cause.Error())
+		return true, d.leasedExec(ctx, t, "UPDATE tasks SET state = 'dead', periodic_key = NULL, last_error = ?, lease_worker = NULL, lease_until = NULL, lease_token = NULL", cause.Error())
 	}
 	return false, d.leasedExec(ctx, t, "UPDATE tasks SET state = 'pending', last_error = ?, run_after = ?, lease_worker = NULL, lease_until = NULL, lease_token = NULL", cause.Error(), d.Now().UTC().Add(d.Backoff(t.Attempts)))
 }
@@ -228,3 +229,18 @@ func (d *DB) Due(ctx context.Context, name string, every time.Duration) (bool, e
 }
 
 var _ queue.Store = (*DB)(nil)
+
+// EnqueuePeriodic coalesces repeat scheduler ticks while the same periodic job
+// is pending or leased. It is not suitable for event-triggered work: an event
+// arriving during execution needs a successor, whereas another periodic tick
+// may be skipped. Dead-letter tasks release their key for the next interval.
+func (d *DB) EnqueuePeriodic(ctx context.Context, typ, scope string, payload any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	key := sha256.Sum256([]byte(typ + "\x00" + scope))
+	now := d.Now().UTC()
+	_, err = d.sql.ExecContext(ctx, "INSERT INTO tasks (id,type,state,payload,run_after,attempts,created,periodic_key) VALUES (?,?,'pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), typ, string(b), now, now, key[:])
+	return err
+}

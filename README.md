@@ -389,13 +389,15 @@ Assume an IPv6-only environment. IPv4 is nice to have, not mandatory.
 
 # Storage: Ceph RADOS
 
-Everything is stored in Ceph RADOS objects: not S3/RGW, pure RADOS via librados. Four pools:
+Mail data uses Ceph RADOS directly through librados, with three pools per storage:
 
 - **messages** – parsed message JSON and raw skeletons
 - **attachments** – deduplicated attachment objects
-- **index** – mailbox roots, folder indexes, change logs, audit, sessions, task queues
-- **meta** – identity data (domains, mailboxes, accounts, aliases, tokens), split into RADOS
-  namespaces like RGW's metadata pool
+- **index** – mailbox roots, folder indexes, change logs and mailbox audit
+
+Production identity registries, sessions, task queues and admin audit live in MariaDB.
+The development memory backend also models these registries as RADOS objects; its
+`meta` pool is not an additional production data pool.
 
 ## Message document
 
@@ -664,6 +666,12 @@ configurable (for example `X-Spam-Flag: YES` or `X-Spam: Yes`). User-defined fil
 (Sieve-style) are not in scope for now.
 
 ## Workers and background tasks
+
+The SQL scheduler coalesces periodic tasks by task type and mailbox: a pending or
+leased job prevents another copy from accumulating at the next tick. Dead-letter jobs
+release that key so a later interval can try again. Explicit requests and event tasks
+remain distinct. This bounds duplicate backlog, but periodic mailbox discovery still
+visits every registry row; it is not yet a due-mailbox scheduler.
 
 The `worker` mode executes background tasks:
 
