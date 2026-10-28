@@ -675,8 +675,13 @@ configurable (for example `X-Spam-Flag: YES` or `X-Spam: Yes`). User-defined fil
 The SQL scheduler coalesces periodic tasks by task type and mailbox: a pending or
 leased job prevents another copy from accumulating at the next tick. Dead-letter jobs
 release that key so a later interval can try again. Explicit requests and event tasks
-remain distinct. This bounds duplicate backlog, but periodic mailbox discovery still
-visits every registry row; it is not yet a due-mailbox scheduler.
+remain distinct. Production retention work uses an indexed `mailboxes.purge_after`
+registry: expunge/destroy registers a deadline before accepting the Ceph mutation,
+and completed purges schedule the next retained deadline. A signal arriving while
+a purge is leased remains queued for a successor. Weekly discovery repairs gaps
+across the Ceph/SQL boundary using bounded keyset batches and a durable SQL cursor;
+it does not rescan every mailbox at every hourly tick. The development backend
+retains its simple periodic scheduler.
 
 The `worker` mode executes background tasks:
 

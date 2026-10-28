@@ -408,11 +408,11 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 	if v, err := w.ids.GetMailbox(ctx, mb); err == nil {
 		if v.Value.Hold != nil {
 			w.log.Debug("purge skipped: on hold", slog.String("mailbox", mb.String()))
-			return nil
+			return queue.SchedulePurge(ctx, w.queue, mb, w.Now().Add(w.cfg.PurgeInterval))
 		}
 		if v.Value.Released != nil && w.Now().Sub(*v.Value.Released) < w.cfg.PostHoldGrace {
 			w.log.Debug("purge skipped: post-hold grace", slog.String("mailbox", mb.String()))
-			return nil
+			return queue.SchedulePurge(ctx, w.queue, mb, v.Value.Released.Add(w.cfg.PostHoldGrace))
 		}
 	} else if !errors.Is(err, identity.ErrNotFound) {
 		return err
@@ -444,7 +444,7 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 				return err
 			}
 			if err == nil && (v.Value.Hold != nil || (v.Value.Released != nil && w.Now().Sub(*v.Value.Released) < w.cfg.PostHoldGrace)) {
-				return nil
+				return queue.SchedulePurge(ctx, w.queue, mb, w.Now().Add(w.cfg.PurgeInterval))
 			}
 			if _, err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
 				return err
@@ -467,6 +467,13 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 			detail += " ahead of retention (admin purge)"
 		}
 		w.aud.Log(ctx, auditor.Event{Mailbox: mb, Action: "purge", Detail: detail})
+	}
+	if _, ok := w.queue.(queue.PurgeScheduler); ok {
+		next, err := w.idx.NextRetention(ctx, mb)
+		if err != nil {
+			return err
+		}
+		return queue.SchedulePurge(ctx, w.queue, mb, next)
 	}
 	return nil
 }
@@ -757,7 +764,14 @@ func (w *Worker) schedule(ctx context.Context) {
 		ok, err := w.queue.Due(ctx, name, every)
 		return err == nil && ok
 	}
-	if due("purge", w.cfg.PurgeInterval) {
+	if scheduler, ok := w.queue.(queue.PurgeScheduler); ok {
+		if err := scheduler.ReconcilePurgeSchedule(ctx, w.cfg.ScanBatch, w.cfg.OrphanSweepInterval); err != nil {
+			w.log.Warn("purge discovery failed", slog.String("error", err.Error()))
+		}
+		if _, err := scheduler.EnqueueDuePurges(ctx, w.cfg.ScanBatch); err != nil {
+			w.log.Warn("due purge scheduling failed", slog.String("error", err.Error()))
+		}
+	} else if due("purge", w.cfg.PurgeInterval) {
 		n := 0
 		_ = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
 			if err := w.enqueuePeriodic(ctx, TaskPurgeTrash, id.String(), mailboxPayload{Mailbox: id}); err == nil {

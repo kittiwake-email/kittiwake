@@ -102,3 +102,28 @@ func TestRetentionLegacyAndFutureRanges(t *testing.T) {
 		t.Fatalf("future membership: %v %v", ok, err)
 	}
 }
+
+func TestNextRetentionChecksEveryRange(t *testing.T) {
+	s, mb := newStore(t)
+	ctx := context.Background()
+	root, _ := s.GetRoot(ctx, mb)
+	fid := root.Folders[0].ID
+	if _, err := s.updateRoot(ctx, mb, func(r *Root) error { r.RetentionNext = 65535; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(48 * time.Hour)
+	earlier := later.Add(-24 * time.Hour)
+	for _, at := range []time.Time{later, earlier} {
+		r, err := s.Append(ctx, mb, fid, rec(1, ""), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Remove(ctx, mb, fid, r.UID, "test", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next, err := s.NextRetention(ctx, mb)
+	if err != nil || !next.Equal(earlier) {
+		t.Fatalf("next: %v %v", next, err)
+	}
+}

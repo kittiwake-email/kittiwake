@@ -587,7 +587,13 @@ func containsUID(list []uint32, u uint32) bool {
 }
 
 func (s *Service) remove(ctx context.Context, mb uuid.UUID, folderID string, uid uint32, reason string) error {
-	entry, err := s.idx.Remove(ctx, mb, folderID, uid, reason, s.Now().Add(s.cfg.TrashRetention))
+	at := s.Now().Add(s.cfg.TrashRetention)
+	// Register before accepting the Ceph mutation: a crash leaves at worst an
+	// unnecessary check. Weekly bounded discovery repairs cross-store gaps.
+	if err := queue.SchedulePurge(ctx, s.queue, mb, at); err != nil {
+		return err
+	}
+	entry, err := s.idx.Remove(ctx, mb, folderID, uid, reason, at)
 	if err != nil {
 		return mapIndexErr(err)
 	}

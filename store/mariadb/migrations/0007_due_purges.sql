@@ -1,0 +1,8 @@
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS purge_after DATETIME(6) NULL;
+CREATE INDEX IF NOT EXISTS ix_mailboxes_purge ON mailboxes (purge_after, id);
+CREATE TABLE IF NOT EXISTS maintenance_scans (
+ name VARCHAR(64) NOT NULL PRIMARY KEY,
+ after_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+ ceiling_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+ completed_at DATETIME(6) NULL
+) ENGINE=InnoDB;

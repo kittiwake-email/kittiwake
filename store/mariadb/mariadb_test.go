@@ -23,7 +23,7 @@ import (
 //	KITTIWAKE_TEST_DSN='kittiwake:kittiwake@tcp(127.0.0.1:3307)/kittiwake' go test ./store/mariadb/
 //
 // Every table is truncated before each conformance test.
-func open(t *testing.T) *mariadb.DB {
+func open(t testing.TB) *mariadb.DB {
 	t.Helper()
 	dsn := os.Getenv("KITTIWAKE_TEST_DSN")
 	if dsn == "" {
@@ -41,7 +41,7 @@ func open(t *testing.T) *mariadb.DB {
 	for _, stmt := range []string{
 		"SET FOREIGN_KEY_CHECKS = 0",
 		"TRUNCATE alias_destinations", "TRUNCATE aliases", "TRUNCATE account_passwords", "TRUNCATE tokens", "TRUNCATE accounts",
-		"TRUNCATE mailbox_removals", "TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE storage", "TRUNCATE signing_keys", "TRUNCATE sessions",
+		"TRUNCATE maintenance_scans", "TRUNCATE mailbox_removals", "TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE storage", "TRUNCATE signing_keys", "TRUNCATE sessions",
 		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin", "TRUNCATE nodes",
 		"SET FOREIGN_KEY_CHECKS = 1",
 	} {

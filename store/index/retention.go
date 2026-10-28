@@ -195,3 +195,46 @@ func (s *Store) IsRetained(ctx context.Context, mb, msg uuid.UUID) (bool, error)
 	}
 	return false, nil
 }
+
+// NextRetention returns the earliest deadline without decoding all retained
+// records. Each range is ordered by deadline, so one key per range suffices.
+func (s *Store) NextRetention(ctx context.Context, mb uuid.UUID) (time.Time, error) {
+	vr, err := s.getRoot(ctx, mb)
+	if errors.Is(err, ErrNotFound) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	var next time.Time
+	read := func(oid string) error {
+		kv, _, err := s.pool(ctx, mb).OmapList(ctx, oid, "", "", 1)
+		if errors.Is(err, rados.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if len(kv) > 0 {
+			var e RetentionEntry
+			if err := json.Unmarshal(kv[0].Value, &e); err != nil {
+				return err
+			}
+			if next.IsZero() || e.PurgeAt.Before(next) {
+				next = e.PurgeAt
+			}
+		}
+		return nil
+	}
+	if err := read(retentionOID(mb)); err != nil {
+		return next, err
+	}
+	if vr.root.RetentionNext > 0 {
+		for shard := vr.root.RetentionFirst; shard <= (vr.root.RetentionNext-1)>>shardBits; shard++ {
+			if err := read(retentionShardOID(mb, shard)); err != nil {
+				return next, err
+			}
+		}
+	}
+	return next, nil
+}
