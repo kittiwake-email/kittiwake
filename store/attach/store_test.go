@@ -44,31 +44,27 @@ func TestDedupRefsAndGC(t *testing.T) {
 	if err != nil || info.Refs != 2 || info.ContentType != "application/pdf" || info.Size != uint64(len(data)) {
 		t.Fatalf("stat: %+v %v", info, err)
 	}
-	refs, _ := s.Refs(ctx, 0, h)
-	if len(refs) != 2 {
-		t.Fatalf("refs: %v", refs)
-	}
 	if err := s.AddRef(ctx, "0000000000000000000000000000000000000000000000000000000000000000", mb, m1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("addref on missing: %v", err)
 	}
-	if deleted, _ := s.DeleteIfUnreferenced(ctx, 0, h, time.Hour); deleted {
+	if deleted, _ := s.DeleteIfUnreferenced(ctx, 0, counterID(h, mb), time.Hour); deleted {
 		t.Fatal("deleted while referenced")
 	}
 	_ = s.RemoveRef(ctx, h, mb, m1)
 	_ = s.RemoveRef(ctx, h, mb, m2)
 	_ = s.RemoveRef(ctx, h, mb, m2) // idempotent
-	if deleted, _ := s.DeleteIfUnreferenced(ctx, 0, h, time.Hour); deleted {
+	if deleted, _ := s.DeleteIfUnreferenced(ctx, 0, counterID(h, mb), time.Hour); deleted {
 		t.Fatal("deleted inside grace")
 	}
 	now = now.Add(2 * time.Hour)
-	deleted, err := s.DeleteIfUnreferenced(ctx, 0, h, time.Hour)
+	deleted, err := s.DeleteIfUnreferenced(ctx, 0, counterID(h, mb), time.Hour)
 	if err != nil || !deleted {
 		t.Fatalf("gc: %v %v", deleted, err)
 	}
 	if _, err := s.Get(ctx, mb, h); !errors.Is(err, ErrNotFound) {
 		t.Fatal("still there")
 	}
-	if deleted, err := s.DeleteIfUnreferenced(ctx, 0, h, time.Hour); deleted || err != nil {
+	if deleted, err := s.DeleteIfUnreferenced(ctx, 0, counterID(h, mb), time.Hour); deleted || err != nil {
 		t.Fatal("gc on missing")
 	}
 	if err := s.RemoveRef(ctx, h, mb, m1); err != nil {

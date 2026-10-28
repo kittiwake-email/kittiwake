@@ -415,6 +415,10 @@ func TestTornWritesAreCollected(t *testing.T) {
 	_, _ = f.st.Queue.Enqueue(ctx, TaskAttachmentGC, struct{}{}, time.Time{})
 	_, _ = f.st.Queue.Enqueue(ctx, TaskOrphanSweep, struct{}{}, time.Time{})
 	f.drain(t)
+	// Counter reconciliation releases once; payload GC observes its own grace.
+	f.now = f.now.Add(26 * time.Hour)
+	_, _ = f.st.Queue.Enqueue(ctx, TaskAttachmentGC, struct{}{}, time.Time{})
+	f.drain(t)
 	if _, err := f.st.Attachments.Get(ctx, f.mb.ID, hash); err == nil {
 		t.Fatal("attachment with a dangling reference not collected")
 	}

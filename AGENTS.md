@@ -158,8 +158,11 @@ These are settled. Do not design around them.
   is Document.Size = what IMAP/JMAP report). Only `multipart/signed` keeps the original
   bytes (`.raw`, config `mail.keep_raw`). Every non-primary-body MIME part is an attachment;
   parts under a threshold stay inline as Part.Data.
-- **Attachments** are deduplicated per Ceph cluster by content hash with reference counting
-  (omap keys per referencing message on the hash-named object); only a worker deletes orphans.
+- **Attachments** use 256 mailbox-derived deduplication partitions per Ceph storage.
+  Format 2 has scalar counters, a bounded recoverable journal, forward retry receipts
+  and per-mailbox ownership counters; no per-message OMAP on payloads. Legacy hash-named
+  objects remain readable. Only workers collect zero-count payload generations. Preserve
+  receipt/counter tombstones and stop old writers before rollout; see README Attachments.
 - **Delivery order:** private message/attachment data, prepared root journal, fenced target
   writes, final root + change log. LMTP acks only after completion. Accepted journal failures
   return ErrPending and retain data for recovery.

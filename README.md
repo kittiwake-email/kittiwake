@@ -433,17 +433,31 @@ or `always`.
 
 ## Attachments
 
-Attachments are extracted and stored as separate RADOS objects in their own pool. They are
-deduplicated **cluster-wide** by content hash, so the same attachment is referenced from many
-messages across many mailboxes. This requires reference counting: an attachment object is only
-removed by a background worker once no message references it.
+Attachments are extracted into immutable RADOS payload objects. New attachments use
+256 deduplication partitions per storage, chosen by the first byte of the mailbox UUID.
+Within each partition the content hash selects a payload. This permits up to 256 copies
+of popular content to distribute write coordination across OSDs.
 
-**Reference counting design:** the attachment object is named by its content hash. Its omap
-holds one key per referencing message (`ref/<mailbox>/<message>`), so adding and removing a
-reference are idempotent omap operations and concurrent deliveries of the same attachment
-never race on a counter. A worker deletes an attachment only when its reference set is empty
-and the object has not been touched for a grace period. Creation uses RADOS exclusive-create
-so two simultaneous first uploads of the same attachment resolve cleanly.
+**Reference format 2:** each hash partition has a small JSON reference counter and at
+most one pending mutation. Payloads and counters contain no per-message OMAP keys.
+A mutation atomically prepares a journal, writes version-fenced forward receipts and a
+mailbox ownership counter concurrently, then finalizes the aggregate counter. Readers
+finish interrupted mutations. An opaque receipt per message/attachment makes additions
+and removals idempotent; a scalar mailbox count enforces attachment-download authorization.
+These are separate small objects, not an attachment's reverse reference list.
+
+A collector retires a zero-count generation with CAS before deleting its immutable
+payload. New references use a fresh generation, so a delayed collector cannot remove
+newly referenced content. Released receipts and empty counter objects are retained as
+fences against delayed writers. This trades additional metadata objects and I/O for bounded
+OMAP size and distributed coordination; measurements are in the lab notes. Receipt
+compaction requires a separate retirement protocol and is not currently automatic.
+
+Legacy hash-named attachments remain readable and their old references are removed by
+the legacy collector. New writes use format 2; existing large legacy OMAPs shrink as their
+messages are purged, rather than being rewritten online. Stop old writers and workers
+before rollout: old binaries cannot read the new layout. Downgrade after new attachment
+writes is unsupported. No data migration or deployment is performed by a schema upgrade.
 
 New message documents also store wire MIME headers, encoded sizes and line counts. IMAP
 ENVELOPE, BODYSTRUCTURE and top-level header FETCH use these without reading attachment
@@ -463,7 +477,10 @@ Mail data:
 - Message document: `<mailbox-uuid>/<message-uuid>` in the messages pool (xattr `loc` =
   `<folder-id>/<uid>`); kept original bytes, only for signed mail:
   `<mailbox-uuid>/<message-uuid>.raw`
-- Attachment: `<sha256-hex>` in the attachments pool
+- Attachment: `v2/<sha256-hex>/<partition>/data/<generation>` in the attachments pool;
+  scalar metadata at `v2/<sha256-hex>/<partition>/counter`, forward receipts at
+  `receipt/<mailbox>/<message>/<hash>`, ownership at `owner/<mailbox>/<hash>`.
+  Legacy payloads remain at `<sha256-hex>`.
 - Mailbox root: `<mailbox-uuid>` in the index pool (folders, counters, modseq, pending mutation; bounded change-log omap)
 - Folder index shards: `<mailbox-uuid>/<folder-id>` for UIDs below 65536, then
   `<mailbox-uuid>/<folder-id>.<n>` per further block of 65536 UIDs

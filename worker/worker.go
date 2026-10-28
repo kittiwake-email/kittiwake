@@ -702,6 +702,9 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 	}
 	w.log.Info("orphan sweep", slog.Int("removed", removed), slog.Int("mailboxes_recalculated", len(touched)))
 	// Full dangling-reference reconciliation runs only with the infrequent sweep.
+	if err := w.atts.ReconcileCounters(ctx, w.cfg.OrphanAge, w.msgs.Exists); err != nil {
+		return err
+	}
 	return w.atts.List(ctx, func(cid int64, hash string) error { _, err := w.collectAttachment(ctx, cid, hash, true); return err })
 }
 
