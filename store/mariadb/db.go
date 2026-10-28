@@ -427,3 +427,32 @@ type backgroundWriteKey struct{}
 func (d *DB) backgroundTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return d.tx(context.WithValue(ctx, backgroundWriteKey{}, true), fn)
 }
+
+// ConfigurePool sets the per-process connection budget on both pools.
+func (d *DB) ConfigurePool(maxOpen, maxIdle int, lifetime time.Duration) {
+	for _, p := range []*sql.DB{d.sql, d.read} {
+		if p != nil {
+			p.SetMaxOpenConns(maxOpen)
+			p.SetMaxIdleConns(maxIdle)
+			p.SetConnMaxLifetime(lifetime)
+		}
+	}
+}
+
+// PurgeExpiredSessions bounds each transaction; inactive accounts are collected
+// without requiring a user to visit the session-list endpoint.
+func (d *DB) PurgeExpiredSessions(ctx context.Context) error {
+	for {
+		res, err := d.sql.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at <= ? ORDER BY expires_at LIMIT 1000", d.Now().UTC())
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n < 1000 {
+			return nil
+		}
+	}
+}

@@ -17,6 +17,9 @@ database:
   # own changes despite replication lag.
   # read_dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@unix(/run/mysqld/mysqld.sock)/kittiwake"
   read_stickiness: 2s
+  max_open_connections: 32
+  max_idle_connections: 8
+  connection_lifetime: 30m
 
 # IMAP namespaces. Folders live in one personal namespace with "/" as delimiter.
 # A compatibility namespace maps the same folders under an old layout so clients

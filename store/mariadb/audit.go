@@ -89,12 +89,22 @@ func (d *DB) ReadAdmin(ctx context.Context, q audit.Query) ([]audit.Record, stri
 
 // PurgeAdminBefore deletes records older than cutoff; returns rows removed.
 func (d *DB) PurgeAdminBefore(ctx context.Context, cutoff time.Time) (int, error) {
-	res, err := d.sql.ExecContext(ctx, "DELETE FROM audit_admin WHERE time < ?", cutoff.UTC())
-	if err != nil {
-		return 0, err
+	total := 0
+	for {
+		res, err := d.sql.ExecContext(ctx, "DELETE FROM audit_admin WHERE time < ? ORDER BY time, id LIMIT 1000", cutoff.UTC())
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += int(n)
+		if n < 1000 {
+			return total, nil
+		}
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+
 }
 
 var _ audit.AdminLog = (*DB)(nil)

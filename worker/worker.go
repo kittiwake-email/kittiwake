@@ -709,6 +709,11 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 // and every live mailbox's daily objects (removed mailboxes lose theirs
 // with the mailbox).
 func (w *Worker) purgeAudit(ctx context.Context) error {
+	if maintenance, ok := w.ids.Backend().(interface{ PurgeExpiredSessions(context.Context) error }); ok {
+		if err := maintenance.PurgeExpiredSessions(ctx); err != nil {
+			return err
+		}
+	}
 	cutoff := w.Now().Add(-w.cfg.AuditRetention)
 	days := 60
 	n, err := w.audit.PurgeBefore(ctx, uuid.Nil, cutoff, days)

@@ -173,6 +173,12 @@ func OpenDatabase(ctx context.Context, cfg config.Database) (*mariadb.DB, error)
 	if err != nil {
 		return nil, err
 	}
+	// Preserve defaults for callers constructing Database directly.
+	maxOpen, maxIdle, lifetime := cfg.MaxOpen, cfg.MaxIdle, cfg.ConnLifetime
+	if maxOpen == 0 {
+		maxOpen, maxIdle, lifetime = 32, 8, 30*time.Minute
+	}
+	db.ConfigurePool(maxOpen, maxIdle, lifetime)
 	db.ProductVersion = Version
 	if cfg.ReadStickiness > 0 {
 		db.ReadStickiness = cfg.ReadStickiness

@@ -232,6 +232,9 @@ type Cache struct {
 // storage registry. Required with the librados backend; with the memory
 // backend an empty DSN keeps metadata in memory as well.
 type Database struct {
+	MaxOpen      int           `yaml:"max_open_connections"`
+	MaxIdle      int           `yaml:"max_idle_connections"`
+	ConnLifetime time.Duration `yaml:"connection_lifetime"`
 	// DSN in go-sql-driver/mysql form, e.g.
 	// "kittiwake:secret@tcp(db.example:3306)/kittiwake"; the usual secret
 	// forms (file:, ${ENV}) apply. Every write goes here.
@@ -358,7 +361,7 @@ func Default() Config {
 			Issuer:               "kittiwake",
 		},
 		Cache:    Cache{Credentials: 5 * time.Second, Identity: 5 * time.Second, Root: 5 * time.Second},
-		Database: Database{ReadStickiness: 2 * time.Second},
+		Database: Database{ReadStickiness: 2 * time.Second, MaxOpen: 32, MaxIdle: 8, ConnLifetime: 30 * time.Minute},
 		Node:     Node{Heartbeat: 10 * time.Second},
 		Audit:    Audit{Retention: 365 * 24 * time.Hour},
 		Log:      Log{Level: "info", Format: "json"},
@@ -445,6 +448,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Node.Heartbeat <= 0 {
 		return errors.New("config: node.heartbeat must be positive")
+	}
+	if c.Database.MaxOpen < 1 || c.Database.MaxIdle < 0 || c.Database.MaxIdle > c.Database.MaxOpen || c.Database.ConnLifetime < 0 {
+		return fmt.Errorf("invalid database connection pool limits")
 	}
 	if c.Database.ReadStickiness < 0 {
 		return errors.New("config: database.read_stickiness must not be negative")

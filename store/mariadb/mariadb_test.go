@@ -235,3 +235,37 @@ func TestMailboxRemovalIsDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMailboxListingReleasesConnection(t *testing.T) {
+	db := open(t)
+	db.ConfigurePool(1, 1, time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	mb, err := db.CreateMailbox(ctx, identity.Mailbox{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	visited := 0
+	err = db.ListMailboxes(ctx, func(id uuid.UUID) error { visited++; _, err := db.GetMailbox(ctx, id); return err })
+	if err != nil || visited != 1 {
+		t.Fatalf("nested lookup blocked: %d %v (%s)", visited, err, mb.ID)
+	}
+}
+func TestExpiredSessionMaintenance(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	acct := uuid.New()
+	if _, _, err := db.Create(ctx, acct, nil, "old", "", -time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.Create(ctx, acct, nil, "live", "", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PurgeExpiredSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.SQL().QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("session cleanup: %d %v", n, err)
+	}
+}

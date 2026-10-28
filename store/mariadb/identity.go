@@ -333,22 +333,44 @@ func (d *DB) deleteMailbox(ctx context.Context, id uuid.UUID, schedule bool) err
 	})
 }
 
-func (d *DB) ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) error {
-	rows, err := d.r(ctx).QueryContext(ctx, "SELECT uuid FROM mailboxes ORDER BY id")
-	if err != nil {
-		return mapErr(err)
+// ListMailboxes releases each SQL result before invoking callbacks. The high
+// water mark prevents concurrent provisioning from extending a sweep forever.
+func (d *DB) ListMailboxes(ctx context.Context, fn func(uuid.UUID) error) error {
+	var ceiling int64
+	if err := d.r(ctx).QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM mailboxes").Scan(&ceiling); err != nil {
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var u []byte
-		if err := rows.Scan(&u); err != nil {
+	var after int64
+	for {
+		rows, err := d.r(ctx).QueryContext(ctx, "SELECT id, uuid FROM mailboxes WHERE id > ? AND id <= ? ORDER BY id LIMIT 512", after, ceiling)
+		if err != nil {
+			return mapErr(err)
+		}
+		var ids []uuid.UUID
+		for rows.Next() {
+			var id int64
+			var raw []byte
+			if err := rows.Scan(&id, &raw); err != nil {
+				rows.Close()
+				return err
+			}
+			after = id
+			ids = append(ids, toUUID(raw))
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
 			return err
 		}
-		if err := fn(toUUID(u)); err != nil {
-			return err
+		for _, id := range ids {
+			if err := fn(id); err != nil {
+				return err
+			}
+		}
+		if len(ids) < 512 {
+			return nil
 		}
 	}
-	return rows.Err()
 }
 
 func (d *DB) ListMailboxAccounts(ctx context.Context, id uuid.UUID, after string, max int) (usernames []string, more bool, err error) {
