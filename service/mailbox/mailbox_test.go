@@ -399,3 +399,43 @@ func TestQueryOffsetAcrossPages(t *testing.T) {
 		t.Fatalf("past end: %v %v", result, err)
 	}
 }
+
+func TestQuerySortedOffsetsAndThreadCollapse(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.user
+	root, err := f.svc.Root(ctx, f.mb.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid := root.FolderByRole(index.RoleInbox).ID
+	for i := 0; i < 12; i++ {
+		_, err := f.idx.Append(ctx, f.mb.ID, fid, index.Record{MessageID: uuid.New(), Size: int64(i), InternalDate: f.now}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, collapse := range []bool{false, true} {
+		for _, pos := range []int{0, 5, -3, 100} {
+			got, err := f.svc.Query(ctx, f.mb.ID, Query{Sort: SortSize, Asc: true, CollapseThreads: collapse, Position: pos, Limit: 2})
+			if err != nil || got.Total != 12 {
+				t.Fatalf("query: %+v %v", got, err)
+			}
+			start := pos
+			if start < 0 {
+				start = 12 + pos
+			}
+			if start > 12 {
+				start = 12
+			}
+			want := min(2, 12-start)
+			if len(got.Records) != want {
+				t.Fatalf("position %d: %d records", pos, len(got.Records))
+			}
+			for i, r := range got.Records {
+				if r.Size != int64(start+i) {
+					t.Fatalf("position %d: %+v", pos, r)
+				}
+			}
+		}
+	}
+}

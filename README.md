@@ -1292,5 +1292,9 @@ headers and threading input are not copied into each session. Header/body search
 stream index pages and release reconstructed messages after each match. Ordinary
 FLAGS/date/size operations still use session metadata without added index reads.
 Folder offset queries discard skipped pages instead of retaining offset+limit
-records. Arbitrary sorted/filtered queries still need a separate bounded execution
-path; this change does not make deep offset reads constant-cost.
+records. Sorted/filtered queries stream 1,000-record pages and keep only sort keys
+and locators. Positive limited queries retain at most position+limit candidates in
+a heap; thread collapse first retains the best locator per matching thread. Only
+output records are fetched again. Negative offsets and unlimited requests retain
+compact locators for all matches. Filtering still scans matching folders; deep
+offsets, large limits and thread collapse can consume proportional memory and I/O.

@@ -671,10 +671,6 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 	} else {
 		folders = root.Folders
 	}
-	type item struct {
-		rec index.Record
-		fid string
-	}
 	// Fast path: the default listing (one folder, newest first, no filter
 	// beyond the folder, no thread collapsing) reads only the page it
 	// needs from the newest-first index instead of the whole folder.
@@ -713,7 +709,16 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "search", Target: f.ID})
 		return res, nil
 	}
-	var items []item
+	window := queryWindow{q: q}
+	// Guard integer overflow for untrusted offsets.
+	if q.Position >= 0 && q.Limit > 0 && q.Position <= int(^uint(0)>>1)-q.Limit {
+		window.capacity = q.Position + q.Limit
+	}
+	var threads map[string]queryItem
+	if q.CollapseThreads {
+		threads = make(map[string]queryItem)
+	}
+	total, ordinal := 0, 0
 	for _, f := range folders {
 		var after uint32
 		for {
@@ -723,8 +728,19 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 			}
 			for _, r := range recs {
 				after = r.UID
-				if matches(q.Filter, r) {
-					items = append(items, item{r, f.ID})
+				if !matches(q.Filter, r) {
+					continue
+				}
+				it := queryKey(r, f.ID, ordinal, q.Sort)
+				ordinal++
+				if q.CollapseThreads {
+					previous, found := threads[r.ThreadID]
+					if !found || queryLess(it, previous, q) {
+						threads[r.ThreadID] = it
+					}
+				} else {
+					total++
+					window.add(it)
 				}
 			}
 			if !more {
@@ -732,38 +748,14 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 			}
 		}
 	}
-	less := func(a, b item) bool {
-		switch q.Sort {
-		case SortSentAt:
-			return a.rec.Date.Before(b.rec.Date)
-		case SortSubject:
-			return strings.ToLower(a.rec.Subject) < strings.ToLower(b.rec.Subject)
-		case SortFrom:
-			return strings.ToLower(a.rec.From) < strings.ToLower(b.rec.From)
-		case SortSize:
-			return a.rec.Size < b.rec.Size
-		default:
-			return a.rec.InternalDate.Before(b.rec.InternalDate)
-		}
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if q.Asc {
-			return less(items[i], items[j])
-		}
-		return less(items[j], items[i])
-	})
 	if q.CollapseThreads {
-		seen := map[string]bool{}
-		out := items[:0]
-		for _, it := range items {
-			if !seen[it.rec.ThreadID] {
-				seen[it.rec.ThreadID] = true
-				out = append(out, it)
-			}
+		total = len(threads)
+		for _, it := range threads {
+			window.add(it)
 		}
-		items = out
 	}
-	total := len(items)
+	items := window.items
+	sort.Slice(items, func(i, j int) bool { return queryLess(items[i], items[j], q) })
 	pos := q.Position
 	if pos < 0 {
 		pos = max(0, total+pos)
@@ -772,12 +764,20 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 		pos = total
 	}
 	end := total
-	if q.Limit > 0 && pos+q.Limit < end {
+	if q.Limit > 0 && q.Limit < end-pos {
 		end = pos + q.Limit
 	}
 	res := QueryResult{Total: total, ModSeq: root.ModSeq}
 	for _, it := range items[pos:end] {
-		res.Records = append(res.Records, it.rec)
+		rec, err := s.idx.GetRecord(ctx, mb, it.fid, it.uid)
+		// A concurrent expunge may remove a selected locator after the scan.
+		if errors.Is(err, index.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return QueryResult{}, mapIndexErr(err)
+		}
+		res.Records = append(res.Records, rec)
 		res.Folders = append(res.Folders, it.fid)
 	}
 	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "search", Target: q.Filter.InFolder})
