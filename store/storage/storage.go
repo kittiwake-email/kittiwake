@@ -295,6 +295,11 @@ func (r *Registry) open(ctx context.Context, rec identity.Storage) *conn {
 			c.err = fmt.Errorf("pool %s: %w", name, err)
 			return c
 		}
+		if err := probePool(ctx, io, Role(i)); err != nil {
+			_ = client.Close()
+			c.err = fmt.Errorf("pool %s capabilities: %w", name, err)
+			return c
+		}
 		c.pools[i] = io
 	}
 	c.client = client
@@ -490,10 +495,51 @@ func Verify(connect Connector, rec identity.Storage) (uuid.UUID, error) {
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("fsid %q: %w", fsid, err)
 	}
-	for _, name := range []string{rec.Pools.Index, rec.Pools.Messages, rec.Pools.Attachments} {
-		if _, err := client.Pool(name); err != nil {
-			return uuid.Nil, fmt.Errorf("pool %s: %w", name, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for i, name := range []string{rec.Pools.Index, rec.Pools.Messages, rec.Pools.Attachments} {
+		io, err := client.Pool(name)
+		if err == nil {
+			err = probePool(ctx, io, Role(i))
+		}
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("pool %s capabilities: %w", name, err)
 		}
 	}
 	return got, nil
+}
+
+// Opening an IOContext does not establish that a pool supports the operations
+// required by its role. Probe only a unique private object, never operator data.
+func probePool(ctx context.Context, io rados.IOContext, role Role) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	oid := "capability-probe/" + uuid.NewString()
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if e := io.Delete(cleanup, oid); e != nil && !errors.Is(e, rados.ErrNotFound) && err == nil {
+			err = fmt.Errorf("probe cleanup: %w", e)
+		}
+	}()
+	tx := rados.NewWriteTx().CreateExclusive().WriteFull([]byte("probe")).SetXattr("probe", []byte("1"))
+	// Attachments still use OMAP for legacy references and GC candidates.
+	if role != RoleMessages {
+		tx.OmapSet(map[string][]byte{"probe": []byte("1")})
+	}
+	version, err := io.Write(ctx, oid, tx)
+	if err != nil {
+		return err
+	}
+	if role != RoleMessages {
+		values, err := io.OmapGet(ctx, oid, []string{"probe"})
+		if err != nil {
+			return err
+		}
+		if string(values["probe"]) != "1" {
+			return errors.New("OMAP probe read mismatch")
+		}
+	}
+	_, err = io.Write(ctx, oid, rados.NewWriteTx().AssertVersion(version).WriteFull([]byte("verified")))
+	return err
 }

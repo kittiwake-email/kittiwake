@@ -101,7 +101,10 @@ in other datacenters within a few milliseconds of each other.
 - **Storage, not config.** A *storage* is one Ceph cluster registered as a row in the
   metadata database: name, `mon_host`, CephX user and key, the three data pools, and a
   placement flag. `kittiwake-admin storage add` hands the details to the admin daemon,
-  which connects once, checks the pools exist, reads the cluster's **fsid** and stores it.
+  which connects once, reads the cluster's **fsid** and verifies pool capabilities before
+  storing it. A unique temporary object checks writes, xattrs and version assertions;
+  index and attachment pools must also support OMAP. Connections repeat this probe
+  before making storage available. Opening a pool alone is not sufficient verification.
   The daemon config carries no storage at all (only `ceph.config_file` and `ceph.options`
   as librados defaults for every connection).
 - **Fsid is the identity.** Mailboxes reference their storage by its integer registry id
