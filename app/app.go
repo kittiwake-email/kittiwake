@@ -249,6 +249,9 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 	}
 	a.Resolver = resolver
 	st.Index, st.Messages, st.Attachments, st.Audit = index.NewMulti(resolver), message.NewMulti(resolver), attach.NewMulti(resolver), audit.NewMulti(resolver, adminLog)
+	if candidates, ok := st.Queue.(attach.CandidateQueue); ok {
+		st.Attachments.SetCandidateQueue(candidates)
+	}
 	// LMTP defers at RCPT when the recipient's storage is not connected
 	// (no I/O: the registry and the cached mailbox record).
 	var storageAvailable func(context.Context, uuid.UUID) error

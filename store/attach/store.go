@@ -28,8 +28,9 @@ var (
 
 // Store is the attachment store.
 type Store struct {
-	r   storage.Resolver
-	Now func() time.Time
+	candidates CandidateQueue
+	r          storage.Resolver
+	Now        func() time.Time
 }
 
 // New returns a store on the attachments pool context (one storage).
@@ -108,19 +109,21 @@ func (s *Store) RemoveRef(ctx context.Context, hash string, mb, msg uuid.UUID) e
 	var r receipt
 	if _, err := readJSON(ctx, io, receiptOID(hash, mb, msg), &r); err == nil {
 		id := counterID(hash, mb)
-		if _, err := io.Write(ctx, candidateOID(hash), rados.NewWriteTx().OmapSet(map[string][]byte{id: nil})); err != nil {
+		if err := s.enqueueCandidate(ctx, mb, hash, id); err != nil {
 			return err
 		}
 		err := s.changeCounter(ctx, io, id, hash, mb, msg, false, "")
-		if errors.Is(err, ErrNotFound) {
-			return nil
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
 		}
-		return err
+		// Republish after the counter mutation too: a collector may have
+		// examined the first candidate before the reference was removed.
+		return s.enqueueCandidate(ctx, mb, hash, id)
 	} else if !errors.Is(err, rados.ErrNotFound) {
 		return err
 	}
 	// Queue first: a crash may leave an extra candidate, never an untracked removal.
-	if _, err := s.pool(ctx, mb).Write(ctx, candidateOID(hash), rados.NewWriteTx().OmapSet(map[string][]byte{hash: nil})); err != nil {
+	if err := s.enqueueCandidate(ctx, mb, hash, hash); err != nil {
 		return err
 	}
 
@@ -384,6 +387,9 @@ func candidateOID(hash string) string { return "gc/" + hash[:2] }
 // version prevents cleanup from losing a concurrently enqueued candidate.
 func (s *Store) Candidates(ctx context.Context, fn func(int64, string) (bool, error)) error {
 	return s.r.Each(ctx, storage.RoleAttachments, func(cid int64, io rados.IOContext) error {
+		if s.candidates != nil {
+			return s.candidates.AttachmentGCCandidates(ctx, cid, func(id string) (bool, error) { return fn(cid, id) })
+		}
 		for shard := 0; shard < 256; shard++ {
 			oid := fmt.Sprintf("gc/%02x", shard)
 			st, err := io.Stat(ctx, oid)

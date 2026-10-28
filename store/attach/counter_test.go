@@ -160,7 +160,7 @@ func TestLegacyAttachmentRemainsReadable(t *testing.T) {
 	}
 }
 
-func counterTestPool(t *testing.T) rados.IOContext {
+func counterTestPool(t testing.TB) rados.IOContext {
 	t.Helper()
 	conf := os.Getenv("KITTIWAKE_TEST_CEPH_CONF")
 	if conf == "" {

@@ -1081,6 +1081,12 @@ func (d *DB) DeleteStorage(ctx context.Context, id int64) error {
 		if n > 0 {
 			return fmt.Errorf("%w: storage %d has %d mailboxes", identity.ErrInUse, id, n)
 		}
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM attachment_gc WHERE storage_id=?", id).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return fmt.Errorf("%w: storage %d has pending attachment collection", identity.ErrInUse, id)
+		}
 		_, err := tx.ExecContext(ctx, "DELETE FROM storage WHERE id = ?", id)
 		return err
 	})

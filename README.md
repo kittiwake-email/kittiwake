@@ -700,8 +700,11 @@ above. Private message data is undone only before journal acceptance; pending mu
 are completed, not rolled back. Mailbox removal deletes message, index, upload and audit data.
 Sweeps provide crash cleanup rather than committing normal writes:
 
-- **Attachment GC** (daily) walks 256 candidate shards populated before reference removal,
-  rather than every live attachment. It checks age and existence of references and uses
+- **Attachment GC** (daily) pages an indexed SQL candidate registry per storage in
+  production. Fresh enqueue tokens prevent completion from dropping a concurrent
+  removal; candidates are published before and after counter changes. Storage cannot
+  be unregistered while collection candidates remain. The development backend keeps
+  its simple hash-sharded OMAP queue. Daily GC does not scan every live attachment. It checks age and existence of references and uses
   version-fenced deletion. Weekly reconciliation walks attachments to remove dangling
   references and discover crash leftovers. Metadata reads do not enumerate references.
 - **Orphan sweep** (weekly by default; one stat per message object, so it is the only
