@@ -1,53 +1,74 @@
-Scalability implementation status — 2026-10-28
+Scalability implementation and lab rollout — 2026-10-28
+
+Current implementation supersedes the earlier format-2 attachment experiment.
+The disposable lab has been reset and deployed: SQL migrations through 0009,
+mailbox root format 5, mailbox-scoped immutable attachment generations (v3).
+Old roots and attachment layouts are not migrated. Stop all old writers before
+rollout; mixed versions and downgrade after new writes are unsupported.
 
 Implemented in separate commits:
 91d7da4 Fence task state transitions and renewals by current lease ownership.
 86afb9f Atomically schedule mailbox removal and pin storage until cleanup.
 864e999 Use authoritative registry reads for destructive work.
 027aed9 Bound SQL maintenance batches and configure connection budgets.
-34492ff Partition attachment deduplication with recoverable scalar counters.
 2b6a1a5 Bound retention ranges and batch physical purge bookkeeping.
-d551d1b Verify required pool operations before accepting Ceph storage.
-5cce6c8 Coalesce periodic SQL maintenance tasks across scheduler ticks.
+d551d1b Verify actual pool capabilities before accepting Ceph storage.
+5cce6c8 Coalesce periodic maintenance tasks across scheduler ticks.
+8ea0ebd Compact IMAP session metadata; stream search working sets.
+ddb95d8 Discard skipped folder pages during offset queries.
+f0f1a0e Cap audit segments at 4,096 keys / 4 MiB; persist expiry progress.
+3789f7d Schedule retention by indexed deadlines; persist discovery cursors.
+f38ddd9 Put GC candidates in a keyset-paged, token-fenced SQL registry.
+80071f6 Weight mailbox placement by fresh capacity above a reserved headroom.
+6b7a5fb Cap index maps at 4,096 keys / 4 MiB with overflow buckets; reclaim
+        historical Message-ID mappings when their last live copy disappears.
+fa65f01 Journal attachment counters with Append/DropRetention. Remove receipts,
+        ownership objects, reverse keys and permanent attachment tombstones.
+e0c2f41 Stream filtered queries into compact bounded sort windows.
 
-Validation:
-Full unit and race suites, go vet and go build passed. The real MariaDB suite
-passed on kittiwake1 in isolated kittiwake_test. Ceph attachment recovery,
-concurrency, authorization, delayed-collector and legacy tests passed. Retention
-range boundaries and pool capability tests passed on real Ceph. No deployment,
-service restart or push was performed. Lab evidence and reproducible benchmark
-commands are committed in sibling kittiwake-labs/docs/LAB.md (d5df008).
+Attachment design:
+- One scalar counter per distinct attachment hash in a mailbox's bounded index
+  maps; live and retained messages share it. Message records carry forward refs.
+- Append and retention removal change counts in their existing root journal,
+  so crash recovery/retries do not require per-message attachment receipt keys.
+- Upload reserves a zero-count generation before writing its immutable payload.
+  A mailbox upload epoch fences collectors racing not-yet-reserved uploads.
+  Retirement removes the counter, then deletes only its specific generation.
+- Payloads have no OMAP. Deduplication is within a mailbox, deliberately spending
+  disk capacity to avoid cross-mailbox counter contention on popular content.
+- SQL GC candidates are transient and fenced against concurrent enqueue.
+  Periodic payload sweeps recover crashes between retention commit and enqueue.
 
-Measured tradeoffs, not performance claims:
-- Shared attachment reference median: 6.423 -> 13.547 ms. No payload reverse OMAP;
-  256 deduplication partitions distribute coordination, with up to 256 copies.
-  Durable forward receipts and ownership counters require more objects and I/O.
-- Retention bookkeeping for 32 entries: 12.875 -> 47.464 ms median, now including
-  removal of 32 historical location keys under the root publication journal.
-- Single-mailbox microbenchmarks do not establish whole-platform capacity or
-  multi-OSD distribution. No storage server configuration was changed.
+Validation and evidence:
+Full unit/race suites, go vet and go build passed. The final query change also
+passed its mailbox/JMAP race suites. The lab test playbook passed unit, MariaDB
+and real-RADOS conformance. Ceph recovery, bounded maps, retention ranges, audit
+segments, capability/capacity probes and attachment GC races passed. Protocol
+verification passed SMTP/LMTP, IMAPS, POP3S, JMAP and SMTP submission. JMAP outbound
+verification used only the lab's own recipient.
 
-Rollout:
-SQL migrations through 0006; mailbox root format 3; attachment format 2.
-Stop older writers and workers before rollout. Downgrade after new writes is
-unsupported. Legacy attachments and retention entries remain readable and drain
-through cleanup; existing large legacy maps are not rewritten by this upgrade.
+The live concurrent-ingestion test delivered 480 messages sharing one 16 KiB
+attachment: eight mailbox counters [270,30,30,30,30,30,30,30], exactly eight payload
+objects and zero payload OMAP keys. Every sampled MIME reconstruction matched.
+Eight clients: 35.49 messages/s in one mailbox versus 95.08 across eight mailboxes.
+This is a small workload comparison, not a cluster-capacity claim.
 
-Unresolved parts of the broader scale review:
-- Released attachment receipts, zero counters and empty index shard objects stay
-  as stale-writer fences. Safe lifetime compaction needs a retirement protocol.
-- GC candidate maps remain fixed hash shards; concurrent writes can defer cleanup
-  to another pass. Weekly reconciliation is still needed for crash cleanup.
-- Thread membership/history and daily audit maps remain unbounded. Audit expiry
-  needs segmented maps and a durable cursor, especially across long legal holds.
-- Periodic SQL deduplication bounds duplicate jobs, not mailbox discovery cost.
-  Due-mailbox scheduling, durable continuation cursors and per-storage sweep
-  parallelism remain to be designed and implemented.
-- IMAP selected sessions retain full index records. Compact shared metadata and
-  bounded JMAP query/search execution remain outstanding.
-- Bulk mailbox mutations and contention metrics remain outstanding. A mailbox
-  root serializes mutations; each attachment partition serializes its counter.
-- Storage placement remains random, not capacity-aware; admission control and
-  mailbox migration remain outstanding. Capability probes do not measure load.
+Detailed before/after measurements, placement samples, commands and rollout
+results are in ../kittiwake-labs/docs/LAB.md, section "Scaling rollout and
+counter-only attachments — 2026-10-28". Benchmark driver:
+../kittiwake-labs/bench/attachment-scale.py.
 
-Do not describe the broader scalability review as completely implemented.
+Remaining operating limits:
+- A mailbox root serializes its mutations; the contention test exposes this.
+  The lab has three replicated OSDs, so distributing primaries does not avoid
+  writing all replicas. No million-mailbox throughput claim is established.
+- Capacity placement uses raw cluster headroom, not per-OSD fullness, CRUSH pool
+  quotas or measured IOPS. Automatic mailbox migration is not implemented.
+- Folder and retention ranges cap key counts at 65,536; unlike capped maps/audit,
+  their byte totals depend on record size. Large headers/attachment arrays need
+  monitoring. Empty index/audit segment objects retain stale-writer fences.
+- IMAP sessions still need O(message-count) compact metadata. General filtering
+  scans folder pages; deep offsets, unlimited results and thread collapsing can
+  require proportional memory. A search backend remains future work.
+- Bulk mutation APIs, parallel storage sweeps and detailed contention metrics
+  remain further throughput work, not requirements proven by these benchmarks.

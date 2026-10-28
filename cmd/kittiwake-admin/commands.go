@@ -131,7 +131,7 @@ func (a *cli) mailbox(args []string) error {
 	case "create":
 		fs := newFlagSet("mailbox create")
 		sb, hb, sm, hm := quotaFlags(fs)
-		storageID := fs.Int64("storage", 0, "pin the Ceph storage by registry id (default: random among storage entries open for placement)")
+		storageID := fs.Int64("storage", 0, "pin the Ceph storage by registry id (default: weighted by fresh capacity headroom among eligible storage entries)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
