@@ -300,6 +300,13 @@ func (s *Service) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	if err := s.authorize(ctx, "mailbox-delete", id.String()); err != nil {
 		return err
 	}
+	if supported, err := s.ids.ScheduleMailboxRemoval(ctx, id); supported {
+		if err != nil {
+			return s.fail(ctx, id, "mailbox-delete", id.String(), err)
+		}
+		s.ok(ctx, uuid.Nil, "mailbox-delete", id.String(), "data removal scheduled")
+		return nil
+	}
 	// The record carries the storage; the removal task needs it after the
 	// record is gone.
 	var storageID int64

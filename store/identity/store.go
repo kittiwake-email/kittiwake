@@ -289,3 +289,26 @@ func (s *Store) DeleteNode(ctx context.Context, mode, address string) error {
 func (s *Store) PurgeNodes(ctx context.Context, cutoff time.Time) (int, error) {
 	return s.b.PurgeNodes(ctx, cutoff)
 }
+
+// RemovalBackend atomically removes identity and schedules cleanup while pinning storage.
+type RemovalBackend interface {
+	ScheduleMailboxRemoval(context.Context, uuid.UUID) error
+	FinishMailboxRemoval(context.Context, uuid.UUID) error
+}
+
+// ScheduleMailboxRemoval returns supported=false on the development backend.
+func (s *Store) ScheduleMailboxRemoval(ctx context.Context, id uuid.UUID) (supported bool, err error) {
+	b, ok := s.b.(RemovalBackend)
+	if !ok {
+		return false, nil
+	}
+	err = b.ScheduleMailboxRemoval(ctx, id)
+	s.cache.Delete(mailboxKey(id))
+	return true, err
+}
+func (s *Store) FinishMailboxRemoval(ctx context.Context, id uuid.UUID) error {
+	if b, ok := s.b.(RemovalBackend); ok {
+		return b.FinishMailboxRemoval(ctx, id)
+	}
+	return nil
+}

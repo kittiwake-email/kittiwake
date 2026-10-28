@@ -319,7 +319,10 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 		if mp.StorageID != 0 {
 			ctx = storage.WithID(ctx, mp.StorageID)
 		}
-		return w.removeMailbox(ctx, mp.Mailbox)
+		if err := w.removeMailbox(ctx, mp.Mailbox); err != nil {
+			return err
+		}
+		return w.ids.FinishMailboxRemoval(ctx, mp.Mailbox)
 	case TaskRecalcQuota:
 		_, err := w.idx.Recalculate(ctx, mp.Mailbox)
 		if errors.Is(err, index.ErrNotFound) {
@@ -515,7 +518,10 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 		for _, f := range root.Folders {
 			for {
 				recs, _, err := w.idx.ListFolderDesc(ctx, mb, f.ID, 0, w.cfg.ScanBatch)
-				if err != nil || len(recs) == 0 {
+				if err != nil {
+					return err
+				}
+				if len(recs) == 0 {
 					break
 				}
 				for _, r := range recs {

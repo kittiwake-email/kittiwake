@@ -2,6 +2,8 @@ package mariadb_test
 
 import (
 	"context"
+	"errors"
+	"github.com/google/uuid"
 	"os"
 	"testing"
 	"time"
@@ -39,7 +41,7 @@ func open(t *testing.T) *mariadb.DB {
 	for _, stmt := range []string{
 		"SET FOREIGN_KEY_CHECKS = 0",
 		"TRUNCATE alias_destinations", "TRUNCATE aliases", "TRUNCATE account_passwords", "TRUNCATE tokens", "TRUNCATE accounts",
-		"TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE storage", "TRUNCATE signing_keys", "TRUNCATE sessions",
+		"TRUNCATE mailbox_removals", "TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE storage", "TRUNCATE signing_keys", "TRUNCATE sessions",
 		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin", "TRUNCATE nodes",
 		"SET FOREIGN_KEY_CHECKS = 1",
 	} {
@@ -178,5 +180,40 @@ func TestReadWriteSplit(t *testing.T) {
 	}
 	if db.ReaderQueries() != 2 {
 		t.Fatalf("transaction used the replica: %d", db.ReaderQueries())
+	}
+}
+
+func TestMailboxRemovalIsDurable(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	st, err := db.CreateStorage(ctx, identity.Storage{Name: "removal", MonHost: "test", Pools: identity.Pools{Index: "i", Messages: "m", Attachments: "a"}, FSID: uuid.New(), Placement: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb, err := db.CreateMailbox(ctx, identity.Mailbox{StorageID: st.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ScheduleMailboxRemoval(ctx, mb.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetMailbox(ctx, mb.ID); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("mailbox remains: %v", err)
+	}
+	tasks, err := db.Claim(ctx, "remove-mailbox", "worker", 1, time.Minute)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("cleanup not queued: %v %v", tasks, err)
+	}
+	if err := db.DeleteStorage(ctx, st.ID); !errors.Is(err, identity.ErrInUse) {
+		t.Fatalf("storage not pinned: %v", err)
+	}
+	if _, err := db.CreateMailbox(ctx, mb); !errors.Is(err, identity.ErrInUse) {
+		t.Fatalf("reused deleting mailbox: %v", err)
+	}
+	if err := db.FinishMailboxRemoval(ctx, mb.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteStorage(ctx, st.ID); err != nil {
+		t.Fatal(err)
 	}
 }

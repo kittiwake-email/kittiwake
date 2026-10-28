@@ -218,8 +218,19 @@ func (d *DB) CreateMailbox(ctx context.Context, m identity.Mailbox) (identity.Ma
 		return identity.Mailbox{}, fmt.Errorf("%w: mailbox state %q", identity.ErrInvalid, m.State)
 	}
 	m.StateSince = now
-	_, err := d.exec(ctx, "INSERT INTO mailboxes (uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
-		bin(m.ID), nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, now, now)
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		var removed []byte
+		err := tx.QueryRowContext(ctx, "SELECT uuid FROM mailbox_removals WHERE uuid = ? FOR UPDATE", bin(m.ID)).Scan(&removed)
+		if err == nil {
+			return identity.ErrInUse
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "INSERT INTO mailboxes (uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+			bin(m.ID), nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, now, now)
+		return err
+	})
 	if err != nil {
 		err = mapErr(err)
 		if errors.Is(err, identity.ErrNotFound) {
@@ -275,6 +286,14 @@ func (d *DB) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*identity.
 }
 
 func (d *DB) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
+	return d.deleteMailbox(ctx, id, false)
+}
+
+func (d *DB) ScheduleMailboxRemoval(ctx context.Context, id uuid.UUID) error {
+	return d.deleteMailbox(ctx, id, true)
+}
+
+func (d *DB) deleteMailbox(ctx context.Context, id uuid.UUID, schedule bool) error {
 	return d.tx(ctx, func(tx *sql.Tx) error {
 		rid, m, err := scanMailbox(tx.QueryRowContext(ctx, "SELECT "+mailboxCols+" FROM mailboxes WHERE uuid = ? FOR UPDATE", bin(id)))
 		if err != nil {
@@ -295,6 +314,19 @@ func (d *DB) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 		}
 		if n > 0 {
 			return fmt.Errorf("%w: mailbox %s is an alias destination", identity.ErrInUse, id)
+		}
+		if schedule {
+			payload, err := json.Marshal(map[string]any{"mailbox": id, "storage_id": m.StorageID})
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "INSERT INTO mailbox_removals (uuid, storage_id) VALUES (?, ?)", bin(id), nullID(m.StorageID)); err != nil {
+				return err
+			}
+			now := d.Now().UTC()
+			if _, err := tx.ExecContext(ctx, "INSERT INTO tasks (id, type, state, payload, run_after, attempts, created) VALUES (?, 'remove-mailbox', 'pending', ?, ?, 0, ?)", uuid.NewString(), string(payload), now, now); err != nil {
+				return err
+			}
 		}
 		_, err = tx.ExecContext(ctx, "DELETE FROM mailboxes WHERE id = ?", rid)
 		return err
@@ -1033,3 +1065,9 @@ func (d *DB) DeleteStorage(ctx context.Context, id int64) error {
 }
 
 var _ identity.Backend = (*DB)(nil)
+
+// FinishMailboxRemoval releases the storage pin only after data cleanup succeeded.
+func (d *DB) FinishMailboxRemoval(ctx context.Context, id uuid.UUID) error {
+	_, err := d.exec(ctx, "DELETE FROM mailbox_removals WHERE uuid = ?", bin(id))
+	return err
+}
