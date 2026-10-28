@@ -131,7 +131,7 @@ These are settled. Do not design around them.
   reserve; it does not measure per-OSD IOPS or move existing mailboxes. An unreachable
   storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
   every storage; a removal task carries the storage id.
-- **Multi-object index mutations use a durable root journal.** Root format 3 prepares a
+- **Multi-object index mutations use a durable root journal.** Root format 4 prepares a
   commit decision with CAS, replays version-fenced target writes, then atomically publishes
   counters/modseq/change log. Private delivery data is undone only before acceptance;
   ErrPending must preserve it for recovery. Readers help pending mutations complete. Sweeps
@@ -174,7 +174,9 @@ These are settled. Do not design around them.
   Message id → location via `loc/<uuid>` in hashed thread shards; the message `loc`
   xattr is a legacy fallback. Removal stores a retention handle; physical purge removes the location key.
   Retention ranges hold at most 65,536 deletions, independently of live quota.
-  Thread/Message-ID maps sharded over `<mb>/t.<xx>` (256). Keep omaps bounded.
+  Thread/Message-ID/location maps use 256 entry buckets with overflow children,
+  capped at 4,096 keys and 4 MiB per node. Message-ID mappings count live copies
+  and are removed with the last copy. Format 4 requires resetting old lab data.
 - **Change tracking:** every mutation bumps `modseq` and appends to the bounded change log
   root omap `c/<modseq>`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.
 - **Workers** consume the task queue in MariaDB (`SELECT ... FOR UPDATE SKIP LOCKED`,

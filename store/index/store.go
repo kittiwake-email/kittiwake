@@ -23,7 +23,7 @@ import (
 
 const (
 	maxRootAttempts  = 64
-	rootVersion      = 3
+	rootVersion      = 4
 	changeLogKeep    = 10000 // entries kept per mailbox
 	changeTrimEvery  = 256   // trim when modseq crosses a multiple of this
 	maxFolderDepth   = 16
@@ -215,8 +215,8 @@ func (s *Store) readRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, erro
 	if err := json.Unmarshal(data, &r); err != nil {
 		return versionedRoot{}, fmt.Errorf("index: decode root %s: %w", mb, err)
 	}
-	if r.Version > rootVersion {
-		return versionedRoot{}, fmt.Errorf("index: unsupported root version %d", r.Version)
+	if r.Version != rootVersion {
+		return versionedRoot{}, fmt.Errorf("index: root version %d requires a lab reset before format 4", r.Version)
 	}
 	vr := versionedRoot{root: r, version: ver}
 	return vr, nil
@@ -802,14 +802,14 @@ func (s *Store) ListFolder(ctx context.Context, mb uuid.UUID, fid string, afterU
 // threadFor determines the thread id for a new record from its own
 // Message-ID and the references it carries, consulting the thread shards.
 func (s *Store) threadFor(ctx context.Context, mb uuid.UUID, rec *Record) (string, error) {
-	// Most direct parent first.
+	// Preserve duplicate Message-ID identity, then prefer the direct parent.
 	var candidates []string
+	if rec.MsgIDHeader != "" {
+		candidates = append(candidates, rec.MsgIDHeader)
+	}
 	candidates = append(candidates, rec.InReplyTo...)
 	for i := len(rec.References) - 1; i >= 0; i-- {
 		candidates = append(candidates, rec.References[i])
-	}
-	if rec.MsgIDHeader != "" {
-		candidates = append(candidates, rec.MsgIDHeader)
 	}
 	byShard := map[string][]string{}
 	for _, id := range candidates {
@@ -818,7 +818,7 @@ func (s *Store) threadFor(ctx context.Context, mb uuid.UUID, rec *Record) (strin
 	}
 	found := map[string]string{}
 	for oid, keys := range byShard {
-		m, err := s.pool(ctx, mb).OmapGet(ctx, oid, keys)
+		m, err := s.mapGet(ctx, mb, oid, keys)
 		if err != nil {
 			if errors.Is(err, rados.ErrNotFound) {
 				continue
@@ -827,7 +827,11 @@ func (s *Store) threadFor(ctx context.Context, mb uuid.UUID, rec *Record) (strin
 		}
 		for k, v := range m {
 			if len(v) > 0 {
-				found[k] = string(v)
+				var mapping messageIDMapping
+				if err := json.Unmarshal(v, &mapping); err != nil {
+					return "", err
+				}
+				found[k] = mapping.ThreadID
 			}
 		}
 	}
@@ -901,15 +905,13 @@ func (s *Store) append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 		pg.go_(func() error { return store(rec.UID, rec.ModSeq) })
 	}
 	pg.go_(func() error {
-		_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(tid, rec.MessageID): loc}))
-		return mapErr(err)
+		return s.mapSet(ctx, mb, threadOID(mb, tid), threadKey(tid, rec.MessageID), loc)
 	})
 	if rec.MsgIDHeader != "" {
 		// threadFor already resolved an existing mapping into tid, so an
 		// unconditional write is idempotent (no read needed).
 		pg.go_(func() error {
-			_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, rec.MsgIDHeader), rados.NewWriteTx().OmapSet(map[string][]byte{msgidKey(rec.MsgIDHeader): []byte(tid)}))
-			return mapErr(err)
+			return s.changeMessageID(ctx, mb, rec.MsgIDHeader, tid, 1)
 		})
 	}
 	if err := pg.wait(); err != nil {
@@ -952,7 +954,7 @@ func (s *Store) unappend(ctx context.Context, mb uuid.UUID, fid string, rec Reco
 		r.Log(Change{ModSeq: r.ModSeq, Kind: KindEmail, Op: OpDestroyed, ID: rec.MessageID.String(), FolderID: fid, UID: rec.UID, Timestamp: now})
 		return nil
 	})
-	_, _ = s.pool(ctx, mb).Write(ctx, threadOID(mb, tid), rados.NewWriteTx().OmapRemove(threadKey(tid, rec.MessageID)))
+	_ = s.mapRemove(ctx, mb, threadOID(mb, tid), threadKey(tid, rec.MessageID))
 }
 
 // parallel runs functions concurrently and returns the first error.
@@ -1118,8 +1120,7 @@ func (s *Store) move(ctx context.Context, mb uuid.UUID, from string, uid uint32,
 		return mapErr(err)
 	})
 	pg.go_(func() error {
-		_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapSet(map[string][]byte{threadKey(rec.ThreadID, rec.MessageID): []byte(loc.String())}))
-		return mapErr(err)
+		return s.mapSet(ctx, mb, threadOID(mb, rec.ThreadID), threadKey(rec.ThreadID, rec.MessageID), []byte(loc.String()))
 	})
 	if err := pg.wait(); err != nil {
 		return Record{}, err
@@ -1179,12 +1180,11 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 		return mapErr(err)
 	})
 	pg.go_(func() error {
-		_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, rec.ThreadID), rados.NewWriteTx().OmapRemove(threadKey(rec.ThreadID, rec.MessageID)))
-		if errors.Is(err, rados.ErrNotFound) {
-			return nil
-		}
-		return mapErr(err)
+		return s.mapRemove(ctx, mb, threadOID(mb, rec.ThreadID), threadKey(rec.ThreadID, rec.MessageID))
 	})
+	if rec.MsgIDHeader != "" {
+		pg.go_(func() error { return s.changeMessageID(ctx, mb, rec.MsgIDHeader, rec.ThreadID, -1) })
+	}
 	if err := pg.wait(); err != nil {
 		return RetentionEntry{}, err
 	}
@@ -1194,7 +1194,10 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 
 // ThreadMembers returns the locations of all messages in a thread.
 func (s *Store) ThreadMembers(ctx context.Context, mb uuid.UUID, tid string) ([]Location, error) {
-	kv, _, err := s.pool(ctx, mb).OmapList(ctx, threadOID(mb, tid), "t/"+tid+"/", "", 0)
+	if _, err := s.getRoot(ctx, mb); err != nil {
+		return nil, err
+	}
+	kv, err := s.mapList(ctx, mb, threadOID(mb, tid), "t/"+tid+"/")
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
 			return nil, nil
@@ -1307,14 +1310,17 @@ func (s *Store) DeleteAll(ctx context.Context, mb uuid.UUID) error {
 		oids = append(oids, folderShards(mb, f)...)
 	}
 	for i := 0; i < threadShards; i++ {
-		oids = append(oids, fmt.Sprintf("%s/t.%02x", mb, i))
+		base := fmt.Sprintf("%s/t.%02x", mb, i)
+		if err := s.walkMap(ctx, mb, base, func(oid string) error { oids = append(oids, oid); return nil }); err != nil {
+			return err
+		}
 	}
 	if vr.root.RetentionNext > 0 {
 		for shard := uint64(0); shard <= (vr.root.RetentionNext-1)>>shardBits; shard++ {
 			oids = append(oids, retentionShardOID(mb, shard))
 		}
 	}
-	oids = append(oids, retentionOID(mb), rootOID(mb))
+	oids = append(oids, rootOID(mb))
 	for _, oid := range oids {
 		if err := s.pool(ctx, mb).Delete(ctx, oid); err != nil && !errors.Is(err, rados.ErrNotFound) {
 			return mapErr(err)

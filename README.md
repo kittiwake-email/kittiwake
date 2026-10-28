@@ -494,12 +494,16 @@ Mail data:
 - Mailbox root: `<mailbox-uuid>` in the index pool (folders, counters, modseq, pending mutation; bounded change-log omap)
 - Folder index shards: `<mailbox-uuid>/<folder-id>` for UIDs below 65536, then
   `<mailbox-uuid>/<folder-id>.<n>` per further block of 65536 UIDs
-- Thread and Message-ID maps: `<mailbox-uuid>/t.<xx>`, 256 shards by hash of the key
+- Thread, Message-ID and location maps: `<mailbox-uuid>/t.<xx>` entry buckets,
+  with hash-prefix overflow children. Every node is capped at 4,096 keys and
+  4 MiB of key/value data, including a single large conversation. Deleted keys
+  free reusable space; empty node objects retain stale-writer fences. Message-ID
+  mappings count live copies and disappear when the last live copy is removed.
+  Replies can resolve only Message-IDs still represented by live mail.
 - Change log: `c/<modseq>` omap keys on the mailbox root (bounded)
 - Retention set: `<mailbox-uuid>/retention.<16-hex-range>` in the index pool,
   at most 65,536 deletion entries per object, keyed by purge-at timestamp. Root
-  allocation and a low watermark track active ranges. Legacy `<mailbox-uuid>/retention`
-  is drained first. Location entries point directly to retained messages and are
+  allocation and a low watermark track active ranges. Location entries point directly to retained messages and are
   removed after physical purge; empty shard objects retain their version fences.
 - Audit: daily headers at `<mailbox-uuid>/audit/<YYYY-MM-DD>` and capped
   segments at `<day>/<16-hex-segment>` in the index pool. Each segment holds at
@@ -562,10 +566,10 @@ folder, thread, location and retention writes. Only then does a root CAS publish
 modseq and changes atomically. Delayed helpers cannot overwrite newer mutations. Empty
 index objects are retained as tombstones where deletion could permit stale exclusive creates.
 
-**Root format 3 rollout.** Stop all old writers and workers before starting this version;
-older binaries do not understand the retention ranges and location handles. Back up the data and validate recovery in
-the lab first. Roots upgrade lazily on mutation. Do not roll back to an old writer after
-format-3 writes. No automatic downgrade or mixed-version deployment is supported.
+**Root format 4 rollout.** Stop all old writers and workers before starting this version;
+older binaries do not understand the capped maps or live Message-ID counters.
+This lab upgrade requires a data reset; old roots are rejected instead of being
+lazily upgraded. Do not mix writers or downgrade after format-4 writes.
 
 Reads are not cross-object snapshots: a record read concurrent with a mutation may see newer
 record data before its root state is published. Synchronization clients must advance only

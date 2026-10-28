@@ -19,7 +19,7 @@ func retentionShardOID(mb uuid.UUID, shard uint64) string {
 func retentionHandle(shard uint64, key string) string { return fmt.Sprintf("s/%016x/%s", shard, key) }
 func retentionTarget(mb uuid.UUID, handle string) (string, string, error) {
 	if !strings.HasPrefix(handle, "s/") {
-		return retentionOID(mb), handle, nil
+		return "", "", ErrInvalid
 	}
 	parts := strings.SplitN(handle, "/", 3)
 	if len(parts) != 3 {
@@ -33,15 +33,17 @@ func retentionTarget(mb uuid.UUID, handle string) (string, string, error) {
 }
 func (s *Store) setRetainedLocation(ctx context.Context, mb, msg uuid.UUID, seq uint64, key string) error {
 	value := "retained/" + retentionHandle(seq>>shardBits, key)
-	_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, msg.String()), rados.NewWriteTx().OmapSet(map[string][]byte{"loc/" + msg.String(): []byte(value)}))
-	return err
+	return s.mapSet(ctx, mb, threadOID(mb, msg.String()), "loc/"+msg.String(), []byte(value))
 }
 
 // ListRetention returns bounded pages of due entries. Handles are opaque and
-// must be passed unchanged to DropRetention. Legacy retention is drained first.
+// must be passed unchanged to DropRetention.
 func (s *Store) ListRetention(ctx context.Context, mb uuid.UUID, before time.Time, max int) (entries []RetentionEntry, keys []string, more bool, err error) {
 	vr, err := s.getRoot(ctx, mb)
-	if err != nil && !errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
 		return nil, nil, false, err
 	}
 	read := func(oid string, shard *uint64) (bool, error) {
@@ -75,9 +77,6 @@ func (s *Store) ListRetention(ctx context.Context, mb uuid.UUID, before time.Tim
 			keys = append(keys, key)
 		}
 		return more, nil
-	}
-	if more, err = read(retentionOID(mb), nil); err != nil || more {
-		return
 	}
 	if vr.root.RetentionNext == 0 {
 		return
@@ -113,7 +112,7 @@ func (s *Store) dropRetention(ctx context.Context, mb uuid.UUID, handles ...stri
 			// DropRetention's contract requires physical deletion first. Removing the
 			// key under the root journal advances the shard version, fencing old helpers;
 			// the retained shard object must not be deleted or recreated.
-			if _, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, entry.MessageID.String()), rados.NewWriteTx().OmapRemove("loc/"+entry.MessageID.String())); err != nil {
+			if err := s.mapRemove(ctx, mb, threadOID(mb, entry.MessageID.String()), "loc/"+entry.MessageID.String()); err != nil {
 				return err
 			}
 		}
@@ -156,7 +155,7 @@ func (s *Store) IsRetained(ctx context.Context, mb, msg uuid.UUID) (bool, error)
 	if _, err := s.getRoot(ctx, mb); err != nil && !errors.Is(err, ErrNotFound) {
 		return false, err
 	}
-	kv, err := s.pool(ctx, mb).OmapGet(ctx, threadOID(mb, msg.String()), []string{"loc/" + msg.String()})
+	kv, err := s.mapGet(ctx, mb, threadOID(mb, msg.String()), []string{"loc/" + msg.String()})
 	if err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return false, err
 	}
@@ -175,23 +174,6 @@ func (s *Store) IsRetained(ctx context.Context, mb, msg uuid.UUID) (bool, error)
 		}
 		_, ok := entries[key]
 		return ok, nil
-	}
-	// Legacy data only; never scan new shards for a point membership check.
-	entries, _, err := s.pool(ctx, mb).OmapList(ctx, retentionOID(mb), "", "", 0)
-	if errors.Is(err, rados.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	for _, entry := range entries {
-		var r RetentionEntry
-		if err := json.Unmarshal(entry.Value, &r); err != nil {
-			return false, err
-		}
-		if r.MessageID == msg {
-			return true, nil
-		}
 	}
 	return false, nil
 }
@@ -225,9 +207,6 @@ func (s *Store) NextRetention(ctx context.Context, mb uuid.UUID) (time.Time, err
 			}
 		}
 		return nil
-	}
-	if err := read(retentionOID(mb)); err != nil {
-		return next, err
 	}
 	if vr.root.RetentionNext > 0 {
 		for shard := vr.root.RetentionFirst; shard <= (vr.root.RetentionNext-1)>>shardBits; shard++ {

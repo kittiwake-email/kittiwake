@@ -2,9 +2,7 @@ package index
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/google/uuid"
-	"kittiwake/rados"
 	"strings"
 	"testing"
 	"time"
@@ -67,34 +65,19 @@ func testRetentionRanges(t *testing.T, s *Store, mb uuid.UUID) {
 	}
 }
 
-func TestRetentionLegacyAndFutureRanges(t *testing.T) {
+func TestRetentionFutureRange(t *testing.T) {
 	s, mb := newStore(t)
 	ctx := context.Background()
 	root, _ := s.GetRoot(ctx, mb)
 	fid := root.Folders[0].ID
-	future, _ := s.Append(ctx, mb, fid, rec(1, "future"), nil)
-	_, err := s.Remove(ctx, mb, fid, future.UID, "test", time.Now().Add(time.Hour))
+	future, err := s.Append(ctx, mb, fid, rec(1, "future"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := RetentionEntry{MessageID: uuid.New(), PurgeAt: time.Now().Add(-time.Hour)}
-	data, _ := json.Marshal(legacy)
-	key := retentionKey(legacy.PurgeAt, legacy.MessageID)
-	_, err = s.pool(ctx, mb).Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{key: data}))
-	if err != nil {
+	if _, err := s.Remove(ctx, mb, fid, future.UID, "test", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	entries, keys, more, err := s.ListRetention(ctx, mb, time.Now(), 10)
-	if err != nil || more || len(entries) != 1 || entries[0].MessageID != legacy.MessageID || keys[0] != key {
-		t.Fatalf("legacy page: %v %v %v %v", entries, keys, more, err)
-	}
-	if ok, err := s.IsRetained(ctx, mb, legacy.MessageID); err != nil || !ok {
-		t.Fatalf("legacy membership: %v %v", ok, err)
-	}
-	if err := s.DropRetention(ctx, mb, keys...); err != nil {
-		t.Fatal(err)
-	}
-	entries, _, _, err = s.ListRetention(ctx, mb, time.Now(), 10)
+	entries, _, _, err := s.ListRetention(ctx, mb, time.Now(), 10)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("future entry must stay: %v %v", entries, err)
 	}

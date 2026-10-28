@@ -196,3 +196,8 @@ func TestCephRetentionRanges(t *testing.T) {
 	s, _, mb, _ := benchmarkCeph(t)
 	testRetentionRanges(t, s, mb)
 }
+
+func TestCephMapBounds(t *testing.T) {
+	s, _, mb, _ := benchmarkCeph(t)
+	testMapBounds(t, s, mb)
+}

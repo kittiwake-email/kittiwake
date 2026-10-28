@@ -190,8 +190,9 @@ type Record struct {
 	FromEmail      string    `json:"fe,omitempty"`
 	HasAttachments bool      `json:"a,omitempty"`
 
-	// Threading input for Append; not stored in the index (the document has it).
-	MsgIDHeader string   `json:"-"`
+	// Message-ID is retained to reclaim its mapping when the last live copy leaves.
+	// References and InReplyTo are Append input only.
+	MsgIDHeader string   `json:"mh,omitempty"`
 	InReplyTo   []string `json:"-"`
 	References  []string `json:"-"`
 }

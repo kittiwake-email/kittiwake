@@ -24,6 +24,7 @@ type mutation struct {
 	Writes  []*mutationWrite `json:"writes"`
 }
 type mutationWrite struct {
+	Known   bool           `json:"-"`
 	OID     string         `json:"oid"`
 	Version uint64         `json:"version"`
 	Exists  bool           `json:"exists"`
@@ -32,6 +33,8 @@ type mutationWrite struct {
 }
 type stageKey struct{}
 type staged struct {
+	mapMu  sync.Mutex
+	maps   map[string]*mapNode
 	base   versionedRoot
 	root   Root
 	mu     sync.Mutex
@@ -109,6 +112,9 @@ func (s *Store) mutate(ctx context.Context, mb uuid.UUID, fn func(context.Contex
 		// entire plan if another writer changed any index state meanwhile.
 		var versions parallel
 		for _, w := range m.Writes {
+			if w.Known {
+				continue
+			}
 			versions.go_(func() error {
 				stat, err := s.pool(ctx, mb).Stat(ctx, w.OID)
 				if err != nil && !errors.Is(err, rados.ErrNotFound) {
@@ -330,8 +336,7 @@ func (s *Store) setLocation(ctx context.Context, mb, msg uuid.UUID, loc Location
 	if loc.FolderID == "" {
 		data = []byte("deleted")
 	}
-	_, err := s.pool(ctx, mb).Write(ctx, threadOID(mb, msg.String()), rados.NewWriteTx().OmapSet(map[string][]byte{"loc/" + msg.String(): data}))
-	return err
+	return s.mapSet(ctx, mb, threadOID(mb, msg.String()), "loc/"+msg.String(), data)
 }
 
 // Location returns the committed index location; known=true with an empty
@@ -341,7 +346,7 @@ func (s *Store) Location(ctx context.Context, mb, msg uuid.UUID) (loc Location, 
 		return
 	}
 	var kv map[string][]byte
-	kv, err = s.pool(ctx, mb).OmapGet(ctx, threadOID(mb, msg.String()), []string{"loc/" + msg.String()})
+	kv, err = s.mapGet(ctx, mb, threadOID(mb, msg.String()), []string{"loc/" + msg.String()})
 	if errors.Is(err, rados.ErrNotFound) {
 		return Location{}, false, nil
 	}
