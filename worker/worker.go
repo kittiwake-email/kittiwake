@@ -304,7 +304,7 @@ type mailboxPayload struct {
 }
 
 func (w *Worker) handle(ctx context.Context, task queue.Task) error {
-	ctx = actor.With(ctx, actor.System(audit.ProtoCLI))
+	ctx = identity.WithPrimaryReads(actor.With(ctx, actor.System(audit.ProtoCLI)))
 	var mp mailboxPayload
 	switch task.Type {
 	case TaskPurgeTrash, TaskRemoveMailbox, TaskRecalcQuota:

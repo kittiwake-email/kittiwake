@@ -31,7 +31,7 @@ func (d *DB) RegisterNode(ctx context.Context, n identity.Node) (identity.Node, 
 	if n.Expires.IsZero() {
 		n.Expires = now.Add(30 * time.Second)
 	}
-	if _, err := d.exec(ctx, "INSERT INTO nodes (mode, address, host, version, started, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE host = VALUES(host), version = VALUES(version), started = VALUES(started), last_seen = VALUES(last_seen), expires = VALUES(expires)",
+	if _, err := d.sql.ExecContext(ctx, "INSERT INTO nodes (mode, address, host, version, started, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE host = VALUES(host), version = VALUES(version), started = VALUES(started), last_seen = VALUES(last_seen), expires = VALUES(expires)",
 		n.Mode, n.Address, n.Host, n.Version, n.Started.UTC(), n.LastSeen, n.Expires.UTC()); err != nil {
 		return identity.Node{}, mapErr(err)
 	}
@@ -43,7 +43,7 @@ func (d *DB) ListNodes(ctx context.Context, mode string) ([]identity.Node, error
 	if mode != "" {
 		q, args = "SELECT "+nodeCols+" FROM nodes WHERE mode = ? ORDER BY address", []any{mode}
 	}
-	rows, err := d.r().QueryContext(ctx, q, args...)
+	rows, err := d.r(ctx).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -60,12 +60,12 @@ func (d *DB) ListNodes(ctx context.Context, mode string) ([]identity.Node, error
 }
 
 func (d *DB) DeleteNode(ctx context.Context, mode, address string) error {
-	_, err := d.exec(ctx, "DELETE FROM nodes WHERE mode = ? AND address = ?", mode, address)
+	_, err := d.sql.ExecContext(ctx, "DELETE FROM nodes WHERE mode = ? AND address = ?", mode, address)
 	return mapErr(err)
 }
 
 func (d *DB) PurgeNodes(ctx context.Context, cutoff time.Time) (int, error) {
-	res, err := d.exec(ctx, "DELETE FROM nodes WHERE expires < ?", cutoff.UTC())
+	res, err := d.sql.ExecContext(ctx, "DELETE FROM nodes WHERE expires < ?", cutoff.UTC())
 	if err != nil {
 		return 0, mapErr(err)
 	}

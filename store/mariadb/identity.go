@@ -76,7 +76,7 @@ func (d *DB) GetDomain(ctx context.Context, name string) (identity.Versioned[ide
 	if err != nil {
 		return identity.Versioned[identity.Domain]{}, err
 	}
-	_, dom, err := scanDomain(d.r().QueryRowContext(ctx, "SELECT "+domainCols+" FROM domains WHERE name = ?", name))
+	_, dom, err := scanDomain(d.r(ctx).QueryRowContext(ctx, "SELECT "+domainCols+" FROM domains WHERE name = ?", name))
 	return identity.Versioned[identity.Domain]{Value: dom}, err
 }
 
@@ -140,7 +140,7 @@ func (d *DB) listStrings(ctx context.Context, q string, args ...any) ([]string, 
 		max = 1000
 	}
 	args[len(args)-1] = max + 1
-	rows, err := d.r().QueryContext(ctx, q, args...)
+	rows, err := d.r(ctx).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, false, mapErr(err)
 	}
@@ -242,7 +242,7 @@ func (d *DB) CreateMailbox(ctx context.Context, m identity.Mailbox) (identity.Ma
 }
 
 func (d *DB) GetMailbox(ctx context.Context, id uuid.UUID) (identity.Versioned[identity.Mailbox], error) {
-	_, m, err := scanMailbox(d.r().QueryRowContext(ctx, "SELECT "+mailboxCols+" FROM mailboxes WHERE uuid = ?", bin(id)))
+	_, m, err := scanMailbox(d.r(ctx).QueryRowContext(ctx, "SELECT "+mailboxCols+" FROM mailboxes WHERE uuid = ?", bin(id)))
 	return identity.Versioned[identity.Mailbox]{Value: m}, err
 }
 
@@ -334,7 +334,7 @@ func (d *DB) deleteMailbox(ctx context.Context, id uuid.UUID, schedule bool) err
 }
 
 func (d *DB) ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) error {
-	rows, err := d.r().QueryContext(ctx, "SELECT uuid FROM mailboxes ORDER BY id")
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT uuid FROM mailboxes ORDER BY id")
 	if err != nil {
 		return mapErr(err)
 	}
@@ -352,7 +352,7 @@ func (d *DB) ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) err
 }
 
 func (d *DB) ListMailboxAccounts(ctx context.Context, id uuid.UUID, after string, max int) (usernames []string, more bool, err error) {
-	rid, err := d.mailboxRowID(ctx, d.r(), id)
+	rid, err := d.mailboxRowID(ctx, d.r(ctx), id)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			return nil, false, nil
@@ -486,7 +486,7 @@ func (d *DB) CreateAccount(ctx context.Context, a identity.Account) (identity.Ac
 }
 
 func (d *DB) GetAccount(ctx context.Context, id uuid.UUID) (identity.Versioned[identity.Account], error) {
-	_, a, err := d.scanAccount(ctx, d.r(), d.r().QueryRowContext(ctx, "SELECT "+accountCols+accountFrom+"WHERE a.uuid = ?", bin(id)))
+	_, a, err := d.scanAccount(ctx, d.r(ctx), d.r(ctx).QueryRowContext(ctx, "SELECT "+accountCols+accountFrom+"WHERE a.uuid = ?", bin(id)))
 	return identity.Versioned[identity.Account]{Value: a}, err
 }
 
@@ -495,7 +495,7 @@ func (d *DB) GetAccountByUsername(ctx context.Context, username string) (identit
 	if err != nil {
 		return identity.Versioned[identity.Account]{}, err
 	}
-	_, a, err := d.scanAccount(ctx, d.r(), d.r().QueryRowContext(ctx, "SELECT "+accountCols+accountFrom+"WHERE a.username = ?", username))
+	_, a, err := d.scanAccount(ctx, d.r(ctx), d.r(ctx).QueryRowContext(ctx, "SELECT "+accountCols+accountFrom+"WHERE a.username = ?", username))
 	return identity.Versioned[identity.Account]{Value: a}, err
 }
 
@@ -576,7 +576,7 @@ func (d *DB) ListDomainAccounts(ctx context.Context, domain, prefix, after strin
 	if err != nil {
 		return nil, false, err
 	}
-	domID, err := d.domainID(ctx, d.r(), domain)
+	domID, err := d.domainID(ctx, d.r(ctx), domain)
 	if err != nil {
 		if errors.Is(err, identity.ErrDomainUnknown) {
 			return nil, false, nil
@@ -705,14 +705,14 @@ func (d *DB) CreateAlias(ctx context.Context, al identity.Alias) (identity.Alias
 }
 
 func (d *DB) ListMailboxAliases(ctx context.Context, id uuid.UUID) ([]string, error) {
-	rid, err := d.mailboxRowID(ctx, d.r(), id)
+	rid, err := d.mailboxRowID(ctx, d.r(ctx), id)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	rows, err := d.r().QueryContext(ctx, "SELECT DISTINCT a.address FROM aliases a JOIN alias_destinations ad ON ad.alias_id = a.id WHERE ad.mailbox_id = ? ORDER BY a.address", rid)
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT DISTINCT a.address FROM aliases a JOIN alias_destinations ad ON ad.alias_id = a.id WHERE ad.mailbox_id = ? ORDER BY a.address", rid)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -735,7 +735,7 @@ func (d *DB) ListAliasesTo(ctx context.Context, address string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	rows, err := d.r().QueryContext(ctx, "SELECT DISTINCT a.address FROM aliases a JOIN alias_destinations ad ON ad.alias_id = a.id WHERE ad.address = ? ORDER BY a.address", na)
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT DISTINCT a.address FROM aliases a JOIN alias_destinations ad ON ad.alias_id = a.id WHERE ad.address = ? ORDER BY a.address", na)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -756,7 +756,7 @@ func (d *DB) GetAlias(ctx context.Context, address string) (identity.Versioned[i
 	if err != nil {
 		return identity.Versioned[identity.Alias]{}, err
 	}
-	_, al, err := d.loadAlias(ctx, d.r(), address, false)
+	_, al, err := d.loadAlias(ctx, d.r(ctx), address, false)
 	return identity.Versioned[identity.Alias]{Value: al}, err
 }
 
@@ -812,7 +812,7 @@ func (d *DB) ListDomainAliases(ctx context.Context, domain, after string, max in
 	if err != nil {
 		return nil, false, err
 	}
-	domID, err := d.domainID(ctx, d.r(), domain)
+	domID, err := d.domainID(ctx, d.r(ctx), domain)
 	if err != nil {
 		if errors.Is(err, identity.ErrDomainUnknown) {
 			return nil, false, nil
@@ -912,7 +912,7 @@ func (d *DB) CreateAdminToken(ctx context.Context, role string, expiresAt time.T
 }
 
 func (d *DB) listTokens(ctx context.Context, q string, args ...any) ([]identity.Token, error) {
-	rows, err := d.r().QueryContext(ctx, q, args...)
+	rows, err := d.r(ctx).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -947,12 +947,12 @@ func (d *DB) LookupToken(ctx context.Context, secret string) (identity.Versioned
 	if !strings.HasPrefix(secret, identity.TokenPrefix) {
 		return identity.Versioned[identity.Token]{}, identity.ErrNotFound
 	}
-	t, err := scanToken(d.r().QueryRowContext(ctx, "SELECT "+tokenCols+tokenFrom+"WHERE t.hash = ?", identity.HashToken(secret)))
+	t, err := scanToken(d.r(ctx).QueryRowContext(ctx, "SELECT "+tokenCols+tokenFrom+"WHERE t.hash = ?", identity.HashToken(secret)))
 	return identity.Versioned[identity.Token]{Value: t}, err
 }
 
 func (d *DB) TouchToken(ctx context.Context, t identity.Versioned[identity.Token]) {
-	_, _ = d.exec(ctx, "UPDATE tokens SET last_used = ? WHERE hash = ?", d.Now().UTC(), t.Value.Hash)
+	_, _ = d.sql.ExecContext(ctx, "UPDATE tokens SET last_used = ? WHERE hash = ? AND (last_used IS NULL OR last_used < ?)", d.Now().UTC(), t.Value.Hash, d.Now().UTC().Add(-time.Minute))
 }
 
 func (d *DB) ListTokens(ctx context.Context, accountID uuid.UUID) ([]identity.Token, error) {
@@ -1002,11 +1002,11 @@ func (d *DB) CreateStorage(ctx context.Context, c identity.Storage) (identity.St
 }
 
 func (d *DB) GetStorage(ctx context.Context, id int64) (identity.Storage, error) {
-	return scanStorage(d.r().QueryRowContext(ctx, "SELECT "+storageCols+" FROM storage WHERE id = ?", id))
+	return scanStorage(d.r(ctx).QueryRowContext(ctx, "SELECT "+storageCols+" FROM storage WHERE id = ?", id))
 }
 
 func (d *DB) ListStorage(ctx context.Context) ([]identity.Storage, error) {
-	rows, err := d.r().QueryContext(ctx, "SELECT "+storageCols+" FROM storage ORDER BY id")
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT "+storageCols+" FROM storage ORDER BY id")
 	if err != nil {
 		return nil, mapErr(err)
 	}

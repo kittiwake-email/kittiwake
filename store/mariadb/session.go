@@ -56,7 +56,7 @@ func (d *DB) Create(ctx context.Context, acct uuid.UUID, roles []string, client,
 }
 
 func (d *DB) Get(ctx context.Context, acct uuid.UUID, id string) (session.Session, error) {
-	return scanSession(d.r().QueryRowContext(ctx, "SELECT "+sessionCols+" FROM sessions WHERE id = ? AND account_uuid = ?", id, bin(acct)))
+	return scanSession(d.r(ctx).QueryRowContext(ctx, "SELECT "+sessionCols+" FROM sessions WHERE id = ? AND account_uuid = ?", id, bin(acct)))
 }
 
 func (d *DB) Refresh(ctx context.Context, acct uuid.UUID, id, presented, ip string, lifetime time.Duration) (session.Session, string, error) {
@@ -143,7 +143,7 @@ func (d *DB) RevokeAll(ctx context.Context, acct uuid.UUID) error {
 func (d *DB) List(ctx context.Context, acct uuid.UUID) ([]session.Session, error) {
 	now := d.Now().UTC()
 	_, _ = d.exec(ctx, "DELETE FROM sessions WHERE account_uuid = ? AND expires_at <= ?", bin(acct), now)
-	rows, err := d.r().QueryContext(ctx, "SELECT "+sessionCols+" FROM sessions WHERE account_uuid = ? AND expires_at > ? ORDER BY created, id", bin(acct), now)
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT "+sessionCols+" FROM sessions WHERE account_uuid = ? AND expires_at > ? ORDER BY created, id", bin(acct), now)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func (d *DB) List(ctx context.Context, acct uuid.UUID) ([]session.Session, error
 func (d *DB) Keys(ctx context.Context) (session.KeySet, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		var raw string
-		err := d.r().QueryRowContext(ctx, "SELECT keyset FROM signing_keys WHERE id = 1").Scan(&raw)
+		err := d.r(ctx).QueryRowContext(ctx, "SELECT keyset FROM signing_keys WHERE id = 1").Scan(&raw)
 		if err == nil {
 			var ks session.KeySet
 			if err := json.Unmarshal([]byte(raw), &ks); err != nil {

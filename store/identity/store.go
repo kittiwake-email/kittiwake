@@ -208,7 +208,7 @@ func (s *Store) ListDomains(ctx context.Context, after string, max int) (names [
 	return s.b.ListDomains(ctx, after, max)
 }
 func (s *Store) GetMailbox(ctx context.Context, id uuid.UUID) (Versioned[Mailbox], error) {
-	return s.b.GetMailbox(ctx, id)
+	return s.b.GetMailbox(WithPrimaryReads(ctx), id)
 }
 func (s *Store) ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) error {
 	return s.b.ListMailboxes(ctx, fn)

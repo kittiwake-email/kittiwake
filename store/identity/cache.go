@@ -37,6 +37,10 @@ func aliasKey(address string) string    { return "l:" + address }
 
 // GetDomainCached returns the domain as last seen within CacheTTL.
 func (s *Store) GetDomainCached(ctx context.Context, name string) (Domain, error) {
+	if PrimaryReads(ctx) {
+		v, err := s.GetDomain(ctx, name)
+		return v.Value, err
+	}
 	name, err := NormalizeDomain(name)
 	if err != nil {
 		return Domain{}, err
@@ -51,16 +55,24 @@ func (s *Store) GetDomainCached(ctx context.Context, name string) (Domain, error
 
 // GetMailboxCached returns the mailbox as last seen within CacheTTL.
 func (s *Store) GetMailboxCached(ctx context.Context, id uuid.UUID) (Mailbox, error) {
+	if PrimaryReads(ctx) {
+		v, err := s.GetMailbox(ctx, id)
+		return v.Value, err
+	}
 	if v, err, ok := s.cacheGet(mailboxKey(id)); ok {
 		return v.(Mailbox), err
 	}
-	v, err := s.GetMailbox(ctx, id)
+	v, err := s.b.GetMailbox(ctx, id)
 	s.cachePut(mailboxKey(id), v.Value, err)
 	return v.Value, err
 }
 
 // GetAccountByUsernameCached returns the account as last seen within CacheTTL.
 func (s *Store) GetAccountByUsernameCached(ctx context.Context, username string) (Account, error) {
+	if PrimaryReads(ctx) {
+		v, err := s.GetAccountByUsername(ctx, username)
+		return v.Value, err
+	}
 	username, _, err := NormalizeAddress(username)
 	if err != nil {
 		return Account{}, err
@@ -75,6 +87,10 @@ func (s *Store) GetAccountByUsernameCached(ctx context.Context, username string)
 
 // GetAliasCached returns the alias as last seen within CacheTTL.
 func (s *Store) GetAliasCached(ctx context.Context, address string) (Alias, error) {
+	if PrimaryReads(ctx) {
+		v, err := s.GetAlias(ctx, address)
+		return v.Value, err
+	}
 	address, _, err := normalizeAliasAddress(address)
 	if err != nil {
 		return Alias{}, err

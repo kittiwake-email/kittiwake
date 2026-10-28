@@ -112,8 +112,8 @@ func openPool(dsn string) (*sql.DB, error) {
 
 // r returns the pool for a SELECT-only operation: the replica, unless
 // there is none or this process wrote recently.
-func (d *DB) r() *sql.DB {
-	if d.read == nil {
+func (d *DB) r(ctx context.Context) *sql.DB {
+	if d.read == nil || identity.PrimaryReads(ctx) {
 		return d.sql
 	}
 	if last := d.lastWrite.Load(); last != 0 && time.Since(time.Unix(0, last)) < d.ReadStickiness {
@@ -125,8 +125,11 @@ func (d *DB) r() *sql.DB {
 
 // exec runs a write on the primary and starts the stickiness window.
 func (d *DB) exec(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	d.lastWrite.Store(time.Now().UnixNano())
-	return d.sql.ExecContext(ctx, q, args...)
+	res, err := d.sql.ExecContext(ctx, q, args...)
+	if err == nil {
+		d.lastWrite.Store(time.Now().UnixNano())
+	}
+	return res, err
 }
 
 // ReaderQueries counts queries sent to the replica so far.
@@ -243,7 +246,7 @@ type SchemaInfo struct {
 // version it was applied; version 0 for an empty database.
 func (d *DB) Schema(ctx context.Context) (SchemaInfo, error) {
 	var out SchemaInfo
-	err := d.r().QueryRowContext(ctx, "SELECT version, applied_at, applied_by FROM schema_version ORDER BY version DESC LIMIT 1").Scan(&out.Version, &out.AppliedAt, &out.AppliedBy)
+	err := d.r(ctx).QueryRowContext(ctx, "SELECT version, applied_at, applied_by FROM schema_version ORDER BY version DESC LIMIT 1").Scan(&out.Version, &out.AppliedAt, &out.AppliedBy)
 	if err != nil {
 		var me *mysql.MySQLError
 		if errors.Is(err, sql.ErrNoRows) || (errors.As(err, &me) && me.Number == 1146) {
@@ -405,7 +408,9 @@ func (d *DB) tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 			}
 			return last
 		}
-		d.lastWrite.Store(time.Now().UnixNano())
+		if ctx.Value(backgroundWriteKey{}) == nil {
+			d.lastWrite.Store(time.Now().UnixNano())
+		}
 		return nil
 	}
 	return last
@@ -415,4 +420,10 @@ func (d *DB) tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 func likePrefix(p string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(p) + "%"
+}
+
+type backgroundWriteKey struct{}
+
+func (d *DB) backgroundTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return d.tx(context.WithValue(ctx, backgroundWriteKey{}, true), fn)
 }

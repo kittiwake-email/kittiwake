@@ -63,10 +63,12 @@ state is split by its nature:
 and transaction and an optional `read_dsn`, typically a MariaDB replica on the same host as
 the daemons, for SELECT-only operations: lookups, listings, token lookups, queue statistics,
 audit reads. Every daemon host can run its own replica, so read capacity grows with the
-number of hosts while a single primary takes the (rare) writes. Replication lag is handled
-in two ways: after a process wrote anything it keeps reading from the primary for
-`read_stickiness` (default 2 s), so an admin who creates an account and reads it back sees
-it; and the per-process caches already tolerate seconds of staleness for everything else.
+number of hosts while a single primary takes writes. Ordinary replica reads may be stale
+for the replication lag plus the cache TTL. Destructive workers and uncached mailbox-state
+reads always use the primary. After a successful identity write, the process uses the
+primary for `read_stickiness` (default 2 s); this is a best-effort read-after-write aid,
+not a replication-lag bound. Background queue, heartbeat, audit and token-touch writes
+do not extend identity-read stickiness.
 Without `read_dsn` all queries use the primary.
 
 The identity store is an interface with two backends. MariaDB is the production backend.

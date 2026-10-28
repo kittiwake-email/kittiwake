@@ -39,7 +39,7 @@ func (d *DB) Enqueue(ctx context.Context, typ string, payload any, runAfter time
 		runAfter = now
 	}
 	id := uuid.NewString()
-	_, err = d.exec(ctx, "INSERT INTO tasks (id, type, state, payload, run_after, attempts, created) VALUES (?, ?, 'pending', ?, ?, 0, ?)",
+	_, err = d.sql.ExecContext(ctx, "INSERT INTO tasks (id, type, state, payload, run_after, attempts, created) VALUES (?, ?, 'pending', ?, ?, 0, ?)",
 		id, typ, string(b), runAfter.UTC(), now)
 	return id, err
 }
@@ -49,11 +49,11 @@ func (d *DB) Enqueue(ctx context.Context, typ string, payload any, runAfter time
 // crashed workers are returned to pending first.
 func (d *DB) Claim(ctx context.Context, typ, worker string, max int, lease time.Duration) ([]queue.Task, error) {
 	now := d.Now().UTC()
-	if _, err := d.exec(ctx, "UPDATE tasks SET state = 'pending', run_after = ?, lease_worker = NULL, lease_until = NULL WHERE type = ? AND state = 'leased' AND lease_until <= ?", now, typ, now); err != nil {
+	if _, err := d.sql.ExecContext(ctx, "UPDATE tasks SET state = 'pending', run_after = ?, lease_worker = NULL, lease_until = NULL WHERE type = ? AND state = 'leased' AND lease_until <= ?", now, typ, now); err != nil {
 		return nil, err
 	}
 	var tasks []queue.Task
-	err := d.tx(ctx, func(tx *sql.Tx) error {
+	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
 		tasks = nil
 		rows, err := tx.QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE type = ? AND state = 'pending' AND run_after <= ? ORDER BY run_after, id LIMIT ? FOR UPDATE SKIP LOCKED", typ, now, max)
 		if err != nil {
@@ -90,7 +90,7 @@ func (d *DB) Claim(ctx context.Context, typ, worker string, max int, lease time.
 // leasedExec fences every state transition to this claim, including after takeover.
 func (d *DB) leasedExec(ctx context.Context, t queue.Task, statement string, args ...any) error {
 	args = append(args, t.ID, t.LeaseKey, d.Now().UTC())
-	res, err := d.exec(ctx, statement+" WHERE id = ? AND state = 'leased' AND lease_token = ? AND lease_until > ?", args...)
+	res, err := d.sql.ExecContext(ctx, statement+" WHERE id = ? AND state = 'leased' AND lease_token = ? AND lease_until > ?", args...)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func (d *DB) Release(ctx context.Context, t queue.Task) error {
 }
 
 func (d *DB) Stats(ctx context.Context, typ string) (queue.Stats, error) {
-	rows, err := d.r().QueryContext(ctx, "SELECT state, COUNT(*) FROM tasks WHERE type = ? GROUP BY state", typ)
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT state, COUNT(*) FROM tasks WHERE type = ? GROUP BY state", typ)
 	if err != nil {
 		return queue.Stats{}, err
 	}
@@ -153,7 +153,7 @@ func (d *DB) Stats(ctx context.Context, typ string) (queue.Stats, error) {
 }
 
 func (d *DB) Dead(ctx context.Context, typ string) ([]queue.Task, error) {
-	rows, err := d.r().QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE type = ? AND state = 'dead' ORDER BY created, id", typ)
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE type = ? AND state = 'dead' ORDER BY created, id", typ)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func (d *DB) Dead(ctx context.Context, typ string) ([]queue.Task, error) {
 }
 
 func (d *DB) Retry(ctx context.Context, typ, id string) error {
-	res, err := d.exec(ctx, "UPDATE tasks SET state = 'pending', attempts = 0, last_error = NULL, run_after = ? WHERE id = ? AND type = ? AND state = 'dead'", d.Now().UTC(), id, typ)
+	res, err := d.sql.ExecContext(ctx, "UPDATE tasks SET state = 'pending', attempts = 0, last_error = NULL, run_after = ? WHERE id = ? AND type = ? AND state = 'dead'", d.Now().UTC(), id, typ)
 	if err != nil {
 		return err
 	}
@@ -185,7 +185,7 @@ func (d *DB) Retry(ctx context.Context, typ, id string) error {
 func (d *DB) Lead(ctx context.Context, worker string, ttl time.Duration) (bool, error) {
 	now := d.Now().UTC()
 	var lead bool
-	err := d.tx(ctx, func(tx *sql.Tx) error {
+	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
 		var holder string
 		var until time.Time
 		err := tx.QueryRowContext(ctx, "SELECT holder, until FROM scheduler_lease WHERE id = 1 FOR UPDATE").Scan(&holder, &until)
@@ -210,7 +210,7 @@ func (d *DB) Lead(ctx context.Context, worker string, ttl time.Duration) (bool, 
 func (d *DB) Due(ctx context.Context, name string, every time.Duration) (bool, error) {
 	now := d.Now().UTC()
 	var due bool
-	err := d.tx(ctx, func(tx *sql.Tx) error {
+	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
 		var last time.Time
 		err := tx.QueryRowContext(ctx, "SELECT last_run FROM scheduler WHERE name = ? FOR UPDATE", name).Scan(&last)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {

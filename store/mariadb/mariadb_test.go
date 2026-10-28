@@ -181,6 +181,24 @@ func TestReadWriteSplit(t *testing.T) {
 	if db.ReaderQueries() != 2 {
 		t.Fatalf("transaction used the replica: %d", db.ReaderQueries())
 	}
+	time.Sleep(400 * time.Millisecond)
+	before := db.ReaderQueries()
+	if _, err := ids.GetDomain(identity.WithPrimaryReads(ctx), "split.example"); err != nil {
+		t.Fatal(err)
+	}
+	if db.ReaderQueries() != before {
+		t.Fatal("authoritative read used replica")
+	}
+	if _, err := db.Enqueue(ctx, "background", nil, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ids.ListDomains(ctx, "", 10); err != nil {
+		t.Fatal(err)
+	}
+	if db.ReaderQueries() != before+1 {
+		t.Fatal("background task pinned unrelated reads")
+	}
+
 }
 
 func TestMailboxRemovalIsDurable(t *testing.T) {
