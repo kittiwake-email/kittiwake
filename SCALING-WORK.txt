@@ -1,0 +1,53 @@
+Scalability implementation status — 2026-10-28
+
+Implemented in separate commits:
+91d7da4 Fence task state transitions and renewals by current lease ownership.
+86afb9f Atomically schedule mailbox removal and pin storage until cleanup.
+864e999 Use authoritative registry reads for destructive work.
+027aed9 Bound SQL maintenance batches and configure connection budgets.
+34492ff Partition attachment deduplication with recoverable scalar counters.
+2b6a1a5 Bound retention ranges and batch physical purge bookkeeping.
+d551d1b Verify required pool operations before accepting Ceph storage.
+5cce6c8 Coalesce periodic SQL maintenance tasks across scheduler ticks.
+
+Validation:
+Full unit and race suites, go vet and go build passed. The real MariaDB suite
+passed on kittiwake1 in isolated kittiwake_test. Ceph attachment recovery,
+concurrency, authorization, delayed-collector and legacy tests passed. Retention
+range boundaries and pool capability tests passed on real Ceph. No deployment,
+service restart or push was performed. Lab evidence and reproducible benchmark
+commands are committed in sibling kittiwake-labs/docs/LAB.md (d5df008).
+
+Measured tradeoffs, not performance claims:
+- Shared attachment reference median: 6.423 -> 13.547 ms. No payload reverse OMAP;
+  256 deduplication partitions distribute coordination, with up to 256 copies.
+  Durable forward receipts and ownership counters require more objects and I/O.
+- Retention bookkeeping for 32 entries: 12.875 -> 47.464 ms median, now including
+  removal of 32 historical location keys under the root publication journal.
+- Single-mailbox microbenchmarks do not establish whole-platform capacity or
+  multi-OSD distribution. No storage server configuration was changed.
+
+Rollout:
+SQL migrations through 0006; mailbox root format 3; attachment format 2.
+Stop older writers and workers before rollout. Downgrade after new writes is
+unsupported. Legacy attachments and retention entries remain readable and drain
+through cleanup; existing large legacy maps are not rewritten by this upgrade.
+
+Unresolved parts of the broader scale review:
+- Released attachment receipts, zero counters and empty index shard objects stay
+  as stale-writer fences. Safe lifetime compaction needs a retirement protocol.
+- GC candidate maps remain fixed hash shards; concurrent writes can defer cleanup
+  to another pass. Weekly reconciliation is still needed for crash cleanup.
+- Thread membership/history and daily audit maps remain unbounded. Audit expiry
+  needs segmented maps and a durable cursor, especially across long legal holds.
+- Periodic SQL deduplication bounds duplicate jobs, not mailbox discovery cost.
+  Due-mailbox scheduling, durable continuation cursors and per-storage sweep
+  parallelism remain to be designed and implemented.
+- IMAP selected sessions retain full index records. Compact shared metadata and
+  bounded JMAP query/search execution remain outstanding.
+- Bulk mailbox mutations and contention metrics remain outstanding. A mailbox
+  root serializes mutations; each attachment partition serializes its counter.
+- Storage placement remains random, not capacity-aware; admission control and
+  mailbox migration remain outstanding. Capability probes do not measure load.
+
+Do not describe the broader scalability review as completely implemented.
