@@ -496,7 +496,12 @@ Mail data:
   allocation and a low watermark track active ranges. Legacy `<mailbox-uuid>/retention`
   is drained first. Location entries point directly to retained messages and are
   removed after physical purge; empty shard objects retain their version fences.
-- Audit: `<mailbox-uuid>/audit/<YYYY-MM-DD>` and `audit/admin/<YYYY-MM-DD>` in the index pool
+- Audit: daily headers at `<mailbox-uuid>/audit/<YYYY-MM-DD>` and capped
+  segments at `<day>/<16-hex-segment>` in the index pool. Each segment holds at
+  most 4,096 keys and 4 MiB of keys plus values. A scalar `_catalog` tracks the
+  oldest unprocessed day; expiry resumes across long holds. Retired segments
+  retain empty version fences until mailbox removal. Cursors use day/segment/key.
+  Pre-segment lab audit data must be reset before deployment.
 
 Sessions, signing keys, TOTP replay state and task queues are tables in MariaDB (the memory
 backend keeps them in the index pool: `sessions/<account-id>`, `keys/jwt`,
@@ -1263,3 +1268,13 @@ When building this, look at:
 - Postfix – mainly the LMTP part
 - Ceph RADOS Gateway – how to keep users, buckets and metadata in RADOS without a database
 - Stalwart, Cyrus – JMAP server implementations
+
+### IMAP and query working sets
+
+Selected IMAP sessions retain UID, message identity, flags, modseq, size and dates;
+headers and threading input are not copied into each session. Header/body searches
+stream index pages and release reconstructed messages after each match. Ordinary
+FLAGS/date/size operations still use session metadata without added index reads.
+Folder offset queries discard skipped pages instead of retaining offset+limit
+records. Arbitrary sorted/filtered queries still need a separate bounded execution
+path; this change does not make deep offset reads constant-cost.

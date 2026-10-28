@@ -1,6 +1,5 @@
-// Package audit persists audit records: per mailbox, one object per day
-// (`<mailbox>/audit/<YYYY-MM-DD>`, records as omap entries keyed by
-// timestamp) in the index pool of the mailbox's storage; platform-wide
+// Package audit persists audit records in bounded daily segments
+// (`<mailbox>/audit/<YYYY-MM-DD>/<segment>`, with scalar daily headers) in the index pool of the mailbox's storage; platform-wide
 // admin actions go to an AdminLog (a MariaDB table in production, the
 // `audit/admin/<YYYY-MM-DD>` object on the memory backend). See README.md
 // "Auditing".
@@ -11,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,10 +65,11 @@ type Record struct {
 // records instead of one per record). Records also go to the structured log
 // synchronously, so a crash loses at most one interval of RADOS copies.
 type Store struct {
-	r     storage.Resolver
-	admin AdminLog
-	Now   func() time.Time
-	seq   atomic.Uint64
+	writerID string
+	seq      atomic.Uint64
+	r        storage.Resolver
+	admin    AdminLog
+	Now      func() time.Time
 
 	mu           sync.Mutex
 	buffered     bool
@@ -90,7 +91,7 @@ func New(indexPool rados.IOContext) *Store {
 // NewMulti returns a store that writes mailbox records to the index pool
 // of each mailbox's storage and admin records to admin.
 func NewMulti(r storage.Resolver, admin AdminLog) *Store {
-	return &Store{r: r, admin: admin, Now: time.Now, pending: map[target]map[string][]byte{}}
+	return &Store{writerID: uuid.NewString(), r: r, admin: admin, Now: time.Now, pending: map[target]map[string][]byte{}}
 }
 
 // AdminLog stores the platform-wide records (admin and CLI actions, and
@@ -150,7 +151,7 @@ func (s *Store) flushAll(ctx context.Context) {
 	for t, kv := range batch {
 		io, err := s.r.PoolOf(ctx, t.storage, storage.RoleIndex)
 		if err == nil {
-			_, err = io.Write(ctx, t.oid, rados.NewWriteTx().OmapSet(kv))
+			err = appendSegmented(ctx, io, t.oid, kv)
 		}
 		if err != nil && s.errs != nil {
 			s.errs(fmt.Errorf("audit flush %s on storage %d (%d records): %w", t.oid, t.storage, len(kv), err))
@@ -186,7 +187,7 @@ func mailboxOID(mb uuid.UUID, d string) string { return mb.String() + "/audit/" 
 func adminOID(d string) string                 { return "audit/admin/" + d }
 
 func (s *Store) key(t time.Time) string {
-	return fmt.Sprintf("%020d-%06d", t.UTC().UnixNano(), s.seq.Add(1)%1000000)
+	return fmt.Sprintf("%020d-%020d-%s", t.UTC().UnixNano(), s.seq.Add(1), s.writerID)
 }
 
 // Write appends the record to the mailbox's daily object (if Mailbox is
@@ -241,7 +242,7 @@ func (s *Store) Write(ctx context.Context, r Record) error {
 		if err != nil {
 			return err
 		}
-		if _, err := io.Write(ctx, t.oid, rados.NewWriteTx().OmapSet(map[string][]byte{k: data})); err != nil {
+		if err := appendSegmented(ctx, io, t.oid, map[string][]byte{k: data}); err != nil {
 			return err
 		}
 	}
@@ -307,52 +308,76 @@ func (q Query) DayRange(now func() time.Time) (from, to time.Time) {
 func readObjects(ctx context.Context, io rados.IOContext, q Query, now func() time.Time, oid func(day string) string) (records []Record, next string, err error) {
 	from, to := q.DayRange(now)
 	startDay, startKey := "", ""
+	var startSegment uint64
 	if q.After != "" {
-		if i := strings.Index(q.After, "/"); i > 0 {
-			startDay, startKey = q.After[:i], q.After[i+1:]
+		parts := strings.SplitN(q.After, "/", 3)
+		if len(parts) != 3 {
+			return nil, "", errors.New("audit: invalid cursor")
+		}
+		startDay, startKey = parts[0], parts[2]
+		startSegment, err = strconv.ParseUint(parts[1], 16, 64)
+		if err != nil {
+			return nil, "", err
 		}
 	}
-	for d := from; !d.After(to); d = d.Add(24 * time.Hour) {
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		ds := day(d)
-		if startDay != "" && ds < startDay {
+		if ds < startDay {
 			continue
 		}
-		after := ""
-		if ds == startDay {
-			after = startKey
+		var h dayHead
+		_, err := loadJSON(ctx, io, oid(ds), &h)
+		if errors.Is(err, rados.ErrNotFound) {
+			continue
 		}
-		for {
-			kv, more, err := io.OmapList(ctx, oid(ds), "", after, 500)
-			if err != nil {
+		if err != nil {
+			return nil, "", err
+		}
+		if h.Closed {
+			continue
+		}
+		first := uint64(0)
+		if ds == startDay {
+			first = startSegment
+		}
+		for seg := first; seg <= h.Last; seg++ {
+			after := ""
+			if ds == startDay && seg == startSegment {
+				after = startKey
+			}
+			for {
+				kv, more, err := io.OmapList(ctx, segmentOID(oid(ds), seg), "", after, 500)
 				if errors.Is(err, rados.ErrNotFound) {
 					break
 				}
-				return nil, "", err
-			}
-			for _, e := range kv {
-				after = e.Key
-				var r Record
-				if err := json.Unmarshal(e.Value, &r); err != nil {
-					continue
+				if err != nil {
+					return nil, "", err
 				}
-				if !q.Matches(r) {
-					continue
+				for _, e := range kv {
+					after = e.Key
+					var r Record
+					if err := json.Unmarshal(e.Value, &r); err != nil {
+						return nil, "", err
+					}
+					if !q.Matches(r) {
+						continue
+					}
+					records = append(records, r)
+					if len(records) >= q.Max {
+						return records, fmt.Sprintf("%s/%016x/%s", ds, seg, e.Key), nil
+					}
 				}
-				records = append(records, r)
-				if len(records) >= q.Max {
-					return records, ds + "/" + e.Key, nil
+				if !more {
+					break
 				}
-			}
-			if !more {
-				break
 			}
 		}
 	}
 	return records, "", nil
 }
 
-// PurgeBefore deletes daily audit objects older than cutoff for a mailbox
-// (or the admin log when mb is zero). days limits how far back to look.
+// PurgeBefore retires audit data older than cutoff for a mailbox
+// (or the admin log when mb is zero). days bounds work from the durable cursor.
 func (s *Store) PurgeBefore(ctx context.Context, mb uuid.UUID, cutoff time.Time, days int) (int, error) {
 	if mb == uuid.Nil {
 		return s.admin.PurgeAdminBefore(ctx, cutoff)
@@ -365,29 +390,22 @@ func (s *Store) PurgeBefore(ctx context.Context, mb uuid.UUID, cutoff time.Time,
 }
 
 func purgeObjects(ctx context.Context, io rados.IOContext, cutoff time.Time, days int, oid func(day string) string) (int, error) {
-	n := 0
-	for i := 1; i <= days; i++ {
-		d := cutoff.UTC().Add(-time.Duration(i) * 24 * time.Hour)
-		err := io.Delete(ctx, oid(day(d)))
-		if err == nil {
-			n++
-		} else if !errors.Is(err, rados.ErrNotFound) {
-			return n, err
-		}
-	}
-	return n, nil
+	return purgeSegmented(ctx, io, cutoff, days, oid)
 }
 
 // ---- admin log on RADOS (memory backend, single storage) ----
 
 type radosAdminLog struct {
-	io  rados.IOContext
-	seq atomic.Uint64
+	writerID string
+	seq      atomic.Uint64
+	io       rados.IOContext
 }
 
 // RadosAdminLog keeps admin records as `audit/admin/<day>` objects on one
 // index pool (the memory backend; production uses MariaDB).
-func RadosAdminLog(indexPool rados.IOContext) AdminLog { return &radosAdminLog{io: indexPool} }
+func RadosAdminLog(indexPool rados.IOContext) AdminLog {
+	return &radosAdminLog{io: indexPool, writerID: uuid.NewString()}
+}
 
 func (l *radosAdminLog) WriteAdmin(ctx context.Context, recs []Record) error {
 	byDay := map[string]map[string][]byte{}
@@ -400,10 +418,10 @@ func (l *radosAdminLog) WriteAdmin(ctx context.Context, recs []Record) error {
 		if byDay[d] == nil {
 			byDay[d] = map[string][]byte{}
 		}
-		byDay[d][fmt.Sprintf("%020d-%06d", r.Time.UTC().UnixNano(), l.seq.Add(1)%1000000)] = data
+		byDay[d][fmt.Sprintf("%020d-%020d-%s", r.Time.UTC().UnixNano(), l.seq.Add(1), l.writerID)] = data
 	}
 	for d, kv := range byDay {
-		if _, err := l.io.Write(ctx, adminOID(d), rados.NewWriteTx().OmapSet(kv)); err != nil {
+		if err := appendSegmented(ctx, l.io, adminOID(d), kv); err != nil {
 			return err
 		}
 	}
@@ -416,4 +434,50 @@ func (l *radosAdminLog) ReadAdmin(ctx context.Context, q Query) ([]Record, strin
 
 func (l *radosAdminLog) PurgeAdminBefore(ctx context.Context, cutoff time.Time) (int, error) {
 	return purgeObjects(ctx, l.io, cutoff, 60, adminOID)
+}
+
+// DeleteAll removes audit data and retirement fences for a mailbox whose
+// registry entry has already been removed. The catalog avoids a pool-wide scan.
+func (s *Store) DeleteAll(ctx context.Context, mb uuid.UUID) error {
+	_, io, err := s.r.Pool(ctx, mb, storage.RoleIndex)
+	if err != nil {
+		return err
+	}
+	catOID := catalogOID(mailboxOID(mb, ""))
+	var c catalog
+	_, err = loadJSON(ctx, io, catOID, &c)
+	if errors.Is(err, rados.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	first, err := time.Parse("2006-01-02", c.Start)
+	if err != nil {
+		return err
+	}
+	for d := first; day(d) <= c.Last; d = d.AddDate(0, 0, 1) {
+		base := mailboxOID(mb, day(d))
+		var h dayHead
+		_, err := loadJSON(ctx, io, base, &h)
+		if errors.Is(err, rados.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for seg := uint64(0); seg <= h.Last; seg++ {
+			if err := io.Delete(ctx, segmentOID(base, seg)); err != nil && !errors.Is(err, rados.ErrNotFound) {
+				return err
+			}
+		}
+		if err := io.Delete(ctx, base); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			return err
+		}
+	}
+	err = io.Delete(ctx, catOID)
+	if errors.Is(err, rados.ErrNotFound) {
+		return nil
+	}
+	return err
 }

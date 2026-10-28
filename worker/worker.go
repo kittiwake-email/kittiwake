@@ -598,8 +598,7 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 	}
 	// The mailbox's own audit objects (one per day on its index pool) would
 	// otherwise outlive it: the audit purge only walks live mailboxes.
-	days := int(w.cfg.AuditRetention/(24*time.Hour)) + 2
-	if _, err := w.audit.PurgeBefore(ctx, mb, w.Now().Add(24*time.Hour), days); err != nil {
+	if err := w.audit.DeleteAll(ctx, mb); err != nil {
 		return err
 	}
 	// Platform-level event (admin log), not the mailbox log that is gone.
@@ -724,7 +723,14 @@ func (w *Worker) purgeAudit(ctx context.Context) error {
 	}
 	err = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
 		// Mailboxes on hold keep everything.
-		if v, err := w.ids.GetMailbox(ctx, id); err == nil && v.Value.Hold != nil {
+		v, err := w.ids.GetMailbox(ctx, id)
+		if errors.Is(err, identity.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if v.Value.Hold != nil {
 			return nil
 		}
 		m, err := w.audit.PurgeBefore(ctx, id, cutoff, days)
