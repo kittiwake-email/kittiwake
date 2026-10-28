@@ -132,6 +132,7 @@ type Stores struct {
 
 // New returns a worker.
 func New(cfg Config, st Stores, aud *auditor.Auditor, log *slog.Logger) *Worker {
+	st.Attachments.BindIndex(st.Index)
 	if cfg.PostHoldGrace <= 0 {
 		cfg.PostHoldGrace = 7 * 24 * time.Hour
 	}
@@ -454,7 +455,7 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 				return err
 			}
 		}
-		if err := w.idx.DropRetention(ctx, mb, keys...); err != nil {
+		if err := w.dropRetention(ctx, mb, entries, keys); err != nil {
 			return err
 		}
 		if !more {
@@ -487,11 +488,6 @@ func (w *Worker) deleteMessage(ctx context.Context, mb, msg uuid.UUID) (bool, er
 	if err == nil {
 		var doc mail.Document
 		if json.Unmarshal(data, &doc) == nil {
-			for _, h := range mail.AttachmentHashes(&doc) {
-				if err := w.atts.RemoveRef(ctx, h, mb, msg); err != nil {
-					return false, err
-				}
-			}
 			w.log.Info("purged message", slog.String("message_id", doc.MessageID), slog.String("mailbox", mb.String()), slog.String("msg", msg.String()))
 		}
 	} else if !errors.Is(err, message.ErrNotFound) {
@@ -568,7 +564,7 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 					return err
 				}
 			}
-			if err := w.idx.DropRetention(ctx, mb, keys...); err != nil {
+			if err := w.dropRetention(ctx, mb, entries, keys); err != nil {
 				return err
 			}
 			if !more {
@@ -616,10 +612,10 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 // attachmentGC deletes attachment objects nobody references any more, on
 // every connected storage.
 func (w *Worker) attachmentGC(ctx context.Context) error {
-	return w.atts.Candidates(ctx, func(cid int64, hash string) (bool, error) { return w.collectAttachment(ctx, cid, hash, false) })
+	return w.atts.Candidates(ctx, func(cid int64, hash string) (bool, error) { return w.collectAttachment(ctx, cid, hash) })
 }
 
-func (w *Worker) collectAttachment(ctx context.Context, cid int64, hash string, reconcile bool) (bool, error) {
+func (w *Worker) collectAttachment(ctx context.Context, cid int64, hash string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -633,15 +629,8 @@ func (w *Worker) collectAttachment(ctx context.Context, cid int64, hash string, 
 	if w.Now().Sub(info.Touched) < w.cfg.AttachmentGCGrace {
 		return false, nil
 	}
-	if reconcile && info.Refs > 0 {
-		sctx := storage.WithID(ctx, cid)
-		_, err := w.atts.DropDanglingRefs(ctx, cid, hash, func(_ context.Context, mb, msg uuid.UUID) (bool, error) { return w.msgs.Exists(sctx, mb, msg) }, info.Version)
-		if err != nil {
-			return false, err
-		}
-	}
-	_, err = w.atts.DeleteIfUnreferenced(ctx, cid, hash, w.cfg.AttachmentGCGrace)
-	return err == nil, err
+	deleted, err := w.atts.DeleteIfUnreferenced(ctx, cid, hash, w.cfg.AttachmentGCGrace)
+	return err == nil && (deleted || info.Refs > 0), err
 }
 
 // orphanSweep removes message objects that no index entry and no retention
@@ -706,11 +695,8 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 		}
 	}
 	w.log.Info("orphan sweep", slog.Int("removed", removed), slog.Int("mailboxes_recalculated", len(touched)))
-	// Full dangling-reference reconciliation runs only with the infrequent sweep.
-	if err := w.atts.ReconcileCounters(ctx, w.cfg.OrphanAge, w.msgs.Exists); err != nil {
-		return err
-	}
-	return w.atts.List(ctx, func(cid int64, hash string) error { _, err := w.collectAttachment(ctx, cid, hash, true); return err })
+	// The infrequent sweep repairs candidates lost across process crashes.
+	return w.atts.List(ctx, func(cid int64, hash string) error { _, err := w.collectAttachment(ctx, cid, hash); return err })
 }
 
 // purgeAudit drops audit objects older than the retention: the admin log
@@ -805,4 +791,18 @@ func (w *Worker) enqueuePeriodic(ctx context.Context, typ, scope string, payload
 	}
 	_, err := w.queue.Enqueue(ctx, typ, payload, time.Time{})
 	return err
+}
+
+func (w *Worker) dropRetention(ctx context.Context, mb uuid.UUID, entries []index.RetentionEntry, keys []string) error {
+	var refs []index.AttachmentRef
+	for _, entry := range entries {
+		refs = append(refs, entry.Attachments...)
+	}
+	if err := w.atts.MarkGC(ctx, mb, refs); err != nil {
+		return err
+	}
+	if err := w.idx.DropRetention(ctx, mb, keys...); err != nil {
+		return err
+	}
+	return w.atts.MarkGC(ctx, mb, refs)
 }

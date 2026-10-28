@@ -23,7 +23,7 @@ import (
 
 const (
 	maxRootAttempts  = 64
-	rootVersion      = 4
+	rootVersion      = 5
 	changeLogKeep    = 10000 // entries kept per mailbox
 	changeTrimEvery  = 256   // trim when modseq crosses a multiple of this
 	maxFolderDepth   = 16
@@ -216,7 +216,7 @@ func (s *Store) readRoot(ctx context.Context, mb uuid.UUID) (versionedRoot, erro
 		return versionedRoot{}, fmt.Errorf("index: decode root %s: %w", mb, err)
 	}
 	if r.Version != rootVersion {
-		return versionedRoot{}, fmt.Errorf("index: root version %d requires a lab reset before format 4", r.Version)
+		return versionedRoot{}, fmt.Errorf("index: root version %d requires a lab reset before format 5", r.Version)
 	}
 	vr := versionedRoot{root: r, version: ver}
 	return vr, nil
@@ -344,7 +344,7 @@ func (s *Store) EnsureRoot(ctx context.Context, mb uuid.UUID) (Root, error) {
 		return Root{}, err
 	}
 	now := s.Now().UTC()
-	r := Root{Version: rootVersion, MailboxID: mb, NextFolderID: 1, ModSeq: 0, Horizon: 1, Created: now}
+	r := Root{AttachmentEpoch: uuid.NewString(), Version: rootVersion, MailboxID: mb, NextFolderID: 1, ModSeq: 0, Horizon: 1, Created: now}
 	validity := uint32(now.Unix())
 	for _, d := range DefaultFolders {
 		r.ModSeq++
@@ -918,6 +918,9 @@ func (s *Store) append(ctx context.Context, mb uuid.UUID, fid string, rec Record
 		s.unappend(ctx, mb, fid, rec, tid)
 		return Record{}, err
 	}
+	if err := s.changeAttachments(ctx, mb, rec.Attachments, 1); err != nil {
+		return Record{}, err
+	}
 	if err := s.setLocation(ctx, mb, rec.MessageID, Location{FolderID: fid, UID: rec.UID}); err != nil {
 		return Record{}, err
 	}
@@ -1164,7 +1167,7 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 	if err := s.setRetainedLocation(ctx, mb, rec.MessageID, retentionSeq, retentionKey(purgeAt.UTC(), rec.MessageID)); err != nil {
 		return RetentionEntry{}, err
 	}
-	entry := RetentionEntry{MessageID: rec.MessageID, FolderID: fid, UID: uid, Size: rec.Size, DeletedAt: now, PurgeAt: purgeAt.UTC(), Reason: reason}
+	entry := RetentionEntry{Attachments: rec.Attachments, MessageID: rec.MessageID, FolderID: fid, UID: uid, Size: rec.Size, DeletedAt: now, PurgeAt: purgeAt.UTC(), Reason: reason}
 	data, err := json.Marshal(&entry)
 	if err != nil {
 		return RetentionEntry{}, err

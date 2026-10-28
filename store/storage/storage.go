@@ -535,15 +535,15 @@ func probePool(ctx context.Context, io rados.IOContext, role Role) (err error) {
 		}
 	}()
 	tx := rados.NewWriteTx().CreateExclusive().WriteFull([]byte("probe")).SetXattr("probe", []byte("1"))
-	// Attachments still use OMAP for legacy references and GC candidates.
-	if role != RoleMessages {
+	// Production attachment candidates live in SQL; only index pools need OMAP.
+	if role == RoleIndex {
 		tx.OmapSet(map[string][]byte{"probe": []byte("1")})
 	}
 	version, err := io.Write(ctx, oid, tx)
 	if err != nil {
 		return err
 	}
-	if role != RoleMessages {
+	if role == RoleIndex {
 		values, err := io.OmapGet(ctx, oid, []string{"probe"})
 		if err != nil {
 			return err

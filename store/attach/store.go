@@ -1,7 +1,5 @@
-// Package attach stores deduplicated payloads and recoverable reference counters.
-// New writes use mailbox-derived deduplication partitions; counter.go documents
-// the bounded metadata and forward receipts. Legacy hash-named OMAP objects are
-// read and collected without rewriting existing messages.
+// Package attach stores immutable mailbox-scoped attachment payloads. Scalar
+// reference counts live in the mailbox index journal, not in payload OMAPs.
 package attach
 
 import (
@@ -10,39 +8,60 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-
 	"kittiwake/rados"
+	"kittiwake/store/index"
 	"kittiwake/store/storage"
 )
 
-// Sentinel errors.
-var (
-	ErrNotFound = errors.New("attach: not found")
-	ErrHash     = errors.New("attach: content does not match hash")
-)
+var ErrNotFound = errors.New("attach: not found")
+var ErrHash = errors.New("attach: content does not match hash")
 
-// Store is the attachment store.
 type Store struct {
-	candidates CandidateQueue
 	r          storage.Resolver
+	idx        *index.Store
+	candidates CandidateQueue
 	Now        func() time.Time
 }
 
-// New returns a store on the attachments pool context (one storage).
-func New(attachmentsPool rados.IOContext) *Store {
-	return NewMulti(storage.FixedPools(attachmentsPool, attachmentsPool, attachmentsPool))
+func New(io rados.IOContext) *Store { return NewMulti(storage.FixedPools(io, io, io)) }
+func NewMulti(r storage.Resolver) *Store {
+	s := &Store{r: r, idx: index.NewMulti(r), Now: time.Now}
+	s.idx.Now = func() time.Time { return s.Now() }
+	return s
 }
 
-// NewMulti returns a store that resolves each mailbox's attachments pool
-// through r. Deduplication is per storage: the same content stored for
-// mailboxes on two storage entries is two objects.
-func NewMulti(r storage.Resolver) *Store { return &Store{r: r, Now: time.Now} }
-
+// BindIndex must run during construction, before the store is used. Production
+// services share the same index; fixtures can use separate physical pools.
+func (s *Store) BindIndex(idx *index.Store) { s.idx = idx }
+func Hash(data []byte) string               { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+func validHash(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil && hash == strings.ToLower(hash)
+}
+func payloadID(mb uuid.UUID, ref index.AttachmentRef) string {
+	return fmt.Sprintf("v3/%s/%s/%s", mb, ref.Hash, ref.Generation)
+}
+func parsePayloadID(id string) (uuid.UUID, index.AttachmentRef, error) {
+	p := strings.Split(id, "/")
+	if len(p) != 4 || p[0] != "v3" || !validHash(p[2]) {
+		return uuid.Nil, index.AttachmentRef{}, ErrHash
+	}
+	mb, err := uuid.Parse(p[1])
+	if err != nil {
+		return uuid.Nil, index.AttachmentRef{}, ErrHash
+	}
+	if _, err := uuid.Parse(p[3]); err != nil {
+		return uuid.Nil, index.AttachmentRef{}, ErrHash
+	}
+	return mb, index.AttachmentRef{Hash: p[2], Generation: p[3]}, nil
+}
 func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
 	_, io, err := s.r.Pool(ctx, mb, storage.RoleAttachments)
 	if err != nil {
@@ -50,7 +69,6 @@ func (s *Store) pool(ctx context.Context, mb uuid.UUID) rados.IOContext {
 	}
 	return io
 }
-
 func (s *Store) poolOf(ctx context.Context, cid int64) rados.IOContext {
 	io, err := s.r.PoolOf(ctx, cid, storage.RoleAttachments)
 	if err != nil {
@@ -58,388 +76,195 @@ func (s *Store) poolOf(ctx context.Context, cid int64) rados.IOContext {
 	}
 	return io
 }
-
-// Hash returns the hex SHA-256 of data.
-func Hash(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func refKey(mb, msg uuid.UUID) string { return fmt.Sprintf("ref/%s/%s", mb, msg) }
-
 func mapErr(err error) error {
-	if errors.Is(err, rados.ErrNotFound) {
+	if errors.Is(err, rados.ErrNotFound) || errors.Is(err, index.ErrNotFound) {
 		return ErrNotFound
 	}
 	return err
 }
 
-// Put stores immutable content and reserves one idempotent reference. Reference
-// counters and forward receipts are journaled; successful retries never increment
-// twice, and a released message UUID must never be reused.
+// Upload reserves an immutable generation and writes its payload. It does not
+// add a reference: Append must include the returned ref in its root journal.
+func (s *Store) Upload(ctx context.Context, hash string, data []byte, contentType string, mb uuid.UUID) (index.AttachmentRef, error) {
+	if Hash(data) != hash {
+		return index.AttachmentRef{}, ErrHash
+	}
+	if _, err := s.idx.EnsureRoot(ctx, mb); err != nil {
+		return index.AttachmentRef{}, err
+	}
+	for attempt := 0; attempt < 32; attempt++ {
+		a, epoch, err := s.idx.Attachment(ctx, mb, hash)
+		if err != nil && !errors.Is(err, index.ErrNotFound) {
+			return index.AttachmentRef{}, err
+		}
+		if err == nil && a.Count > 0 {
+			return index.AttachmentRef{Hash: hash, Generation: a.Generation}, nil
+		}
+		if errors.Is(err, index.ErrNotFound) {
+			a = index.Attachment{Generation: uuid.NewString(), Size: uint64(len(data)), ContentType: contentType, Created: s.Now().UTC(), Touched: s.Now().UTC()}
+		}
+		proposed := index.AttachmentRef{Hash: hash, Generation: a.Generation}
+		if err := s.enqueueCandidate(ctx, mb, hash, payloadID(mb, proposed)); err != nil {
+			return index.AttachmentRef{}, err
+		}
+		a, err = s.idx.ReserveAttachment(ctx, mb, hash, epoch, a)
+		if errors.Is(err, index.ErrAttachmentRetired) {
+			continue
+		}
+		if err != nil {
+			return index.AttachmentRef{}, err
+		}
+		ref := index.AttachmentRef{Hash: hash, Generation: a.Generation}
+		if a.Count == 0 {
+			if ref != proposed {
+				if err := s.enqueueCandidate(ctx, mb, hash, payloadID(mb, ref)); err != nil {
+					return ref, err
+				}
+			}
+			_, err = s.pool(ctx, mb).Write(ctx, payloadID(mb, ref), rados.NewWriteTx().CreateExclusive().WriteFull(data))
+			if err != nil && !errors.Is(err, rados.ErrExists) {
+				return ref, err
+			}
+		}
+		return ref, nil
+	}
+	return index.AttachmentRef{}, index.ErrConflict
+}
+
+// Put is upload-only. Callers publishing mail use Upload and put its ref in the
+// index record, so retries never depend on per-message attachment receipts.
 func (s *Store) Put(ctx context.Context, hash string, data []byte, contentType string, mb, msg uuid.UUID) error {
-	return s.putCounter(ctx, hash, data, contentType, mb, msg)
-}
-
-// AddRef records that message references the attachment. The object must exist.
-func (s *Store) AddRef(ctx context.Context, hash string, mb, msg uuid.UUID) error {
-	if !validHash(hash) {
-		return ErrHash
-	}
-	io := s.pool(ctx, mb)
-	if st, _, err := s.loadCounter(ctx, io, counterID(hash, mb)); err == nil && st.Generation != "" && !st.Deleting {
-		if _, err := io.Stat(ctx, payloadOID(counterID(hash, mb), st.Generation)); err != nil {
-			return mapErr(err)
-		}
-		return s.changeCounter(ctx, io, counterID(hash, mb), hash, mb, msg, true, st.Generation)
-	} else if err != nil && !errors.Is(err, rados.ErrNotFound) {
-		return err
-	}
-
-	_, err := s.pool(ctx, mb).Write(ctx, hash, rados.NewWriteTx().AssertExists().OmapSet(map[string][]byte{refKey(mb, msg): nil}).SetXattr("touched", []byte(strconv.FormatInt(s.Now().UTC().Unix(), 10))))
-	return mapErr(err)
-}
-
-// RemoveRef drops a message's reference. Missing object or key is not an error.
-func (s *Store) RemoveRef(ctx context.Context, hash string, mb, msg uuid.UUID) error {
-	if !validHash(hash) {
-		return ErrHash
-	}
-	io := s.pool(ctx, mb)
-	var r receipt
-	if _, err := readJSON(ctx, io, receiptOID(hash, mb, msg), &r); err == nil {
-		id := counterID(hash, mb)
-		if err := s.enqueueCandidate(ctx, mb, hash, id); err != nil {
-			return err
-		}
-		err := s.changeCounter(ctx, io, id, hash, mb, msg, false, "")
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return err
-		}
-		// Republish after the counter mutation too: a collector may have
-		// examined the first candidate before the reference was removed.
-		return s.enqueueCandidate(ctx, mb, hash, id)
-	} else if !errors.Is(err, rados.ErrNotFound) {
-		return err
-	}
-	// Queue first: a crash may leave an extra candidate, never an untracked removal.
-	if err := s.enqueueCandidate(ctx, mb, hash, hash); err != nil {
-		return err
-	}
-
-	_, err := s.pool(ctx, mb).Write(ctx, hash, rados.NewWriteTx().AssertExists().OmapRemove(refKey(mb, msg)).SetXattr("touched", []byte(strconv.FormatInt(s.Now().UTC().Unix(), 10))))
-	if errors.Is(err, rados.ErrNotFound) {
-		return nil
-	}
+	_, err := s.Upload(ctx, hash, data, contentType, mb)
 	return err
 }
-
-// Get returns the content.
+func (s *Store) MarkGC(ctx context.Context, mb uuid.UUID, refs []index.AttachmentRef) error {
+	seen := make(map[index.AttachmentRef]bool)
+	for _, ref := range refs {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		if err := s.enqueueCandidate(ctx, mb, ref.Hash, payloadID(mb, ref)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (s *Store) Get(ctx context.Context, mb uuid.UUID, hash string) ([]byte, error) {
 	if !validHash(hash) {
 		return nil, ErrHash
 	}
-	if st, _, err := s.loadCounter(ctx, s.pool(ctx, mb), counterID(hash, mb)); err == nil && st.Generation != "" && !st.Deleting {
-		data, _, err := s.pool(ctx, mb).Get(ctx, payloadOID(counterID(hash, mb), st.Generation))
-		return data, mapErr(err)
-	} else if err != nil && !errors.Is(err, rados.ErrNotFound) {
-		return nil, err
-	}
-
-	data, _, err := s.pool(ctx, mb).Get(ctx, hash)
-	return data, mapErr(err)
-}
-
-// Info describes an attachment object.
-type Info struct {
-	Hash        string
-	Size        uint64
-	ContentType string
-	Created     time.Time
-	Touched     time.Time
-	Refs        int
-	// Version of the object when it was examined; a conditional delete
-	// uses it so a reference added meanwhile is never lost.
-	Version uint64
-}
-
-// Stat returns metadata and the reference count (counts up to 1<<20 refs).
-func (s *Store) Stat(ctx context.Context, mb uuid.UUID, hash string) (Info, error) {
-	if strings.HasPrefix(hash, "v2/") {
-		return s.counterInfo(ctx, s.pool(ctx, mb), hash)
-	}
-	if info, err := s.counterInfo(ctx, s.pool(ctx, mb), counterID(hash, mb)); err == nil {
-		return info, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return Info{}, err
-	}
-
-	return s.stat(ctx, s.pool(ctx, mb), hash)
-}
-
-// StatOn is Stat on a given storage (garbage collection).
-func (s *Store) StatOn(ctx context.Context, storageID int64, hash string) (Info, error) {
-	if strings.HasPrefix(hash, "v2/") {
-		return s.counterInfo(ctx, s.poolOf(ctx, storageID), hash)
-	}
-	return s.stat(ctx, s.poolOf(ctx, storageID), hash)
-}
-
-func (s *Store) stat(ctx context.Context, io rados.IOContext, hash string) (Info, error) {
-	return s.inspect(ctx, io, hash, 1<<20)
-}
-
-func (s *Store) inspect(ctx context.Context, io rados.IOContext, hash string, maxRefs int) (Info, error) {
-	st, err := io.Stat(ctx, hash)
-	if err != nil {
-		return Info{}, mapErr(err)
-	}
-	info := Info{Hash: hash, Size: st.Size, Created: st.ModTime, Touched: st.ModTime, Version: st.Version}
-	if x, err := io.GetXattrs(ctx, hash); err == nil {
-		info.ContentType = string(x["content_type"])
-		if c, err := strconv.ParseInt(string(x["created"]), 10, 64); err == nil {
-			info.Created = time.Unix(c, 0).UTC()
-		}
-		if c, err := strconv.ParseInt(string(x["touched"]), 10, 64); err == nil {
-			info.Touched = time.Unix(c, 0).UTC()
-		}
-	}
-	kv, _, err := io.OmapList(ctx, hash, "ref/", "", maxRefs)
-	if err != nil {
-		return Info{}, mapErr(err)
-	}
-	info.Refs = len(kv)
-	return info, nil
-}
-
-// Refs lists legacy references as "mailbox/message" strings. New counters have no
-// reverse reference map; ReconcileCounters streams their forward receipts.
-func (s *Store) Refs(ctx context.Context, storageID int64, hash string) ([]string, error) {
-	kv, _, err := s.poolOf(ctx, storageID).OmapList(ctx, hash, "ref/", "", 0)
+	a, _, err := s.idx.Attachment(ctx, mb, hash)
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	out := make([]string, 0, len(kv))
-	for _, e := range kv {
-		out = append(out, e.Key[len("ref/"):])
-	}
-	return out, nil
+	data, _, err := s.pool(ctx, mb).Get(ctx, payloadID(mb, index.AttachmentRef{Hash: hash, Generation: a.Generation}))
+	return data, mapErr(err)
 }
 
-// DeleteIfUnreferenced removes the object when it has no references and was
-// not touched within grace. Returns true if deleted.
-func (s *Store) DeleteIfUnreferenced(ctx context.Context, storageID int64, hash string, grace time.Duration) (bool, error) {
-	if strings.HasPrefix(hash, "v2/") {
-		return s.collectCounter(ctx, s.poolOf(ctx, storageID), hash, grace)
-	}
-
-	info, err := s.GCInfo(ctx, storageID, hash)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	if info.Refs > 0 || s.Now().Sub(info.Touched) < grace {
-		return false, nil
-	}
-	// Conditional on the version seen: a delivery that added a reference
-	// between our look and the delete bumps the version, and the delete
-	// is refused instead of taking the attachment away from a message.
-	_, err = s.poolOf(ctx, storageID).Write(ctx, hash, rados.NewWriteTx().AssertVersion(info.Version).Remove())
-	if err != nil {
-		if errors.Is(err, rados.ErrNotFound) || errors.Is(err, rados.ErrVersionMismatch) {
-			return false, nil
-		}
-		return false, mapErr(err)
-	}
-	return true, nil
+type Info struct {
+	Hash             string
+	Size             uint64
+	ContentType      string
+	Created, Touched time.Time
+	Refs             int
+	Version          uint64
+	counterPresent   bool
 }
 
-// DropDanglingRefs removes references to messages that do not exist
-// (deliveries that died after writing the attachment but before the index
-// committed). exists answers for a mailbox/message pair on this storage.
-// Returns how many references were dropped; the object itself is then an
-// ordinary unreferenced attachment for DeleteIfUnreferenced.
-func (s *Store) DropDanglingRefs(ctx context.Context, storageID int64, hash string, exists func(ctx context.Context, mb, msg uuid.UUID) (bool, error), expectedVersion ...uint64) (int, error) {
-	if strings.HasPrefix(hash, "v2/") {
-		return 0, nil
-	} // forward receipts reconciled once per pool
-
-	st, err := s.poolOf(ctx, storageID).Stat(ctx, hash)
-	if errors.Is(err, rados.ErrNotFound) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	version := st.Version
-	if len(expectedVersion) > 0 && expectedVersion[0] != version {
-		return 0, nil
-	}
-	refs, err := s.Refs(ctx, storageID, hash)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	dropped := 0
-	for _, ref := range refs {
-		if len(ref) != 73 || ref[36] != '/' {
-			continue
-		}
-		mb, err1 := uuid.Parse(ref[:36])
-		msg, err2 := uuid.Parse(ref[37:])
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		ok, err := exists(ctx, mb, msg)
+func attachmentInfo(id string, a index.Attachment) Info {
+	return Info{Hash: id, Size: a.Size, ContentType: a.ContentType, Created: a.Created, Touched: a.Touched, Refs: int(a.Count), counterPresent: true}
+}
+func (s *Store) Stat(ctx context.Context, mb uuid.UUID, hash string) (Info, error) {
+	if strings.HasPrefix(hash, "v3/") {
+		cid, _, err := s.r.Pool(ctx, mb, storage.RoleAttachments)
 		if err != nil {
-			return dropped, err
+			return Info{}, err
 		}
-		if ok {
-			continue
-		}
-		ver, err := s.poolOf(ctx, storageID).Write(ctx, hash, rados.NewWriteTx().AssertVersion(version).OmapRemove(refKey(mb, msg)))
-		if errors.Is(err, rados.ErrVersionMismatch) || errors.Is(err, rados.ErrNotFound) {
-			return dropped, nil
-		}
-		if err != nil {
-			return dropped, mapErr(err)
-		}
-		version = ver
-		dropped++
+		return s.GCInfo(ctx, cid, hash)
 	}
-	return dropped, nil
-}
-
-// List walks attachment GC identifiers on every connected storage. Legacy IDs
-// are hashes; format-2 IDs identify a hash partition. Pass them to GCInfo/StatOn.
-func (s *Store) List(ctx context.Context, fn func(storageID int64, hash string) error) error {
-	return s.r.Each(ctx, storage.RoleAttachments, func(cid int64, io rados.IOContext) error {
-		return io.List(ctx, func(oid string) error {
-			if strings.HasPrefix(oid, "v2/") && strings.HasSuffix(oid, "/counter") {
-				id := strings.TrimSuffix(oid, "/counter")
-				var st counterState
-				if _, err := readJSON(ctx, io, oid, &st); err != nil {
-					return err
-				}
-				if st.Generation == "" {
-					return nil
-				}
-				return fn(cid, id)
-			}
-			if len(oid) != 64 {
-				return nil
-			}
-			return fn(cid, oid)
-		})
-	})
-}
-
-// HasMailboxRef confines cluster-wide content hashes to an authorized mailbox.
-func (s *Store) HasMailboxRef(ctx context.Context, hash string, mb uuid.UUID) (bool, error) {
-	if !validHash(hash) {
-		return false, ErrHash
-	}
-	if _, _, err := s.loadCounter(ctx, s.pool(ctx, mb), counterID(hash, mb)); err == nil {
-		var owner ownerCount
-		_, err := readJSON(ctx, s.pool(ctx, mb), ownerOID(hash, mb), &owner)
-		if err == nil && owner.Count > 0 {
-			return true, nil
-		}
-		if err != nil && !errors.Is(err, rados.ErrNotFound) {
-			return false, err
-		}
-	} else if !errors.Is(err, rados.ErrNotFound) {
-		return false, err
-	}
-
-	kv, _, err := s.pool(ctx, mb).OmapList(ctx, hash, "ref/"+mb.String()+"/", "", 1)
-	if errors.Is(err, rados.ErrNotFound) {
-		return false, nil
-	}
-	return len(kv) > 0, err
-}
-
-// Metadata does not enumerate references (which can number in the millions).
-func (s *Store) Metadata(ctx context.Context, mb uuid.UUID, hash string) (Info, error) {
 	if !validHash(hash) {
 		return Info{}, ErrHash
 	}
-	if info, err := s.counterInfo(ctx, s.pool(ctx, mb), counterID(hash, mb)); err == nil {
-		return info, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return Info{}, err
-	}
-
-	x, err := s.pool(ctx, mb).GetXattrs(ctx, hash)
+	a, _, err := s.idx.Attachment(ctx, mb, hash)
 	if err != nil {
 		return Info{}, mapErr(err)
 	}
-	return Info{Hash: hash, ContentType: string(x["content_type"])}, nil
+	return attachmentInfo(payloadID(mb, index.AttachmentRef{Hash: hash, Generation: a.Generation}), a), nil
 }
-
-func candidateOID(hash string) string { return "gc/" + hash[:2] }
-
-// Candidates visits only hashes affected by a reference removal. The shard
-// version prevents cleanup from losing a concurrently enqueued candidate.
-func (s *Store) Candidates(ctx context.Context, fn func(int64, string) (bool, error)) error {
-	return s.r.Each(ctx, storage.RoleAttachments, func(cid int64, io rados.IOContext) error {
-		if s.candidates != nil {
-			return s.candidates.AttachmentGCCandidates(ctx, cid, func(id string) (bool, error) { return fn(cid, id) })
-		}
-		for shard := 0; shard < 256; shard++ {
-			oid := fmt.Sprintf("gc/%02x", shard)
-			st, err := io.Stat(ctx, oid)
-			if errors.Is(err, rados.ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			version := st.Version
-			after := ""
-			for {
-				kv, more, err := io.OmapList(ctx, oid, "", after, 512)
-				if err != nil {
-					return err
-				}
-				for _, entry := range kv {
-					fresh, err := io.Stat(ctx, oid)
-					if err != nil {
-						return err
-					}
-					version = fresh.Version
-					done, err := fn(cid, entry.Key)
-					if err != nil {
-						return err
-					}
-					if done {
-						ver, err := io.Write(ctx, oid, rados.NewWriteTx().AssertVersion(version).OmapRemove(entry.Key))
-						if err == nil {
-							version = ver
-						} else if !errors.Is(err, rados.ErrVersionMismatch) {
-							return err
-						}
-						// On a version conflict leave candidates for the next pass.
-					}
-					after = entry.Key
-				}
-				if !more || len(kv) == 0 {
-					break
-				}
-			}
-		}
-		return nil
-	})
+func (s *Store) Metadata(ctx context.Context, mb uuid.UUID, hash string) (Info, error) {
+	return s.Stat(ctx, mb, hash)
 }
-
-// GCInfo only asks whether a reference exists, never counts a large omap.
-func (s *Store) GCInfo(ctx context.Context, cid int64, hash string) (Info, error) {
-	if strings.HasPrefix(hash, "v2/") {
-		return s.counterInfo(ctx, s.poolOf(ctx, cid), hash)
+func (s *Store) HasMailboxRef(ctx context.Context, hash string, mb uuid.UUID) (bool, error) {
+	a, err := s.Stat(ctx, mb, hash)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
 	}
-	return s.inspect(ctx, s.poolOf(ctx, cid), hash, 1)
+	return err == nil && a.Refs > 0, err
+}
+func (s *Store) StatOn(ctx context.Context, cid int64, id string) (Info, error) {
+	return s.GCInfo(ctx, cid, id)
+}
+
+// Observe the payload before the index. A concurrent upload must reserve its
+// generation before creating data; collection then fences publication via the
+// mailbox epoch even when no payload or counter existed at the first read.
+func (s *Store) GCInfo(ctx context.Context, cid int64, id string) (Info, error) {
+	mb, ref, err := parsePayloadID(id)
+	if err != nil {
+		return Info{}, err
+	}
+	st, err := s.poolOf(ctx, cid).Stat(ctx, id)
+	missing := errors.Is(err, rados.ErrNotFound)
+	if err != nil && !missing {
+		return Info{}, err
+	}
+	a, epoch, err := s.idx.Attachment(storage.WithID(ctx, cid), mb, ref.Hash)
+	if err != nil && !errors.Is(err, index.ErrNotFound) {
+		return Info{}, err
+	}
+	if err == nil && a.Generation == ref.Generation {
+		info := attachmentInfo(id, a)
+		info.Version = st.Version
+		return info, nil
+	}
+	if missing && epoch == "" {
+		return Info{}, ErrNotFound
+	}
+	return Info{Hash: id, Size: st.Size, Created: st.ModTime, Touched: st.ModTime, Version: st.Version}, nil
+}
+func (s *Store) DeleteIfUnreferenced(ctx context.Context, cid int64, id string, grace time.Duration) (bool, error) {
+	mb, ref, err := parsePayloadID(id)
+	if err != nil {
+		return false, err
+	}
+	info, err := s.GCInfo(ctx, cid, id)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Refs > 0 || (!info.Touched.IsZero() && s.Now().Sub(info.Touched) < grace) {
+		return false, nil
+	}
+	retired, err := s.idx.RetireAttachment(storage.WithID(ctx, cid), mb, ref, s.Now(), grace)
+	if err != nil || !retired {
+		return false, err
+	}
+	err = s.poolOf(ctx, cid).Delete(ctx, id)
+	if errors.Is(err, rados.ErrNotFound) {
+		err = nil
+	}
+	return true, err
+}
+func (s *Store) List(ctx context.Context, fn func(int64, string) error) error {
+	return s.r.Each(ctx, storage.RoleAttachments, func(cid int64, io rados.IOContext) error {
+		return io.List(ctx, func(oid string) error {
+			if _, _, err := parsePayloadID(oid); err == nil {
+				return fn(cid, oid)
+			}
+			return nil
+		})
+	})
 }

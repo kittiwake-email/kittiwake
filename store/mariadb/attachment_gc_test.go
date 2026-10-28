@@ -2,6 +2,7 @@ package mariadb_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,10 +52,10 @@ func TestSQLAttachmentCandidatesUseNoOMAP(t *testing.T) {
 	if err := s.Put(ctx, hash, data, "text/plain", mb, msg); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RemoveRef(ctx, hash, mb, msg); err != nil {
-		t.Fatal(err)
-	}
 	if err := io.List(ctx, func(oid string) error {
+		if !strings.HasPrefix(oid, "v3/") {
+			return nil
+		}
 		keys, _, err := io.OmapList(ctx, oid, "", "", 1)
 		if len(keys) > 0 {
 			t.Errorf("unexpected OMAP on %s", oid)

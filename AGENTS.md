@@ -131,7 +131,7 @@ These are settled. Do not design around them.
   reserve; it does not measure per-OSD IOPS or move existing mailboxes. An unreachable
   storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
   every storage; a removal task carries the storage id.
-- **Multi-object index mutations use a durable root journal.** Root format 4 prepares a
+- **Multi-object index mutations use a durable root journal.** Root format 5 prepares a
   commit decision with CAS, replays version-fenced target writes, then atomically publishes
   counters/modseq/change log. Private delivery data is undone only before acceptance;
   ErrPending must preserve it for recovery. Readers help pending mutations complete. Sweeps
@@ -159,11 +159,12 @@ These are settled. Do not design around them.
   is Document.Size = what IMAP/JMAP report). Only `multipart/signed` keeps the original
   bytes (`.raw`, config `mail.keep_raw`). Every non-primary-body MIME part is an attachment;
   parts under a threshold stay inline as Part.Data.
-- **Attachments** use 256 mailbox-derived deduplication partitions per Ceph storage.
-  Format 2 has scalar counters, a bounded recoverable journal, forward retry receipts
-  and per-mailbox ownership counters; no per-message OMAP on payloads. Legacy hash-named
-  objects remain readable. Only workers collect zero-count payload generations. Preserve
-  receipt/counter tombstones and stop old writers before rollout; see README Attachments.
+- **Attachments** deduplicate within a mailbox. Format 3 uses immutable payload
+  generations and scalar counters in capped index maps, updated in the same root
+  journal as Append/DropRetention. No reverse keys, receipt objects or ownership
+  objects. Zero-count generation reservations and a mailbox upload epoch fence GC
+  races; retirement removes the counter key. Candidates are fenced SQL registry rows.
+  Reset old lab data and stop all old writers before root-format-5 rollout.
 - **Delivery order:** private message/attachment data, prepared root journal, fenced target
   writes, final root + change log. LMTP acks only after completion. Accepted journal failures
   return ErrPending and retain data for recovery.
@@ -176,7 +177,7 @@ These are settled. Do not design around them.
   Retention ranges hold at most 65,536 deletions, independently of live quota.
   Thread/Message-ID/location maps use 256 entry buckets with overflow children,
   capped at 4,096 keys and 4 MiB per node. Message-ID mappings count live copies
-  and are removed with the last copy. Format 4 requires resetting old lab data.
+  and are removed with the last copy. Format 5 requires resetting old lab data.
 - **Change tracking:** every mutation bumps `modseq` and appends to the bounded change log
   root omap `c/<modseq>`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.
 - **Workers** consume the task queue in MariaDB (`SELECT ... FOR UPDATE SKIP LOCKED`,

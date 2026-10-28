@@ -1,0 +1,1 @@
+ALTER TABLE attachment_gc MODIFY COLUMN object_id VARBINARY(192) NOT NULL;

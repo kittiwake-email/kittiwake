@@ -21,8 +21,8 @@ func TestPoolCapabilitiesAndCleanup(t *testing.T) {
 	if err := probePool(ctx, noOmap{io}, RoleIndex); err == nil {
 		t.Fatal("index accepted without OMAP")
 	}
-	if err := probePool(ctx, noOmap{io}, RoleAttachments); err == nil {
-		t.Fatal("attachments accepted without OMAP")
+	if err := probePool(ctx, noOmap{io}, RoleAttachments); err != nil {
+		t.Fatal(err)
 	}
 	if err := probePool(ctx, noOmap{io}, RoleMessages); err != nil {
 		t.Fatal(err)

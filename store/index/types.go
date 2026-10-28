@@ -122,6 +122,7 @@ type Usage struct {
 
 // Root is the mailbox root object's data.
 type Root struct {
+	AttachmentEpoch string `json:"attachment_epoch"`
 	// Retention uses consecutive 65,536-deletion ranges, independently of live quota.
 	RetentionNext  uint64    `json:"retention_next,omitempty"`
 	RetentionFirst uint64    `json:"retention_first,omitempty"`
@@ -177,18 +178,19 @@ func (r *Root) FolderByRole(role string) *Folder {
 // and listings read them all. Everything else about a message lives in its
 // document object. JSON tags are short to save omap bytes.
 type Record struct {
-	UID            uint32    `json:"u"`
-	MessageID      uuid.UUID `json:"m"` // object name is <mailbox>/<m>
-	ThreadID       string    `json:"t"`
-	Flags          []string  `json:"f,omitempty"`
-	Size           int64     `json:"s"`
-	InternalDate   time.Time `json:"d"`
-	ModSeq         uint64    `json:"q"`
-	Date           time.Time `json:"e"` // sent date (Date header)
-	Subject        string    `json:"j,omitempty"`
-	From           string    `json:"fr,omitempty"` // display form "Name <addr>"
-	FromEmail      string    `json:"fe,omitempty"`
-	HasAttachments bool      `json:"a,omitempty"`
+	Attachments    []AttachmentRef `json:"ar,omitempty"`
+	UID            uint32          `json:"u"`
+	MessageID      uuid.UUID       `json:"m"` // object name is <mailbox>/<m>
+	ThreadID       string          `json:"t"`
+	Flags          []string        `json:"f,omitempty"`
+	Size           int64           `json:"s"`
+	InternalDate   time.Time       `json:"d"`
+	ModSeq         uint64          `json:"q"`
+	Date           time.Time       `json:"e"` // sent date (Date header)
+	Subject        string          `json:"j,omitempty"`
+	From           string          `json:"fr,omitempty"` // display form "Name <addr>"
+	FromEmail      string          `json:"fe,omitempty"`
+	HasAttachments bool            `json:"a,omitempty"`
 
 	// Message-ID is retained to reclaim its mapping when the last live copy leaves.
 	// References and InReplyTo are Append input only.
@@ -237,13 +239,14 @@ const (
 
 // RetentionEntry is a message waiting for purge.
 type RetentionEntry struct {
-	MessageID uuid.UUID `json:"message_id"`
-	FolderID  string    `json:"folder_id"` // folder it was removed from
-	UID       uint32    `json:"uid"`
-	Size      int64     `json:"size"`
-	DeletedAt time.Time `json:"deleted_at"`
-	PurgeAt   time.Time `json:"purge_at"`
-	Reason    string    `json:"reason"` // "expunge", "trash", "destroy"
+	Attachments []AttachmentRef `json:"attachments,omitempty"`
+	MessageID   uuid.UUID       `json:"message_id"`
+	FolderID    string          `json:"folder_id"` // folder it was removed from
+	UID         uint32          `json:"uid"`
+	Size        int64           `json:"size"`
+	DeletedAt   time.Time       `json:"deleted_at"`
+	PurgeAt     time.Time       `json:"purge_at"`
+	Reason      string          `json:"reason"` // "expunge", "trash", "destroy"
 }
 
 func equalFold(a, b string) bool {

@@ -115,6 +115,7 @@ func (s *Service) getMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbo
 
 // New returns the service. queue may be nil (events dropped).
 func New(ids *identity.Store, idx *index.Store, msgs *message.Store, atts *attach.Store, q queue.Store, aud *auditor.Auditor, log *slog.Logger, cfg Config) *Service {
+	atts.BindIndex(idx)
 	if cfg.MaxAliasDepth <= 0 {
 		cfg.MaxAliasDepth = 5
 	}
@@ -521,24 +522,20 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 		return Delivered{}, err
 	}
 
-	// Attachments (content + reference in one transaction each) are
-	// independent of the index: write them while the index allocates.
-	var attErr error
-	attDone := make(chan struct{})
-	go func() {
-		defer close(attDone)
-		for _, a := range parsed.Attachments {
-			if err := s.atts.Put(ctx, a.Hash, a.Data, a.ContentType, mb, msgID); err != nil {
-				attErr = fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
-				return
-			}
+	// Upload payloads first; their scalar references are published by Append.
+	var refs []index.AttachmentRef
+	for _, a := range parsed.Attachments {
+		ref, err := s.atts.Upload(ctx, a.Hash, a.Data, a.ContentType, mb)
+		if err != nil {
+			return Delivered{}, fmt.Errorf("delivery: attachment %s: %w", a.Hash, err)
 		}
-	}()
+		refs = append(refs, ref)
+	}
 
-	// Root transaction (UID, modseq, counters, change log) → message object
-	// at its location (concurrently with the thread maps, inside Append) →
-	// folder record (commit point). Round trips on the critical path: 3.
+	// Append prepares the message object, then journals the index record and
+	// attachment counters before publishing the root and change log.
 	rec := recordFor(msgID, parsed.Doc, flags, internalDate)
+	rec.Attachments = refs
 	rec, err = s.idx.Append(ctx, mb, folderID, rec, func(uid uint32, _ uint64) error {
 		loc := index.Location{FolderID: folderID, UID: uid}.String()
 		var pg sync.WaitGroup
@@ -560,18 +557,13 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 		if rawErr != nil {
 			return rawErr
 		}
-		// Attachments must exist before the index entry commits.
-		<-attDone
-		return attErr
+		return nil
 	})
 	if err != nil {
-		// Nothing committed: take back what was written so a failed
-		// delivery (quota, storage trouble) leaves no object behind. The
 		// No counters were published before preparation. An accepted journal
 		// must retain private data so another process can complete it.
-		<-attDone
 		if !errors.Is(err, index.ErrPending) {
-			s.undoStore(ctx, mb, msgID, parsed)
+			s.undoStore(ctx, mb, msgID)
 		}
 		if errors.Is(err, index.ErrNotFound) {
 			err = ErrNoFolder
@@ -595,19 +587,14 @@ func (s *Service) store(ctx context.Context, mb uuid.UUID, folderID string, pars
 	return Delivered{MailboxID: mb, MessageID: msgID, FolderID: folderID, UID: rec.UID, Record: rec}, nil
 }
 
-// undoStore removes the message objects and attachment references of a
-// store that did not commit. Best effort, with its own deadline: the
+// undoStore removes private message objects from a store that did not commit.
+// Unpublished zero-count attachment generations are collected after their grace. Best effort, with its own deadline: the
 // request context may already be gone.
-func (s *Service) undoStore(ctx context.Context, mb, msgID uuid.UUID, parsed *mail.Parsed) {
+func (s *Service) undoStore(ctx context.Context, mb, msgID uuid.UUID) {
 	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if err := s.msgs.Delete(uctx, mb, msgID); err != nil {
 		s.log.WarnContext(uctx, "delivery: undo message object failed; the orphan sweep will remove it", slog.String("mailbox", mb.String()), slog.String("message", msgID.String()), slog.String("error", err.Error()))
-	}
-	for _, a := range parsed.Attachments {
-		if err := s.atts.RemoveRef(uctx, a.Hash, mb, msgID); err != nil {
-			s.log.WarnContext(uctx, "delivery: undo attachment reference failed; attachment gc will drop it", slog.String("hash", a.Hash), slog.String("error", err.Error()))
-		}
 	}
 }
 

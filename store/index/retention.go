@@ -109,6 +109,9 @@ func (s *Store) dropRetention(ctx context.Context, mb uuid.UUID, handles ...stri
 			if err := json.Unmarshal(value, &entry); err != nil {
 				return err
 			}
+			if err := s.changeAttachments(ctx, mb, entry.Attachments, -1); err != nil {
+				return err
+			}
 			// DropRetention's contract requires physical deletion first. Removing the
 			// key under the root journal advances the shard version, fencing old helpers;
 			// the retained shard object must not be deleted or recreated.
