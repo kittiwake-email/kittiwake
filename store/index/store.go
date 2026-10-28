@@ -23,7 +23,7 @@ import (
 
 const (
 	maxRootAttempts  = 64
-	rootVersion      = 2
+	rootVersion      = 3
 	changeLogKeep    = 10000 // entries kept per mailbox
 	changeTrimEvery  = 256   // trim when modseq crosses a multiple of this
 	maxFolderDepth   = 16
@@ -1136,7 +1136,7 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 		return RetentionEntry{}, err
 	}
 	now := s.Now().UTC()
-	var modseq uint64
+	var modseq, retentionSeq uint64
 	_, err = s.updateRoot(ctx, mb, func(r *Root) error {
 		f := r.FolderByID(fid)
 		if f == nil {
@@ -1144,6 +1144,8 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 		}
 		r.ModSeq++
 		modseq = r.ModSeq
+		retentionSeq = r.RetentionNext
+		r.RetentionNext++
 		f.ModSeq = r.ModSeq
 		f.Total--
 		f.Size -= rec.Size
@@ -1158,7 +1160,7 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 	if err != nil {
 		return RetentionEntry{}, err
 	}
-	if err := s.setLocation(ctx, mb, rec.MessageID, Location{}); err != nil {
+	if err := s.setRetainedLocation(ctx, mb, rec.MessageID, retentionSeq, retentionKey(purgeAt.UTC(), rec.MessageID)); err != nil {
 		return RetentionEntry{}, err
 	}
 	entry := RetentionEntry{MessageID: rec.MessageID, FolderID: fid, UID: uid, Size: rec.Size, DeletedAt: now, PurgeAt: purgeAt.UTC(), Reason: reason}
@@ -1168,7 +1170,7 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 	}
 	// Retention entry first so a crash never loses the message's trail,
 	// then the index and thread removals concurrently.
-	if _, err := s.pool(ctx, mb).Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{retentionKey(entry.PurgeAt, rec.MessageID): data})); err != nil {
+	if _, err := s.pool(ctx, mb).Write(ctx, retentionShardOID(mb, retentionSeq>>shardBits), rados.NewWriteTx().OmapSet(map[string][]byte{retentionKey(entry.PurgeAt, rec.MessageID): data})); err != nil {
 		return RetentionEntry{}, mapErr(err)
 	}
 	var pg parallel
@@ -1188,42 +1190,6 @@ func (s *Store) remove(ctx context.Context, mb uuid.UUID, fid string, uid uint32
 	}
 	s.maybeTrim(ctx, mb, modseq)
 	return entry, nil
-}
-
-// ListRetention lists retention entries due before `before` (all if zero).
-func (s *Store) ListRetention(ctx context.Context, mb uuid.UUID, before time.Time, max int) (entries []RetentionEntry, keys []string, more bool, err error) {
-	kv, more, err := s.pool(ctx, mb).OmapList(ctx, retentionOID(mb), "", "", max)
-	if err != nil {
-		if errors.Is(err, rados.ErrNotFound) {
-			return nil, nil, false, nil
-		}
-		return nil, nil, false, mapErr(err)
-	}
-	for _, e := range kv {
-		var re RetentionEntry
-		if err := json.Unmarshal(e.Value, &re); err != nil {
-			return nil, nil, false, fmt.Errorf("index: decode retention: %w", err)
-		}
-		if !before.IsZero() && re.PurgeAt.After(before) {
-			more = false
-			break
-		}
-		entries = append(entries, re)
-		keys = append(keys, e.Key)
-	}
-	return entries, keys, more, nil
-}
-
-// DropRetention removes retention entries by key (after their objects are purged).
-func (s *Store) dropRetention(ctx context.Context, mb uuid.UUID, keys ...string) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	_, err := s.pool(ctx, mb).Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapRemove(keys...))
-	if errors.Is(err, rados.ErrNotFound) {
-		return nil
-	}
-	return mapErr(err)
 }
 
 // ThreadMembers returns the locations of all messages in a thread.
@@ -1342,6 +1308,11 @@ func (s *Store) DeleteAll(ctx context.Context, mb uuid.UUID) error {
 	}
 	for i := 0; i < threadShards; i++ {
 		oids = append(oids, fmt.Sprintf("%s/t.%02x", mb, i))
+	}
+	if vr.root.RetentionNext > 0 {
+		for shard := uint64(0); shard <= (vr.root.RetentionNext-1)>>shardBits; shard++ {
+			oids = append(oids, retentionShardOID(mb, shard))
+		}
 	}
 	oids = append(oids, retentionOID(mb), rootOID(mb))
 	for _, oid := range oids {

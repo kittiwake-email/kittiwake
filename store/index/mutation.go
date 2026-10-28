@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -351,7 +352,7 @@ func (s *Store) Location(ctx context.Context, mb, msg uuid.UUID) (loc Location, 
 	if !ok {
 		return Location{}, false, nil
 	}
-	if string(data) == "deleted" {
+	if string(data) == "deleted" || strings.HasPrefix(string(data), "retained/") {
 		return Location{}, true, nil
 	}
 	loc, err = ParseLocation(string(data))

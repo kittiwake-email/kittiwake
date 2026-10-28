@@ -191,3 +191,8 @@ func TestCephReviewRecoveryAndReads(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCephRetentionRanges(t *testing.T) {
+	s, _, mb, _ := benchmarkCeph(t)
+	testRetentionRanges(t, s, mb)
+}

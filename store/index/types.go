@@ -122,15 +122,18 @@ type Usage struct {
 
 // Root is the mailbox root object's data.
 type Root struct {
-	Mutation     *mutation `json:"mutation,omitempty"`
-	Version      int       `json:"version"`
-	MailboxID    uuid.UUID `json:"mailbox_id"`
-	Folders      []*Folder `json:"folders"`
-	NextFolderID uint32    `json:"next_folder_id"`
-	ModSeq       uint64    `json:"modseq"`  // mailbox-wide, monotonically increasing
-	Horizon      uint64    `json:"horizon"` // lowest modseq still in the change log
-	Usage        Usage     `json:"usage"`
-	Created      time.Time `json:"created"`
+	// Retention uses consecutive 65,536-deletion ranges, independently of live quota.
+	RetentionNext  uint64    `json:"retention_next,omitempty"`
+	RetentionFirst uint64    `json:"retention_first,omitempty"`
+	Mutation       *mutation `json:"mutation,omitempty"`
+	Version        int       `json:"version"`
+	MailboxID      uuid.UUID `json:"mailbox_id"`
+	Folders        []*Folder `json:"folders"`
+	NextFolderID   uint32    `json:"next_folder_id"`
+	ModSeq         uint64    `json:"modseq"`  // mailbox-wide, monotonically increasing
+	Horizon        uint64    `json:"horizon"` // lowest modseq still in the change log
+	Usage          Usage     `json:"usage"`
+	Created        time.Time `json:"created"`
 
 	// pending change-log entries written with the next root transaction.
 	pending []Change

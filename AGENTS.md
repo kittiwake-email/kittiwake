@@ -130,7 +130,7 @@ These are settled. Do not design around them.
   Placement is random among connected storage entries open for placement; an unreachable
   storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
   every storage; a removal task carries the storage id.
-- **Multi-object index mutations use a durable root journal.** Root format 2 prepares a
+- **Multi-object index mutations use a durable root journal.** Root format 3 prepares a
   commit decision with CAS, replays version-fenced target writes, then atomically publishes
   counters/modseq/change log. Private delivery data is undone only before acceptance;
   ErrPending must preserve it for recovery. Readers help pending mutations complete. Sweeps
@@ -171,7 +171,8 @@ These are settled. Do not design around them.
   keys = inverted UID so ascending iteration is newest-first (`ListFolderDesc` is the cheap
   path; `ListFolder` ascending reads whole shards). Compact Record with short JSON tags.
   Message id → location via `loc/<uuid>` in hashed thread shards; the message `loc`
-  xattr is a legacy fallback. Removal leaves a location tombstone.
+  xattr is a legacy fallback. Removal stores a retention handle; physical purge removes the location key.
+  Retention ranges hold at most 65,536 deletions, independently of live quota.
   Thread/Message-ID maps sharded over `<mb>/t.<xx>` (256). Keep omaps bounded.
 - **Change tracking:** every mutation bumps `modseq` and appends to the bounded change log
   root omap `c/<modseq>`. Needed by JMAP `/changes` and later IMAP CONDSTORE/QRESYNC.

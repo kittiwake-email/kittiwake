@@ -1,0 +1,104 @@
+package index
+
+import (
+	"context"
+	"encoding/json"
+	"github.com/google/uuid"
+	"kittiwake/rados"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRetentionRangeBoundaryAndMembership(t *testing.T) {
+	s, mb := newStore(t)
+	testRetentionRanges(t, s, mb)
+}
+func testRetentionRanges(t *testing.T, s *Store, mb uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	root, _ := s.GetRoot(ctx, mb)
+	fid := root.Folders[0].ID
+	_, err := s.updateRoot(ctx, mb, func(r *Root) error { r.RetentionNext = 65535; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.Append(ctx, mb, fid, rec(1, "a"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Append(ctx, mb, fid, rec(1, "b"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := time.Now().Add(-time.Hour)
+	if _, err := s.Remove(ctx, mb, fid, a.UID, "test", due); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Remove(ctx, mb, fid, b.UID, "test", due); err != nil {
+		t.Fatal(err)
+	}
+	entries, keys, more, err := s.ListRetention(ctx, mb, time.Now(), 1)
+	if err != nil || len(entries) != 1 || !more || !strings.HasPrefix(keys[0], "s/0000000000000000/") {
+		t.Fatalf("first page: %v %v %v %v", entries, keys, more, err)
+	}
+	if ok, err := s.IsRetained(ctx, mb, a.MessageID); err != nil || !ok {
+		t.Fatalf("membership: %v %v", ok, err)
+	}
+	if err := s.DropRetention(ctx, mb, keys...); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.IsRetained(ctx, mb, a.MessageID); err != nil || ok {
+		t.Fatalf("removed membership: %v %v", ok, err)
+	}
+	entries, keys, more, err = s.ListRetention(ctx, mb, time.Now(), 1)
+	if err != nil || len(entries) != 1 || more || entries[0].MessageID != b.MessageID || !strings.HasPrefix(keys[0], "s/0000000000000001/") {
+		t.Fatalf("second page: %v %v %v %v", entries, keys, more, err)
+	}
+	root, _ = s.GetRoot(ctx, mb)
+	if root.RetentionFirst != 1 {
+		t.Fatalf("low watermark: %d", root.RetentionFirst)
+	}
+	if err := s.DropRetention(ctx, mb, keys...); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DropRetention(ctx, mb, keys...); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestRetentionLegacyAndFutureRanges(t *testing.T) {
+	s, mb := newStore(t)
+	ctx := context.Background()
+	root, _ := s.GetRoot(ctx, mb)
+	fid := root.Folders[0].ID
+	future, _ := s.Append(ctx, mb, fid, rec(1, "future"), nil)
+	_, err := s.Remove(ctx, mb, fid, future.UID, "test", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := RetentionEntry{MessageID: uuid.New(), PurgeAt: time.Now().Add(-time.Hour)}
+	data, _ := json.Marshal(legacy)
+	key := retentionKey(legacy.PurgeAt, legacy.MessageID)
+	_, err = s.pool(ctx, mb).Write(ctx, retentionOID(mb), rados.NewWriteTx().OmapSet(map[string][]byte{key: data}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, keys, more, err := s.ListRetention(ctx, mb, time.Now(), 10)
+	if err != nil || more || len(entries) != 1 || entries[0].MessageID != legacy.MessageID || keys[0] != key {
+		t.Fatalf("legacy page: %v %v %v %v", entries, keys, more, err)
+	}
+	if ok, err := s.IsRetained(ctx, mb, legacy.MessageID); err != nil || !ok {
+		t.Fatalf("legacy membership: %v %v", ok, err)
+	}
+	if err := s.DropRetention(ctx, mb, keys...); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, _, err = s.ListRetention(ctx, mb, time.Now(), 10)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("future entry must stay: %v %v", entries, err)
+	}
+	if ok, err := s.IsRetained(ctx, mb, future.MessageID); err != nil || !ok {
+		t.Fatalf("future membership: %v %v", ok, err)
+	}
+}

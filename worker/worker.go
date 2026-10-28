@@ -430,7 +430,7 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 		if len(entries) == 0 {
 			break
 		}
-		for i, e := range entries {
+		for _, e := range entries {
 			live, err := w.idx.IsLive(ctx, mb, e.MessageID, index.Location{FolderID: e.FolderID, UID: e.UID}.String())
 			if err != nil {
 				return err
@@ -449,13 +449,13 @@ func (w *Worker) purgeTrash(ctx context.Context, mb uuid.UUID, all bool) error {
 			if _, err := w.deleteMessage(ctx, mb, e.MessageID); err != nil {
 				return err
 			}
-			if err := w.idx.DropRetention(ctx, mb, keys[i]); err != nil {
-				return err
-			}
 			purged++
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+		}
+		if err := w.idx.DropRetention(ctx, mb, keys...); err != nil {
+			return err
 		}
 		if !more {
 			break
@@ -541,23 +541,31 @@ func (w *Worker) removeMailbox(ctx context.Context, mb uuid.UUID) error {
 				}
 			}
 		}
-		entries, keys, _, err := w.idx.ListRetention(ctx, mb, time.Time{}, 0)
-		if err != nil {
-			return err
-		}
-		for i, e := range entries {
-			existed, err := w.deleteMessage(ctx, mb, e.MessageID)
+		for {
+			entries, keys, more, err := w.idx.ListRetention(ctx, mb, time.Time{}, w.cfg.ScanBatch)
 			if err != nil {
 				return err
 			}
-			if err := w.idx.DropRetention(ctx, mb, keys[i]); err != nil {
+			if len(entries) == 0 {
+				break
+			}
+			for _, e := range entries {
+				existed, err := w.deleteMessage(ctx, mb, e.MessageID)
+				if err != nil {
+					return err
+				}
+				if existed {
+					n++
+				}
+				if err := step(); err != nil {
+					return err
+				}
+			}
+			if err := w.idx.DropRetention(ctx, mb, keys...); err != nil {
 				return err
 			}
-			if existed {
-				n++
-			}
-			if err := step(); err != nil {
-				return err
+			if !more {
+				break
 			}
 		}
 		if err := w.idx.DeleteAll(ctx, mb); err != nil {
@@ -637,16 +645,7 @@ func (w *Worker) collectAttachment(ctx context.Context, cid int64, hash string, 
 func (w *Worker) orphanSweep(ctx context.Context) error {
 	cutoff := w.Now().Add(-w.cfg.OrphanAge)
 	inRetention := func(cid int64, mb, msg uuid.UUID) (bool, error) {
-		entries, _, _, err := w.idx.ListRetention(storage.WithID(ctx, cid), mb, time.Time{}, 0)
-		if err != nil {
-			return false, err
-		}
-		for _, e := range entries {
-			if e.MessageID == msg {
-				return true, nil
-			}
-		}
-		return false, nil
+		return w.idx.IsRetained(storage.WithID(ctx, cid), mb, msg)
 	}
 	protected := func(i message.Info) (bool, error) {
 		cctx := storage.WithID(ctx, i.StorageID)

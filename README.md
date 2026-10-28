@@ -486,8 +486,11 @@ Mail data:
   `<mailbox-uuid>/<folder-id>.<n>` per further block of 65536 UIDs
 - Thread and Message-ID maps: `<mailbox-uuid>/t.<xx>`, 256 shards by hash of the key
 - Change log: `c/<modseq>` omap keys on the mailbox root (bounded)
-- Retention set (expunged and trashed messages waiting for purge): `<mailbox-uuid>/retention`
-  in the index pool, omap keyed by purge-at timestamp
+- Retention set: `<mailbox-uuid>/retention.<16-hex-range>` in the index pool,
+  at most 65,536 deletion entries per object, keyed by purge-at timestamp. Root
+  allocation and a low watermark track active ranges. Legacy `<mailbox-uuid>/retention`
+  is drained first. Location entries point directly to retained messages and are
+  removed after physical purge; empty shard objects retain their version fences.
 - Audit: `<mailbox-uuid>/audit/<YYYY-MM-DD>` and `audit/admin/<YYYY-MM-DD>` in the index pool
 
 Sessions, signing keys, TOTP replay state and task queues are tables in MariaDB (the memory
@@ -544,10 +547,10 @@ folder, thread, location and retention writes. Only then does a root CAS publish
 modseq and changes atomically. Delayed helpers cannot overwrite newer mutations. Empty
 index objects are retained as tombstones where deletion could permit stale exclusive creates.
 
-**Root format 2 rollout.** Stop all old writers and workers before starting this version;
-old binaries do not understand pending journals. Back up the data and validate recovery in
+**Root format 3 rollout.** Stop all old writers and workers before starting this version;
+older binaries do not understand the retention ranges and location handles. Back up the data and validate recovery in
 the lab first. Roots upgrade lazily on mutation. Do not roll back to an old writer after
-format-2 writes. No automatic downgrade or mixed-version deployment is supported.
+format-3 writes. No automatic downgrade or mixed-version deployment is supported.
 
 Reads are not cross-object snapshots: a record read concurrent with a mutation may see newer
 record data before its root state is published. Synchronization clients must advance only
