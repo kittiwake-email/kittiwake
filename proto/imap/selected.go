@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"github.com/google/uuid"
 	"mime"
 	"sort"
 	"strings"
@@ -19,14 +20,14 @@ import (
 )
 
 // selected is the session's view of the selected folder: a snapshot of UIDs
-// (sequence number i+1 = uids[i]) plus per-UID records for change detection.
+// (sequence number i+1 = uids[i]) plus compact synchronization metadata.
 type selected struct {
 	s         *session
 	folderID  string
 	name      string
 	readOnly  bool
 	uids      []uint32
-	recs      map[uint32]index.Record
+	recs      map[uint32]selectedRecord
 	modseq    uint64   // mailbox modseq at the last sync
 	vanished  []uint32 // UIDs gone from the folder but not yet reported as EXPUNGE
 	searchRes imap.UIDSet
@@ -34,6 +35,26 @@ type selected struct {
 	// announced with EXISTS on the next sync.
 	pendingAdded []uint32
 }
+
+// Selected state intentionally excludes headers, threading input and MIME data.
+// Large subjects and address lists must not be multiplied by connected sessions.
+type selectedRecord struct {
+	UID          uint32
+	MessageID    uuid.UUID
+	ModSeq       uint64
+	Flags        []string
+	Size         int64
+	InternalDate time.Time
+	Date         time.Time
+}
+
+func compactRecord(r index.Record) selectedRecord {
+	return selectedRecord{UID: r.UID, MessageID: r.MessageID, ModSeq: r.ModSeq, Flags: r.Flags, Size: r.Size, InternalDate: r.InternalDate, Date: r.Date}
+}
+func (r selectedRecord) record() index.Record {
+	return index.Record{UID: r.UID, MessageID: r.MessageID, ModSeq: r.ModSeq, Flags: r.Flags, Size: r.Size, InternalDate: r.InternalDate, Date: r.Date}
+}
+func (r selectedRecord) HasFlag(flag string) bool { v := r.record(); return v.HasFlag(flag) }
 
 // noteAppended applies a record this session just appended. When nothing
 // else changed in the mailbox meanwhile (the record's modseq directly
@@ -45,7 +66,7 @@ func (sel *selected) noteAppended(rec index.Record) {
 	if _, known := sel.recs[rec.UID]; known {
 		return
 	}
-	sel.recs[rec.UID] = rec
+	sel.recs[rec.UID] = compactRecord(rec)
 	sel.uids = append(sel.uids, rec.UID)
 	sort.Slice(sel.uids, func(i, j int) bool { return sel.uids[i] < sel.uids[j] })
 	sel.pendingAdded = append(sel.pendingAdded, rec.UID)
@@ -53,7 +74,7 @@ func (sel *selected) noteAppended(rec index.Record) {
 }
 
 func newSelected(s *session, f *index.Folder, readOnly bool) (*selected, error) {
-	sel := &selected{s: s, folderID: f.ID, name: f.Name, readOnly: readOnly, recs: map[uint32]index.Record{}}
+	sel := &selected{s: s, folderID: f.ID, name: f.Name, readOnly: readOnly, recs: map[uint32]selectedRecord{}}
 	recs, err := sel.listAll()
 	if err != nil {
 		return nil, err
@@ -68,15 +89,17 @@ func newSelected(s *session, f *index.Folder, readOnly bool) (*selected, error) 
 
 func (sel *selected) close() {}
 
-func (sel *selected) listAll() ([]index.Record, error) {
-	var out []index.Record
+func (sel *selected) listAll() ([]selectedRecord, error) {
+	var out []selectedRecord
 	var after uint32
 	for {
 		recs, more, err := sel.s.srv.mb.ListDesc(sel.s.ctx, sel.s.mb, sel.folderID, after, 1000)
 		if err != nil {
 			return nil, sel.s.srv.mapErr(err, "list")
 		}
-		out = append(out, recs...)
+		for _, r := range recs {
+			out = append(out, compactRecord(r))
+		}
 		if len(recs) > 0 {
 			after = recs[len(recs)-1].UID
 		}
@@ -223,15 +246,18 @@ func (sel *selected) applyChanges() (flagChanged, added []uint32, current uint64
 	}
 	// Messages moved away appear as "updated" under another folder; detect
 	// those by re-reading records we have not already seen change.
+	moved := map[string]bool{}
 	for _, c := range changes {
 		if c.Kind == index.KindEmail && c.FolderID != sel.folderID && c.Op == index.OpUpdated {
-			for uid, r := range sel.recs {
-				if r.MessageID.String() == c.ID {
-					sel.vanished = append(sel.vanished, uid)
-					delete(sel.recs, uid)
-					delete(updUIDs, uid)
-					break
-				}
+			moved[c.ID] = true
+		}
+	}
+	if len(moved) > 0 {
+		for uid, r := range sel.recs {
+			if moved[r.MessageID.String()] {
+				sel.vanished = append(sel.vanished, uid)
+				delete(sel.recs, uid)
+				delete(updUIDs, uid)
 			}
 		}
 	}
@@ -252,7 +278,7 @@ func (sel *selected) applyChanges() (flagChanged, added []uint32, current uint64
 			done := false
 			for _, r := range recs {
 				if newUIDs[r.UID] {
-					sel.recs[r.UID] = r
+					sel.recs[r.UID] = compactRecord(r)
 					added = append(added, r.UID)
 				}
 				if r.UID <= low {
@@ -276,7 +302,7 @@ func (sel *selected) applyChanges() (flagChanged, added []uint32, current uint64
 			}
 			return nil, nil, 0, false, sel.s.srv.mapErr(err, "sync")
 		}
-		sel.recs[uid] = r
+		sel.recs[uid] = compactRecord(r)
 		flagChanged = append(flagChanged, uid)
 	}
 	sort.Slice(added, func(i, j int) bool { return added[i] < added[j] })
@@ -291,7 +317,7 @@ func (sel *selected) relist() (flagChanged, added []uint32, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	fresh := make(map[uint32]index.Record, len(recs))
+	fresh := make(map[uint32]selectedRecord, len(recs))
 	for _, r := range recs {
 		fresh[r.UID] = r
 	}
@@ -467,7 +493,7 @@ func (sel *selected) store(w *imapserver.FetchWriter, numSet imap.NumSet, flags 
 		if err != nil {
 			return sel.s.srv.mapErr(err, "store")
 		}
-		sel.recs[uid] = rec
+		sel.recs[uid] = compactRecord(rec)
 		if !flags.Silent {
 			rw := w.CreateMessage(sel.seqOf(uid))
 			rw.WriteUID(imap.UID(uid))
@@ -656,12 +682,12 @@ func (sel *selected) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 		}
 	}
 	for _, uid := range sel.resolve(numSet) {
-		f := &fetched{rec: sel.recs[uid]}
+		f := &fetched{rec: sel.recs[uid].record()}
 		if markSeen && !sel.readOnly && !f.rec.HasFlag(index.FlagSeen) {
 			rec, err := sel.s.srv.mb.SetFlagsByUID(sel.s.ctx, sel.s.mb, sel.folderID, uid, mailbox.FlagOp{Add: []string{index.FlagSeen}})
 			if err == nil {
 				f.rec = rec
-				sel.recs[uid] = rec
+				sel.recs[uid] = compactRecord(rec)
 			} else if !errors.Is(err, mailbox.ErrHold) {
 				return sel.s.srv.mapErr(err, "fetch")
 			}
@@ -760,17 +786,11 @@ func (sel *selected) search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	data := &imap.SearchData{}
 	var seqSet imap.SeqSet
 	var uidSet imap.UIDSet
-	cache := map[uint32]*fetched{}
-	for i, uid := range sel.uids {
-		rec, ok := sel.recs[uid]
-		if !ok {
-			continue
-		}
-		seq := uint32(i + 1)
+	visit := func(rec index.Record, seq uint32) {
+		uid := rec.UID
 		f := &fetched{rec: rec}
-		cache[uid] = f
 		if !sel.matches(f, seq, criteria) {
-			continue
+			return
 		}
 		uidSet.AddNum(imap.UID(uid))
 		num := uid
@@ -786,6 +806,32 @@ func (sel *selected) search(kind imapserver.NumKind, criteria *imap.SearchCriter
 		}
 		data.Count++
 	}
+	if searchNeedsHeaders(criteria) {
+		// Keep at most one index page and one reconstructed message alive. Header
+		// searches still use indexed Subject/From without per-message metadata reads.
+		var before uint32
+		for {
+			recs, more, err := sel.s.srv.mb.ListDesc(sel.s.ctx, sel.s.mb, sel.folderID, before, 1000)
+			if err != nil {
+				return nil, sel.s.srv.mapErr(err, "search")
+			}
+			for _, rec := range recs {
+				before = rec.UID
+				if _, ok := sel.recs[rec.UID]; ok {
+					visit(rec, sel.seqOf(rec.UID))
+				}
+			}
+			if !more || len(recs) == 0 {
+				break
+			}
+		}
+	} else {
+		for i, uid := range sel.uids {
+			if rec, ok := sel.recs[uid]; ok {
+				visit(rec.record(), uint32(i+1))
+			}
+		}
+	}
 	if kind == imapserver.NumKindSeq {
 		data.All = seqSet
 	} else {
@@ -795,6 +841,23 @@ func (sel *selected) search(kind imapserver.NumKind, criteria *imap.SearchCriter
 		sel.searchRes = uidSet
 	}
 	return data, nil
+}
+
+func searchNeedsHeaders(c *imap.SearchCriteria) bool {
+	if len(c.Header)+len(c.Text)+len(c.Body) > 0 {
+		return true
+	}
+	for i := range c.Not {
+		if searchNeedsHeaders(&c.Not[i]) {
+			return true
+		}
+	}
+	for i := range c.Or {
+		if searchNeedsHeaders(&c.Or[i][0]) || searchNeedsHeaders(&c.Or[i][1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (sel *selected) matches(f *fetched, seq uint32, c *imap.SearchCriteria) bool {
@@ -933,11 +996,15 @@ func (sel *selected) matchHeader(f *fetched, hf imap.SearchCriteriaHeaderField) 
 	val := strings.ToLower(hf.Value)
 	switch key {
 	case "subject":
-		return strings.Contains(strings.ToLower(f.rec.Subject), val)
+		if f.rec.Subject != "" {
+			return strings.Contains(strings.ToLower(f.rec.Subject), val)
+		}
 	case "from":
-		return strings.Contains(strings.ToLower(f.rec.From), val)
+		if f.rec.From != "" {
+			return strings.Contains(strings.ToLower(f.rec.From), val)
+		}
 	}
-	raw, err := sel.rawFor(f)
+	raw, err := sel.headerFor(f)
 	if err != nil {
 		return false
 	}
