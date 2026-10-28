@@ -238,6 +238,7 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 		resolver = fixed
 	} else {
 		reg := storage.NewRegistry(st.Identity, Connector(cfg.Ceph), log)
+		reg.PlacementReserve = cfg.Ceph.PlacementReserve
 		if err := reg.Reload(context.Background()); err != nil {
 			return nil, fmt.Errorf("storage registry: %w", err)
 		}

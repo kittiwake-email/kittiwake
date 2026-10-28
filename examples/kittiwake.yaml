@@ -43,6 +43,8 @@ node:
 # (kittiwake-admin storage add --name ams1 --mon-host ... --user kittiwake --keyring ...
 # --pools messages,attachments,index) and every daemon connects to all of them.
 ceph:
+  # Raw cluster headroom reserved from NEW mailbox placement (0..1).
+  placement_reserve: 0.15
   backend: librados            # librados | memory (volatile, development only)
   # config_file: /etc/ceph/ceph.conf   # librados defaults applied to every storage connection
   # options: {ms_bind_ipv6: "true"}

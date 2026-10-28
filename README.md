@@ -115,10 +115,15 @@ in other datacenters within a few milliseconds of each other.
   registry every 30 seconds (and at once when it meets a storage id it does not know), so a
   storage added or closed for placement is picked up without a restart. The management
   listener's `/storage` shows each storage's connection state.
-- **Placement** of a new mailbox is random among connected storage entries whose placement
-  flag is on; `kittiwake-admin mailbox create --storage <id>` pins one. `storage disable`
-  stops new placement there, existing mailboxes keep working; a storage can only be removed
-  when no mailbox refers to it (a foreign key enforces it).
+- **Placement** of a new mailbox is weighted by measured raw cluster headroom above
+  `ceph.placement_reserve` (15% by default), among enabled connected storage entries.
+  Capacity refreshes with registry reloads; failed or more than two-minute-old readings
+  exclude new automatic placement. `kittiwake-admin mailbox create --storage <id>`
+  explicitly pins one. Existing mailboxes keep their storage. This is a raw-capacity
+  signal, not an IOPS measurement or a guarantee about the fullest OSD, pool quota,
+  CRUSH rule or erasure-coding overhead. Capacity and placement eligibility are exposed
+  in storage status. Disable placement to drain a storage; deletion also requires no
+  mailboxes, removal pins or pending attachment collection.
 - **Where things live.** Every data store resolves a mailbox to its storage's pools
   through a cached identity read (the same cached record the state check already loads).
   Index, messages, attachments and the per-mailbox audit log sit on the mailbox's storage.

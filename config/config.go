@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -39,6 +40,7 @@ type Config struct {
 
 // Ceph is the storage connection and pool layout.
 type Ceph struct {
+	PlacementReserve float64 `yaml:"placement_reserve"`
 	// Backend is "librados" (default) or "memory" (in-process, volatile;
 	// for development and tests only).
 	Backend string `yaml:"backend"`
@@ -318,7 +320,8 @@ func (s Secret) Resolve() (string, error) {
 func Default() Config {
 	return Config{
 		Ceph: Ceph{
-			Backend: "librados",
+			PlacementReserve: 0.15,
+			Backend:          "librados",
 			Pools: Pools{
 				Messages:    "kittiwake.messages",
 				Attachments: "kittiwake.attachments",
@@ -418,6 +421,9 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("config: listen.%s.proxy_protocol must be off, optional or required", name)
 		}
+	}
+	if math.IsNaN(c.Ceph.PlacementReserve) || c.Ceph.PlacementReserve < 0 || c.Ceph.PlacementReserve >= 1 {
+		return errors.New("config: ceph.placement_reserve must be in [0,1)")
 	}
 	switch c.Ceph.Backend {
 	case "librados":

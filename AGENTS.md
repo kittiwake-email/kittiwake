@@ -127,7 +127,8 @@ These are settled. Do not design around them.
   registry row (`kittiwake-admin storage add`, table `storage`), not config; the fsid read on
   connect verifies the record. Each mailbox has a `storage_id`; every data store resolves
   pools through `storage.Resolver` (Fixed for the memory backend, Registry otherwise).
-  Placement is random among connected storage entries open for placement; an unreachable
+  Placement weights enabled storage by fresh raw cluster headroom above a configured
+  reserve; it does not measure per-OSD IOPS or move existing mailboxes. An unreachable
   storage defers (LMTP 451, IMAP `[UNAVAILABLE]`, JMAP `serverUnavailable`). Sweeps walk
   every storage; a removal task carries the storage id.
 - **Multi-object index mutations use a durable root journal.** Root format 3 prepares a

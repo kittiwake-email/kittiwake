@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -121,10 +120,12 @@ type Connector func(c identity.Storage) (rados.Client, error)
 // Registry keeps a connection per registered storage and resolves
 // mailboxes to them through the identity store (cached reads).
 type Registry struct {
-	ids     *identity.Store
-	connect Connector
-	log     *slog.Logger
-	Now     func() time.Time
+	// PlacementReserve excludes raw cluster bytes reserved for headroom.
+	PlacementReserve float64
+	ids              *identity.Store
+	connect          Connector
+	log              *slog.Logger
+	Now              func() time.Time
 	// ReloadMinInterval bounds on-demand reloads triggered by an unknown
 	// storage id (a mailbox placed on a storage added since the last reload).
 	ReloadMinInterval time.Duration
@@ -138,21 +139,28 @@ type Registry struct {
 }
 
 type conn struct {
-	rec    identity.Storage
-	client rados.Client
-	pools  [3]rados.IOContext
-	err    error     // why the storage is not connected
-	tried  time.Time // last connection attempt
+	capacity    rados.Capacity
+	capacityAt  time.Time
+	capacityErr error
+	rec         identity.Storage
+	client      rados.Client
+	pools       [3]rados.IOContext
+	err         error     // why the storage is not connected
+	tried       time.Time // last connection attempt
 }
 
 // Status describes one storage for health output.
 type Status struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	FSID      uuid.UUID `json:"fsid"`
-	Placement bool      `json:"placement"`
-	Connected bool      `json:"connected"`
-	Error     string    `json:"error,omitempty"`
+	CapacityTotalBytes     uint64    `json:"capacity_total_bytes,omitempty"`
+	CapacityAvailableBytes uint64    `json:"capacity_available_bytes,omitempty"`
+	PlacementEligible      bool      `json:"placement_eligible"`
+	CapacityError          string    `json:"capacity_error,omitempty"`
+	ID                     int64     `json:"id"`
+	Name                   string    `json:"name"`
+	FSID                   uuid.UUID `json:"fsid"`
+	Placement              bool      `json:"placement"`
+	Connected              bool      `json:"connected"`
+	Error                  string    `json:"error,omitempty"`
 }
 
 // NewRegistry returns a registry; call Reload before use.
@@ -160,7 +168,7 @@ func NewRegistry(ids *identity.Store, connect Connector, log *slog.Logger) *Regi
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Registry{ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, RetryInterval: time.Minute, conns: map[int64]*conn{}}
+	return &Registry{PlacementReserve: 0.15, ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, RetryInterval: time.Minute, conns: map[int64]*conn{}}
 }
 
 // Reload reads the registry, connects to new storage entries (verifying the fsid
@@ -237,6 +245,7 @@ func (r *Registry) Reload(ctx context.Context) error {
 		r.conns[rec.ID] = c
 	}
 	r.mu.Unlock()
+	r.refreshCapacity()
 	return nil
 }
 
@@ -419,8 +428,8 @@ func (r *Registry) Each(ctx context.Context, role Role, fn func(int64, rados.IOC
 // ErrNoPlacement: no connected storage accepts new mailboxes.
 var ErrNoPlacement = errors.New("storage: no storage accepts new mailboxes")
 
-// Pick chooses a storage for a new mailbox: random among connected
-// storage entries with placement enabled.
+// Pick chooses a connected storage weighted by measured headroom above the
+// placement reserve. Failed or stale capacity measurements exclude new placement.
 func (r *Registry) Pick(ctx context.Context) (int64, error) {
 	ids := r.placeable()
 	if len(ids) == 0 {
@@ -437,7 +446,7 @@ func (r *Registry) Pick(ctx context.Context) (int64, error) {
 	if len(ids) == 0 {
 		return 0, ErrNoPlacement
 	}
-	return ids[rand.IntN(len(ids))], nil
+	return r.pickWeighted(ids)
 }
 
 func (r *Registry) placeable() []int64 {
@@ -445,7 +454,7 @@ func (r *Registry) placeable() []int64 {
 	defer r.mu.RUnlock()
 	var ids []int64
 	for id, c := range r.conns {
-		if c.client != nil && c.rec.Placement {
+		if r.placementWeight(c) > 0 {
 			ids = append(ids, id)
 		}
 	}
@@ -458,7 +467,10 @@ func (r *Registry) Statuses() []Status {
 	defer r.mu.RUnlock()
 	var out []Status
 	for id, c := range r.conns {
-		st := Status{ID: id, Name: c.rec.Name, FSID: c.rec.FSID, Placement: c.rec.Placement, Connected: c.client != nil}
+		st := Status{ID: id, Name: c.rec.Name, FSID: c.rec.FSID, Placement: c.rec.Placement, Connected: c.client != nil, CapacityTotalBytes: c.capacity.TotalBytes, CapacityAvailableBytes: c.capacity.AvailableBytes, PlacementEligible: r.placementWeight(c) > 0}
+		if c.capacityErr != nil {
+			st.CapacityError = c.capacityErr.Error()
+		}
 		if c.err != nil {
 			st.Error = c.err.Error()
 		}

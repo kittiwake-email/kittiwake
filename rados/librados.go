@@ -77,6 +77,14 @@ type libradosClient struct {
 	conn *ceph.Conn
 }
 
+func (c *libradosClient) Capacity() (Capacity, error) {
+	stat, err := c.conn.GetClusterStats()
+	if err != nil {
+		return Capacity{}, err
+	}
+	return Capacity{TotalBytes: stat.Kb * 1024, AvailableBytes: stat.Kb_avail * 1024}, nil
+}
+
 func (c *libradosClient) FSID() (string, error) { return c.conn.GetFSID() }
 
 func (c *libradosClient) Pool(name string) (IOContext, error) {

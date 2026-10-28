@@ -44,6 +44,14 @@ type Client interface {
 	Close() error
 }
 
+// CapacityProvider is implemented by real cluster connections. Raw cluster
+// capacity is an admission signal, not a promise about any pool or individual OSD.
+type CapacityProvider interface{ Capacity() (Capacity, error) }
+type Capacity struct {
+	TotalBytes     uint64
+	AvailableBytes uint64
+}
+
 // Stat describes an object.
 type Stat struct {
 	Size    uint64

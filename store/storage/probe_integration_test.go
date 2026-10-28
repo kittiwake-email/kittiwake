@@ -20,6 +20,10 @@ func TestCephPoolCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	capacity, err := client.(rados.CapacityProvider).Capacity()
+	if err != nil || capacity.TotalBytes == 0 || capacity.AvailableBytes > capacity.TotalBytes {
+		t.Fatalf("cluster capacity: %+v %v", capacity, err)
+	}
 	for i, name := range []string{"kittiwake.index", "kittiwake.messages", "kittiwake.attachments"} {
 		io, err := client.Pool(name)
 		if err != nil {
