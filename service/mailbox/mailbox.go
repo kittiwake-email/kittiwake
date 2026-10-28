@@ -673,15 +673,34 @@ func (s *Service) Query(ctx context.Context, mb uuid.UUID, q Query) (QueryResult
 	// needs from the newest-first index instead of the whole folder.
 	if q.Filter.InFolder != "" && !q.Asc && (q.Sort == "" || q.Sort == SortReceivedAt) && !q.CollapseThreads && q.Position >= 0 && q.Limit > 0 && q.Filter == (Filter{InFolder: q.Filter.InFolder}) {
 		f := folders[0]
-		recs, _, err := s.idx.ListFolderDesc(ctx, mb, f.ID, 0, q.Position+q.Limit)
-		if err != nil {
-			return QueryResult{}, mapIndexErr(err)
-		}
 		res := QueryResult{Total: int(f.Total), ModSeq: root.ModSeq}
-		if q.Position < len(recs) {
-			for _, r := range recs[q.Position:] {
+		skip, left := q.Position, q.Limit
+		var before uint32
+		for left > 0 {
+			// Offset paging may still read skipped records, but never retains them.
+			want := 1000
+			if skip < 1000 && left < 1000-skip {
+				want = skip + left
+			}
+			recs, more, err := s.idx.ListFolderDesc(ctx, mb, f.ID, before, want)
+			if err != nil {
+				return QueryResult{}, mapIndexErr(err)
+			}
+			for _, r := range recs {
+				before = r.UID
+				if skip > 0 {
+					skip--
+					continue
+				}
+				if left == 0 {
+					break
+				}
 				res.Records = append(res.Records, r)
 				res.Folders = append(res.Folders, f.ID)
+				left--
+			}
+			if !more || len(recs) == 0 {
+				break
 			}
 		}
 		s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: "search", Target: f.ID})

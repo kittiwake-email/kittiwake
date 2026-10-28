@@ -370,3 +370,32 @@ func TestExistingActorLosesRevokedAccountAccess(t *testing.T) {
 		t.Fatalf("disabled account still authorized: %v", err)
 	}
 }
+
+func TestQueryOffsetAcrossPages(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.user
+	root, err := f.svc.Root(ctx, f.mb.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid := root.FolderByRole(index.RoleInbox).ID
+	for i := 0; i < 1010; i++ {
+		_, err := f.idx.Append(ctx, f.mb.ID, fid, index.Record{MessageID: uuid.New(), Size: 1, InternalDate: f.now}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := f.svc.Query(ctx, f.mb.ID, Query{Filter: Filter{InFolder: fid}, Position: 1003, Limit: 3})
+	if err != nil || result.Total != 1010 || len(result.Records) != 3 {
+		t.Fatalf("page: %v %v", result, err)
+	}
+	for i, r := range result.Records {
+		if r.UID != uint32(7-i) {
+			t.Fatalf("UID %d: %d", i, r.UID)
+		}
+	}
+	result, err = f.svc.Query(ctx, f.mb.ID, Query{Filter: Filter{InFolder: fid}, Position: 2000, Limit: 3})
+	if err != nil || len(result.Records) != 0 {
+		t.Fatalf("past end: %v %v", result, err)
+	}
+}
