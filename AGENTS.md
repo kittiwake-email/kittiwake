@@ -77,6 +77,7 @@ cmd/kittiwake-admin  operator CLI over client/admin (typed Go client for the adm
 client/admin  pure HTTP client for the admin API; importable by third parties
 examples/     kittiwake.yaml (full, documented), dev.yaml (memory backend)
 contrib/postfix  main.cf snippet
+website/      the single-page https://kittiwake.email site (static index.html, no build step)
 api/openapi.yaml REST spec, embedded (api.OpenAPI) and served at /openapi.yaml on the admin
               listener; route↔spec consistency is tested — add new routes to both
 ```

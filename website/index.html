@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kittiwake</title>
+<meta name="description" content="Kittiwake is a massively scalable mail platform built to replace Dovecot: mail in Ceph RADOS, metadata in MariaDB, Postfix in front.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbf9;
+    --ink: #1c1c1a;
+    --muted: #5c5c57;
+    --accent: #1f5c8b;
+    --rule: #e2e2dc;
+    --note-bg: #fff6df;
+    --note-rule: #e6c98a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171a;
+      --ink: #e8e8e3;
+      --muted: #a2a29b;
+      --accent: #7fb6e6;
+      --rule: #2b2f34;
+      --note-bg: #2a2518;
+      --note-rule: #6a5a2e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 680px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 2.4rem; line-height: 1.1; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 32px; font-size: 1.1rem; }
+  h2 { font-size: 1.2rem; margin: 36px 0 8px; }
+  p { margin: 0 0 14px; }
+  ul { padding-left: 1.2em; margin: 0 0 14px; }
+  li { margin-bottom: 6px; }
+  a { color: var(--accent); }
+  .note {
+    background: var(--note-bg);
+    border: 1px solid var(--note-rule);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin: 28px 0;
+  }
+  .note p:last-child { margin-bottom: 0; }
+  .cta {
+    display: inline-block;
+    margin: 8px 0 0;
+    padding: 10px 18px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kittiwake</h1>
+  <p class="tagline">A massively scalable mail platform built to replace Dovecot.</p>
+
+  <p>Kittiwake stores mail in <strong>Ceph RADOS</strong> and metadata in <strong>MariaDB</strong>,
+  and sits behind <strong>Postfix</strong>, which keeps doing what it does best: receiving and
+  filtering mail from the internet. Kittiwake takes delivery over LMTP and serves mailboxes over
+  IMAP, POP3, JMAP and submission.</p>
+
+  <p>The kittiwake is a small sea-going gull that nests on cliffs in colonies of hundreds of
+  thousands: a bird, like the dove it succeeds, that lives at sea and at scale.</p>
+
+  <h2>Built for scale</h2>
+  <ul>
+    <li>Designed for a million mailboxes, each holding up to 150k messages spanning decades.</li>
+    <li>One RADOS object per message with deduplicated attachments; no per-mailbox file system.</li>
+    <li>Every component runs as its own process and scales independently; all state lives in
+        RADOS and MariaDB, so any node can serve any mailbox.</li>
+    <li>Mail data can be spread across many Ceph clusters.</li>
+    <li>Client-side encrypted backups to any S3-compatible store, with restore and export.</li>
+  </ul>
+
+  <div class="note">
+    <p><strong>Proof of concept.</strong> Kittiwake works, but it has not been tested at large
+    scale yet. You are welcome and encouraged to try it on real workloads and at real sizes.
+    If you do, please <a href="https://github.com/kittiwake-email/kittiwake/issues">open an
+    issue</a> or write to <a href="mailto:wido@widodh.nl">Wido den Hollander</a> with what you
+    found.</p>
+  </div>
+
+  <p>Kittiwake is free software under the GNU Affero General Public License v3.0. The source,
+  design document and admin API live on GitHub.</p>
+  <a class="cta" href="https://github.com/kittiwake-email/kittiwake">Kittiwake on GitHub</a>
+
+  <footer>Copyright 2026 Wido den Hollander</footer>
+</main>
+</body>
+</html>

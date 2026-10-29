@@ -9,6 +9,12 @@ It is **not** an MTA and does not replace Postfix: Postfix receives and filters 
 internet and hands it to Kittiwake over LMTP. Outbound mail is handed back to a configurable
 SMTP relay host.
 
+**Status: proof of concept.** Kittiwake works and runs on a small lab, but it has not been
+tested at large scale. People are welcome and encouraged to try it at real sizes and on real
+workloads. If you do, please reach out to Wido den Hollander, by
+[opening an issue](https://github.com/kittiwake-email/kittiwake/issues) or by mail to
+wido@widodh.nl, with what you found.
+
 License: GNU Affero General Public License v3.0 (see `LICENSE`).
 Copyright 2026 Wido den Hollander. Anyone may use, study, change and redistribute Kittiwake
 under the AGPL; anyone who runs a modified version for others over a network must offer them
