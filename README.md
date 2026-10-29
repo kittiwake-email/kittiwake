@@ -9,7 +9,10 @@ It is **not** an MTA and does not replace Postfix: Postfix receives and filters 
 internet and hands it to Kittiwake over LMTP. Outbound mail is handed back to a configurable
 SMTP relay host.
 
-License: none for now, internal use only.
+License: GNU Affero General Public License v3.0 (see `LICENSE`).
+Copyright 2026 Wido den Hollander. Anyone may use, study, change and redistribute Kittiwake
+under the AGPL; anyone who runs a modified version for others over a network must offer them
+its source. Other terms, including a commercial license, are available from the copyright holder.
 
 # Features
 
