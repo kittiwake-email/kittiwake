@@ -19,6 +19,7 @@ License: GNU Affero General Public License v3.0 (see `LICENSE`).
 Copyright 2026 Wido den Hollander. Anyone may use, study, change and redistribute Kittiwake
 under the AGPL; anyone who runs a modified version for others over a network must offer them
 its source. Other terms, including a commercial license, are available from the copyright holder.
+See `ACKNOWLEDGEMENTS.md` for the people, tools and AI models behind Kittiwake.
 
 # Features
 
