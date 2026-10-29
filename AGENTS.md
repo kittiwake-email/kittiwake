@@ -7,8 +7,8 @@ Guidance for coding agents (Claude Code, Codex and others) working in this repos
 `README.md` is the authoritative design document, agreed with the owner; read it before
 designing anything. See its "Status" section for what is implemented (nearly everything in
 the mail design: LMTP, JMAP incl. submission, SMTP submission, IMAP, POP3, REST/admin, sessions/TOTP, workers,
-legal hold, Maildir export/import) and what is not (CONDSTORE, WebSocket, search backend,
-reconciliation worker, DAV, Ceph integration tests).
+legal hold, backups with restore/export/verify) and what is not (CONDSTORE, WebSocket,
+search backend, reconciliation worker, DAV, Ceph integration tests).
 
 ## Releases
 
@@ -35,7 +35,7 @@ go test ./store/index -run TestFolders          # one test
 go test ./mail -run TestRoundTrip -v
 make run-dev          # whole platform in one process on the memory backend with a seeded account
 make integration      # RADOS conformance suite on a real cluster (lab box, see ../kittiwake-labs)
-make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/export (lab box)
+make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/backup+export (lab box)
 make deploy           # build here, push binary to the lab box, restart its systemd instances
                       # (kittiwake@<mode>, one process per mode; see contrib/systemd and ../kittiwake-labs)
 bin/kittiwake check-config -c examples/kittiwake.yaml
@@ -60,12 +60,15 @@ cluster).
 
 ```
 rados/        RADOS interface (Get/Write tx/omap/xattr/lock/watch), librados.go + memory.go
-worker/       background tasks + scheduler (purge, GC, removal, audit purge, orphan sweep, export)
+worker/       background tasks + scheduler (purge, GC, removal, audit purge, orphan sweep)
+backup/       mailbox backups: service (run, restore, export, verify, expire), catalog interface +
+              memory impl, runner (the `backup` mode), crypto/ (key ring, sealing, keyed names),
+              target/ (S3 with own SigV4 client, filesystem, memory), maildir/ (Maildir++ tar writer)
 config/       YAML config with defaults + validation (config.Default())
 mail/         MIME parser → Document JSON, attachment extraction, raw skeleton + Reconstruct
 auth/         crypto primitives: password schemes, TOTP, Ed25519 JWT, refresh tokens
 store/        identity, index, message, attach, audit, session, queue (object layouts live here)
-service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, admin, export
+service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, admin
               (business logic + authorisation + audit; protocol adapters call ONLY these)
 proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3, submission
 app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
@@ -237,11 +240,16 @@ These are settled. Do not design around them.
   deletion, keeps accepting delivery by default, refuses sending by default, optionally
   `sealed` (no user access). Enforced in the `Mailbox` service. Release is audited and
   purges resume with a grace period.
-- **Maildir export/import:** byte-exact messages in Dovecot Maildir++ layout (flags in
-  filename, `dovecot-keywords`, `dovecot-uidlist`, mtime = internal date) plus
-  `manifest.json` with SHA-256 per file and the audit log, as a tar. CLI writes to a path;
-  admin API runs it as a worker task into the export directory. Import is the Dovecot
-  migration path.
+- **Backups** (README "Backups"): the `backup` mode is the only process with the target
+  credentials and keys; every other mode files tasks (`backup`, `backup-job`) and reads the
+  catalog (`backup.Catalog`: MariaDB in production, `backup.Memory` otherwise). A run is
+  logical (documents, raw, attachments verbatim; index as folder entries), sealed per entry
+  (`backup/crypto`), packed per run with large attachments as keyed blobs, incremental via
+  the root modseq and per-folder modseq. Restore is side by side into a new mailbox through
+  `index.Append`; never in place. Export is rendered from the backup, never from RADOS, and
+  the old Maildir import/export is gone. Per-mailbox schedule columns live on the mailbox
+  row; keep the scheduler a bounded due-mailbox query, never a registry walk. MariaDB backups
+  are the administrator's job, not the product's.
 - **Auditing:** every mailbox action and every identity change (who, real client IP,
   protocol, action, target, result) goes to the structured log and to per-mailbox per-day
   audit objects (`<mailbox>/audit/<date>`, plus `audit/admin/<date>`), queryable via the

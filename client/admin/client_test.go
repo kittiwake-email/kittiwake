@@ -11,14 +11,15 @@ import (
 	"time"
 
 	cryptoauth "kittiwake/auth"
+	"kittiwake/backup"
+	backupcrypto "kittiwake/backup/crypto"
+	"kittiwake/backup/target"
 	"kittiwake/proto/rest"
 	"kittiwake/rados"
-	"kittiwake/service/actor"
 	adminsvc "kittiwake/service/admin"
 	"kittiwake/service/auditor"
 	"kittiwake/service/auth"
 	"kittiwake/service/delivery"
-	"kittiwake/service/export"
 	"kittiwake/store/attach"
 	"kittiwake/store/audit"
 	"kittiwake/store/identity"
@@ -26,7 +27,6 @@ import (
 	"kittiwake/store/message"
 	"kittiwake/store/queue"
 	"kittiwake/store/session"
-	"kittiwake/worker"
 )
 
 type fixture struct {
@@ -36,7 +36,7 @@ type fixture struct {
 	ids     *identity.Store
 	idx     *index.Store
 	del     *delivery.Service
-	w       *worker.Worker
+	runner  *backup.Runner
 	mb      identity.Mailbox
 	user    identity.Account
 	userTk  string
@@ -71,13 +71,13 @@ func newFixture(t *testing.T) *fixture {
 	msgs, atts := message.New(msgp), attach.New(attp)
 	f.del = delivery.New(f.ids, f.idx, msgs, atts, q, aud, log, delivery.Config{})
 	f.del.Now = func() time.Time { return f.now }
-	exp := export.New(f.ids, f.idx, msgs, atts, auditStore, f.del, aud, log)
-	dir := t.TempDir()
-	srv := rest.New(rest.Config{Realm: "test", DefaultQuota: identity.QuotaLimits{HardBytes: 1 << 30}, Identity: f.ids, Export: exp, ExportDir: dir}, authSvc, adm, auditStore, q, log)
+	ring, _ := backupcrypto.NewRing([]backupcrypto.Key{{ID: 1, Key: bytes.Repeat([]byte{3}, 32)}}, 1)
+	bsvc := backup.New(backup.Config{SpoolDir: t.TempDir(), MinInterval: time.Minute}, backup.Stores{Identity: f.ids, Index: f.idx, Messages: msgs, Attachments: atts, Audit: auditStore}, backup.NewMemory(), target.NewMemory(), ring, adm, aud, log)
+	bsvc.Now = now
+	srv := rest.New(rest.Config{Realm: "test", DefaultQuota: identity.QuotaLimits{HardBytes: 1 << 30}, Identity: f.ids, Backup: bsvc}, authSvc, adm, auditStore, q, log)
 	f.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(f.ts.Close)
-	f.w = worker.New(worker.Config{ExportDir: dir, PollInterval: time.Millisecond}, worker.Stores{Identity: f.ids, Index: f.idx, Messages: msgs, Attachments: atts, Audit: auditStore, Queue: q}, aud, log)
-	f.w.Export = exp
+	f.runner = backup.NewRunner(backup.RunnerConfig{}, bsvc, q, log)
 
 	ctx := context.Background()
 	_, _ = f.ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
@@ -390,46 +390,86 @@ func TestHoldAuditQueuesKeysIdentity(t *testing.T) {
 	}
 }
 
-func TestExportDownloadImport(t *testing.T) {
+func TestBackupFlow(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	raw := "From: a@b\r\nTo: wido@example.org\r\nSubject: s\r\n\r\nx\r\n"
 	if _, err := f.del.Deliver(ctx, delivery.Request{Recipient: "wido@example.org", Raw: []byte(raw)}); err != nil {
 		t.Fatal(err)
 	}
-	sched, err := f.c.ScheduleExport(ctx, f.mb.ID.String(), false)
+	// Settings: validated against the floor, visible on the mailbox.
+	bad := "10s"
+	if _, err := f.c.UpdateMailbox(ctx, f.mb.ID.String(), MailboxRequest{Backup: &BackupSettingsRequest{Interval: &bad}}); !IsBadRequest(err) {
+		t.Fatalf("interval floor: %v", err)
+	}
+	good := "2h"
+	m, err := f.c.UpdateMailbox(ctx, f.mb.ID.String(), MailboxRequest{Backup: &BackupSettingsRequest{Interval: &good}})
 	must(t, err)
-	if sched.TaskID == "" || sched.Gzip {
+	if m.Backup.Interval != "2h0m0s" {
+		t.Fatalf("settings: %+v", m.Backup)
+	}
+	st, err := f.c.BackupStatus(ctx)
+	must(t, err)
+	if st.Policy["min_interval"] == "" {
+		t.Fatalf("status: %+v", st)
+	}
+	// Run now, drained by the backup runner.
+	sched, err := f.c.RunBackup(ctx, f.mb.ID.String(), false)
+	must(t, err)
+	if sched.TaskID == "" {
 		t.Fatalf("schedule: %+v", sched)
 	}
-	f.w.RunOnce(actor.With(ctx, actor.System("cli")))
-	items, err := f.c.ListExports(ctx, f.mb.ID.String())
+	f.runner.Drain(ctx)
+	mbs, err := f.c.MailboxBackups(ctx, f.mb.ID.String())
 	must(t, err)
-	if len(items) != 1 || items[0].Result == nil || items[0].Result.Messages != 1 || !strings.HasSuffix(items[0].Name, ".tar") {
-		t.Fatalf("exports: %+v", items)
+	if len(mbs.Runs) != 1 || mbs.Runs[0].Messages != 1 || mbs.State.LastRun != mbs.Runs[0].ID || mbs.Policy.Interval != "2h0m0s" {
+		t.Fatalf("backups: %+v", mbs)
 	}
-	rc, err := f.c.DownloadExport(ctx, items[0].Name)
-	must(t, err)
-	archive, err := io.ReadAll(rc)
-	rc.Close()
-	must(t, err)
-	if int64(len(archive)) != items[0].Bytes {
-		t.Fatalf("download size %d want %d", len(archive), items[0].Bytes)
+	run := mbs.Runs[0].ID
+	if r, err := f.c.GetBackupRun(ctx, f.mb.ID.String(), run); err != nil || r.ID != run {
+		t.Fatalf("get run: %+v %v", r, err)
 	}
-	if _, err := f.c.DownloadExport(ctx, "../etc/passwd"); !IsNotFound(err) {
-		t.Fatalf("traversal: %v", err)
+	if _, err := f.c.GetBackupRun(ctx, f.mb.ID.String(), "nope"); !IsNotFound(err) {
+		t.Fatalf("unknown run: %v", err)
 	}
-	mb2, err := f.c.CreateMailbox(ctx, MailboxRequest{})
+	// Export job: archive on the target.
+	job, err := f.c.ExportBackup(ctx, f.mb.ID.String(), run)
 	must(t, err)
-	sum, err := f.c.ImportMailbox(ctx, mb2.ID, bytes.NewReader(archive), false)
-	must(t, err)
-	if sum.Messages != 1 || sum.Folders == 0 {
-		t.Fatalf("import: %+v", sum)
+	if job.State != "pending" || job.Kind != "export" || job.Requested == "" {
+		t.Fatalf("export job: %+v", job)
 	}
-	info, err := f.c.InspectMailbox(ctx, mb2.ID)
+	f.runner.Drain(ctx)
+	job, err = f.c.GetBackupJob(ctx, job.ID)
+	must(t, err)
+	if job.State != "done" || job.ObjectKey == "" || job.Messages != 1 || job.Bytes == 0 {
+		t.Fatalf("export done: %+v", job)
+	}
+	// Restore job: a new mailbox with the message.
+	job, err = f.c.RestoreBackup(ctx, f.mb.ID.String(), run)
+	must(t, err)
+	f.runner.Drain(ctx)
+	job, err = f.c.GetBackupJob(ctx, job.ID)
+	must(t, err)
+	if job.State != "done" || job.Target == "" || job.Target == f.mb.ID.String() {
+		t.Fatalf("restore done: %+v", job)
+	}
+	info, err := f.c.InspectMailbox(ctx, job.Target)
 	must(t, err)
 	if info.Usage.Messages != 1 || !info.Indexed {
-		t.Fatalf("after import: %+v", info)
+		t.Fatalf("restored mailbox: %+v", info)
+	}
+	// Verify and the job list.
+	vj, err := f.c.VerifyBackups(ctx, f.mb.ID.String())
+	must(t, err)
+	f.runner.Drain(ctx)
+	vj, _ = f.c.GetBackupJob(ctx, vj.ID)
+	if vj.State != "done" || vj.Error != "" || !strings.Contains(string(vj.Detail), `"ok":true`) {
+		t.Fatalf("verify: %+v %s", vj, vj.Detail)
+	}
+	jobs, err := f.c.ListBackupJobs(ctx, f.mb.ID.String(), "")
+	must(t, err)
+	if len(jobs) != 3 {
+		t.Fatalf("jobs: %d", len(jobs))
 	}
 	if _, err := f.c.OpenAPI(ctx); !IsNotFound(err) && err != nil {
 		t.Fatalf("openapi (not served by the test mux): %v", err)

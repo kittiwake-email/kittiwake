@@ -67,16 +67,17 @@ type Hold struct {
 
 // Mailbox is the identity record of a mailbox.
 type Mailbox struct {
-	ID          string      `json:"id"`
-	StorageID   int64       `json:"storage_id"`
-	State       string      `json:"state"` // active | suspended | disabled
-	StateReason string      `json:"state_reason,omitempty"`
-	StateSince  time.Time   `json:"state_since"`
-	Quota       QuotaLimits `json:"quota"`
-	Hold        *Hold       `json:"hold,omitempty"`
-	Released    *time.Time  `json:"released,omitempty"`
-	Created     time.Time   `json:"created"`
-	Updated     time.Time   `json:"updated"`
+	ID          string         `json:"id"`
+	StorageID   int64          `json:"storage_id"`
+	State       string         `json:"state"` // active | suspended | disabled
+	StateReason string         `json:"state_reason,omitempty"`
+	StateSince  time.Time      `json:"state_since"`
+	Quota       QuotaLimits    `json:"quota"`
+	Hold        *Hold          `json:"hold,omitempty"`
+	Released    *time.Time     `json:"released,omitempty"`
+	Backup      BackupSettings `json:"backup"`
+	Created     time.Time      `json:"created"`
+	Updated     time.Time      `json:"updated"`
 }
 
 // MailboxRequest creates or patches a mailbox.
@@ -89,6 +90,8 @@ type MailboxRequest struct {
 	// StorageID pins the Ceph storage on create (default: random among
 	// storage entries open for placement).
 	StorageID int64 `json:"storage_id,omitempty"`
+	// Backup settings (interval, retention, disabled).
+	Backup *BackupSettingsRequest `json:"backup,omitempty"`
 }
 
 // Pools are the data pools of a storage.
@@ -361,42 +364,119 @@ type Task struct {
 	Created   time.Time       `json:"created"`
 }
 
-// ExportScheduled is the response of scheduling a mailbox export.
-type ExportScheduled struct {
+// BackupSettings are a mailbox's explicit backup preferences; empty
+// fields inherit (domain settings, then the configured defaults).
+type BackupSettings struct {
+	Interval  string `json:"interval,omitempty"`  // duration, e.g. "24h"
+	Retention string `json:"retention,omitempty"` // duration, e.g. "2160h"
+	Disabled  bool   `json:"disabled,omitempty"`
+}
+
+// BackupSettingsRequest patches backup settings; nil fields are left
+// alone, empty strings clear a field.
+type BackupSettingsRequest struct {
+	Interval  *string `json:"interval,omitempty"`
+	Retention *string `json:"retention,omitempty"`
+	Disabled  *bool   `json:"disabled,omitempty"`
+}
+
+// BackupState is the schedule state of a mailbox.
+type BackupState struct {
+	Mailbox     string    `json:"mailbox"`
+	Every       int64     `json:"every"` // nanoseconds; 0 = disabled
+	Scheduled   bool      `json:"scheduled"`
+	Due         time.Time `json:"due,omitempty"`
+	MaintainDue time.Time `json:"maintain_due,omitempty"`
+	LastRun     string    `json:"last_run,omitempty"`
+	LastModSeq  uint64    `json:"last_modseq"`
+	LastAt      time.Time `json:"last_at,omitempty"`
+	Status      string    `json:"status,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	ForceFull   bool      `json:"force_full,omitempty"`
+	Verified    time.Time `json:"verified,omitempty"`
+	VerifyError string    `json:"verify_error,omitempty"`
+}
+
+// BackupRun is one completed backup run.
+type BackupRun struct {
+	ID          string    `json:"id"`
+	Mailbox     string    `json:"mailbox"`
+	Started     time.Time `json:"started"`
+	Finished    time.Time `json:"finished"`
+	ModSeq      uint64    `json:"modseq"`
+	Fuzzy       bool      `json:"fuzzy,omitempty"`
+	Full        bool      `json:"full,omitempty"`
+	ManifestKey string    `json:"manifest_key"`
+	Packs       []string  `json:"packs,omitempty"`
+	Bytes       int64     `json:"bytes"`
+	Messages    int       `json:"messages"`
+	NewMessages int       `json:"new_messages"`
+	Expires     time.Time `json:"expires,omitempty"`
+}
+
+// BackupPolicy is the effective policy of a mailbox.
+type BackupPolicy struct {
+	Interval  string `json:"interval"`
+	Retention string `json:"retention"`
+	Enabled   bool   `json:"enabled"`
+}
+
+// MailboxBackups is GET /v1/admin/mailboxes/{id}/backups.
+type MailboxBackups struct {
+	State    BackupState    `json:"state"`
+	Settings BackupSettings `json:"settings"`
+	Policy   BackupPolicy   `json:"policy"`
+	Runs     []BackupRun    `json:"runs"`
+}
+
+// BackupJob is a restore, export, verify or forget job.
+type BackupJob struct {
+	ID        string          `json:"id"`
+	Kind      string          `json:"kind"`
+	Mailbox   string          `json:"mailbox"`
+	RunID     string          `json:"run_id,omitempty"`
+	Target    string          `json:"target,omitempty"`
+	MessageID string          `json:"message_id,omitempty"`
+	ObjectKey string          `json:"object_key,omitempty"`
+	URL       string          `json:"url,omitempty"`
+	Bytes     int64           `json:"bytes,omitempty"`
+	Messages  int             `json:"messages,omitempty"`
+	Detail    json.RawMessage `json:"detail,omitempty"`
+	State     string          `json:"state"`
+	Error     string          `json:"error,omitempty"`
+	Requested string          `json:"requested_by,omitempty"`
+	Created   time.Time       `json:"created"`
+	Finished  time.Time       `json:"finished,omitempty"`
+	Expires   time.Time       `json:"expires,omitempty"`
+}
+
+// BackupSummary is the platform-wide picture.
+type BackupSummary struct {
+	Mailboxes    int       `json:"mailboxes"`
+	Scheduled    int       `json:"scheduled"`
+	Disabled     int       `json:"disabled"`
+	Overdue      int       `json:"overdue"`
+	Failed       int       `json:"failed"`
+	VerifyFailed int       `json:"verify_failed"`
+	OldestDue    time.Time `json:"oldest_due,omitempty"`
+	Rate         float64   `json:"rate_per_hour"`
+	Runs         int64     `json:"runs"`
+	Bytes        int64     `json:"bytes"`
+	Blobs        int64     `json:"blobs"`
+	Jobs         int       `json:"jobs_pending"`
+}
+
+// BackupStatus is GET /v1/admin/backups.
+type BackupStatus struct {
+	Summary BackupSummary     `json:"summary"`
+	Policy  map[string]string `json:"policy"`
+}
+
+// BackupScheduled is the response of a run-now request.
+type BackupScheduled struct {
 	TaskID  string `json:"task_id"`
 	Mailbox string `json:"mailbox"`
-	Gzip    bool   `json:"gzip"`
-	Hint    string `json:"hint,omitempty"`
-}
-
-// ExportResult is the worker's summary stored next to an archive.
-type ExportResult struct {
-	Mailbox   string    `json:"mailbox"`
-	File      string    `json:"file"`
-	Bytes     int64     `json:"bytes"`
-	Messages  int       `json:"messages"`
-	Audit     int       `json:"audit"`
-	Errors    []string  `json:"errors,omitempty"`
-	Started   time.Time `json:"started"`
-	Finished  time.Time `json:"finished"`
-	Requested string    `json:"requested_by"`
-}
-
-// ExportItem is one finished export archive.
-type ExportItem struct {
-	Name     string        `json:"name"`
-	Bytes    int64         `json:"bytes"`
-	Modified time.Time     `json:"modified"`
-	URL      string        `json:"url"`
-	Result   *ExportResult `json:"result,omitempty"`
-}
-
-// ImportSummary is the result of importing a Maildir archive.
-type ImportSummary struct {
-	Messages int      `json:"messages"`
-	Folders  int      `json:"folders"`
-	Bytes    int64    `json:"bytes"`
-	Errors   []string `json:"errors"`
+	Full    bool   `json:"full"`
 }
 
 // RecalculateResult is the response of a quota recalculation.

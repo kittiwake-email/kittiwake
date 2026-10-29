@@ -4,6 +4,7 @@
 package identity
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -119,20 +120,77 @@ const (
 // ValidStates is the set of mailbox states.
 var ValidStates = map[string]bool{StateActive: true, StateSuspended: true, StateDisabled: true}
 
+// BackupSettings are a mailbox's explicit backup preferences. Zero values
+// inherit: the domain's `backup.interval` / `backup.retention` settings
+// for mailboxes with accounts, else the configured defaults. Disabled
+// switches backups off for the mailbox explicitly.
+type BackupSettings struct {
+	Interval  time.Duration `json:"interval,omitempty"`
+	Retention time.Duration `json:"retention,omitempty"`
+	Disabled  bool          `json:"disabled,omitempty"`
+}
+
+type backupSettingsJSON struct {
+	Interval  string `json:"interval,omitempty"`
+	Retention string `json:"retention,omitempty"`
+	Disabled  bool   `json:"disabled,omitempty"`
+}
+
+// MarshalJSON writes durations as strings ("24h0m0s"), readable in the API
+// and in the RADOS identity records alike.
+func (b BackupSettings) MarshalJSON() ([]byte, error) {
+	out := backupSettingsJSON{Disabled: b.Disabled}
+	if b.Interval > 0 {
+		out.Interval = b.Interval.String()
+	}
+	if b.Retention > 0 {
+		out.Retention = b.Retention.String()
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON accepts duration strings.
+func (b *BackupSettings) UnmarshalJSON(data []byte) error {
+	var in backupSettingsJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*b = BackupSettings{Disabled: in.Disabled}
+	var err error
+	if in.Interval != "" {
+		if b.Interval, err = time.ParseDuration(in.Interval); err != nil {
+			return err
+		}
+	}
+	if in.Retention != "" {
+		if b.Retention, err = time.ParseDuration(in.Retention); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Domain settings keys consulted by the backup policy.
+const (
+	DomainBackupInterval  = "backup.interval"
+	DomainBackupRetention = "backup.retention"
+)
+
 // Mailbox is the container for a user's data.
 type Mailbox struct {
 	ID uuid.UUID `json:"id"`
 	// StorageID is the Ceph storage (registry id) holding the mailbox's
 	// data; 0 only in the single-storage memory backend.
-	StorageID   int64       `json:"storage_id"`
-	State       string      `json:"state"` // active | suspended | disabled
-	StateReason string      `json:"state_reason,omitempty"`
-	StateSince  time.Time   `json:"state_since"`
-	Quota       QuotaLimits `json:"quota"`
-	Hold        *Hold       `json:"hold,omitempty"`
-	Released    *time.Time  `json:"released,omitempty"` // when the last hold was released
-	Created     time.Time   `json:"created"`
-	Updated     time.Time   `json:"updated"`
+	StorageID   int64          `json:"storage_id"`
+	State       string         `json:"state"` // active | suspended | disabled
+	StateReason string         `json:"state_reason,omitempty"`
+	StateSince  time.Time      `json:"state_since"`
+	Quota       QuotaLimits    `json:"quota"`
+	Hold        *Hold          `json:"hold,omitempty"`
+	Released    *time.Time     `json:"released,omitempty"` // when the last hold was released
+	Backup      BackupSettings `json:"backup"`
+	Created     time.Time      `json:"created"`
+	Updated     time.Time      `json:"updated"`
 }
 
 // Active reports whether the mailbox is in the active state.

@@ -24,7 +24,7 @@ func restServer(a *app.App) (*rest.Server, []net.IPNet) {
 	srv := rest.New(rest.Config{
 		Realm: "kittiwake", TrustedProxies: trusted, DefaultQuota: a.DefaultQuota(),
 		MaxBody: 1 << 20, Identity: a.Stores.Identity,
-		Export: a.Services.Export, ExportDir: a.Cfg.Export.Directory, Submit: a.Services.Submit,
+		Backup: a.Services.Backup, Submit: a.Services.Submit,
 	}, a.Services.Auth, a.Services.Admin, a.Stores.Audit, a.Stores.Queue, a.Log)
 	return srv, trusted
 }

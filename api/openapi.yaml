@@ -495,14 +495,77 @@ paths:
         "202": { description: Removal scheduled }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-  /v1/admin/mailboxes/{id}/export:
+  /v1/admin/backups:
+    get:
+      tags: [admin]
+      summary: Platform-wide backup summary and policy
+      description: >-
+        Counts of scheduled, disabled, overdue and failed mailboxes, the configured aggregate
+        load (runs per hour), run and blob totals, pending jobs, and the configured limits.
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary: { $ref: "#/components/schemas/BackupSummary" }
+                  policy: { type: object, additionalProperties: { type: string } }
+        "501": { description: Backups not configured, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  /v1/admin/backups/jobs:
+    get:
+      tags: [admin]
+      summary: List backup jobs (restore, restore-message, export, verify, forget), newest first
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string, format: uuid } }
+        - { name: kind, in: query, schema: { type: string, enum: [restore, restore-message, export, verify, forget] } }
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/BackupJob" } }
+  /v1/admin/backups/jobs/{jid}:
+    parameters: [{ name: jid, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [admin]
+      summary: Get a backup job (state, result, download link of an export)
+      responses:
+        "200": { description: Job, content: { application/json: { schema: { $ref: "#/components/schemas/BackupJob" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/backups:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
+    get:
+      tags: [admin]
+      summary: Backup state, settings, effective policy and runs of a mailbox
+      responses:
+        "200":
+          description: Backups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { $ref: "#/components/schemas/BackupState" }
+                  settings: { $ref: "#/components/schemas/BackupSettings" }
+                  policy:
+                    type: object
+                    properties:
+                      interval: { type: string }
+                      retention: { type: string }
+                      enabled: { type: boolean }
+                  runs: { type: array, items: { $ref: "#/components/schemas/BackupRun" } }
+        "404": { $ref: "#/components/responses/NotFound" }
     post:
       tags: [admin]
-      summary: Schedule a Maildir export of the mailbox (worker task)
-      description: >
-        The worker writes a Dovecot-compatible Maildir++ tar archive with a manifest and the
-        mailbox's audit log into the configured export directory. Poll GET /v1/admin/exports.
+      summary: Back the mailbox up now (backup-mode task)
+      description: >-
+        Enqueues a backup run regardless of the schedule and of the disabled flag. With full,
+        every folder entry is rewritten instead of reusing unchanged ones.
       requestBody:
         required: false
         content:
@@ -510,10 +573,10 @@ paths:
             schema:
               type: object
               properties:
-                gzip: { type: boolean, default: true }
+                full: { type: boolean, default: false }
       responses:
         "202":
-          description: Export scheduled
+          description: Backup scheduled
           content:
             application/json:
               schema:
@@ -521,69 +584,84 @@ paths:
                 properties:
                   task_id: { type: string }
                   mailbox: { type: string, format: uuid }
-                  gzip: { type: boolean }
-                  hint: { type: string }
+                  full: { type: boolean }
         "404": { $ref: "#/components/responses/NotFound" }
-        "501": { description: Export not configured, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
-  /v1/admin/mailboxes/{id}/import:
+    delete:
+      tags: [admin]
+      summary: Delete every backup of the mailbox (job; refused while on hold)
+      responses:
+        "202": { description: Job filed, content: { application/json: { schema: { $ref: "#/components/schemas/BackupJob" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/backups/verify:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
     post:
       tags: [admin]
-      summary: Import a Maildir archive (tar or tar.gz) into the mailbox
+      summary: Verify the mailbox's backups on the target (job)
+      description: >-
+        Every manifest and pack the catalog knows must be present with its recorded size; every
+        entry of the latest run is decrypted and hashed; objects unknown to the catalog are
+        reported. A failure forces the next backup to be a full run. The report lands in the job.
+      responses:
+        "202": { description: Job filed, content: { application/json: { schema: { $ref: "#/components/schemas/BackupJob" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/backups/{run}:
+    parameters:
+      - { $ref: "#/components/parameters/mailboxId" }
+      - { name: run, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [admin]
+      summary: Get one backup run
+      responses:
+        "200": { description: Run, content: { application/json: { schema: { $ref: "#/components/schemas/BackupRun" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/backups/{run}/restore:
+    parameters:
+      - { $ref: "#/components/parameters/mailboxId" }
+      - { name: run, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [admin]
+      summary: Restore the run into a new mailbox, side by side (job)
+      description: >-
+        The source mailbox is never touched. The job's target is the new mailbox; re-point the
+        accounts at it when satisfied. Messages get new ids and UIDs; flags, dates, folders,
+        keywords and subscriptions are kept.
+      responses:
+        "202": { description: Job filed, content: { application/json: { schema: { $ref: "#/components/schemas/BackupJob" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/mailboxes/{id}/backups/{run}/restore-message:
+    parameters:
+      - { $ref: "#/components/parameters/mailboxId" }
+      - { name: run, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [admin]
+      summary: Restore one message of the run into a live mailbox (job)
       requestBody:
         required: true
         content:
-          application/x-tar: { schema: { type: string, format: binary } }
-          application/gzip: { schema: { type: string, format: binary } }
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, format: uuid, description: Kittiwake message id as in the backup }
+                into: { type: string, format: uuid, description: "Mailbox to restore into (default: the source mailbox)" }
       responses:
-        "200":
-          description: Import summary
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  messages: { type: integer }
-                  folders: { type: integer }
-                  bytes: { type: integer }
-                  errors: { type: array, items: { type: string } }
+        "202": { description: Job filed, content: { application/json: { schema: { $ref: "#/components/schemas/BackupJob" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
-  /v1/admin/exports:
-    get:
+  /v1/admin/mailboxes/{id}/backups/{run}/export:
+    parameters:
+      - { $ref: "#/components/parameters/mailboxId" }
+      - { name: run, in: path, required: true, schema: { type: string } }
+    post:
       tags: [admin]
-      summary: List finished exports
-      parameters:
-        - { name: mailbox, in: query, schema: { type: string, format: uuid } }
+      summary: Render the run as a Maildir++ tar.gz on the backup target (job)
+      description: >-
+        The archive (Dovecot layout, manifest.json with a SHA-256 per file, the audit log, the
+        hold record) is written unencrypted under the exports prefix with an expiry. The job
+        carries the object key and, on S3, a presigned download link.
       responses:
-        "200":
-          description: Exports
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        name: { type: string }
-                        bytes: { type: integer }
-                        modified: { type: string, format: date-time }
-                        url: { type: string }
-                        result: { type: object }
-  /v1/admin/exports/{name}:
-    get:
-      tags: [admin]
-      summary: Download an export archive
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-      responses:
-        "200":
-          description: The archive
-          content:
-            application/gzip: { schema: { type: string, format: binary } }
-            application/x-tar: { schema: { type: string, format: binary } }
+        "202": { description: Job filed, content: { application/json: { schema: { $ref: "#/components/schemas/BackupJob" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/mailboxes/{id}/purge:
     parameters: [{ $ref: "#/components/parameters/mailboxId" }]
@@ -1213,6 +1291,86 @@ components:
             reports the recipient unknown (rejected at SMTP time), users are locked out.
         state_reason: { type: string, description: Required when suspending or disabling }
         quota: { $ref: "#/components/schemas/QuotaLimits" }
+        backup:
+          type: object
+          description: Backup settings; omitted fields are left alone, empty strings inherit again
+          properties:
+            interval: { type: string, description: "Duration between runs, e.g. 24h; bounded by the configured min/max" }
+            retention: { type: string, description: "How long runs are kept, e.g. 2160h" }
+            disabled: { type: boolean }
+    BackupSettings:
+      type: object
+      properties:
+        interval: { type: string }
+        retention: { type: string }
+        disabled: { type: boolean }
+    BackupState:
+      type: object
+      properties:
+        mailbox: { type: string, format: uuid }
+        every: { type: integer, format: int64, description: Effective interval in nanoseconds; 0 = disabled }
+        scheduled: { type: boolean }
+        due: { type: string, format: date-time }
+        maintain_due: { type: string, format: date-time }
+        last_run: { type: string }
+        last_modseq: { type: integer, format: int64 }
+        last_at: { type: string, format: date-time }
+        status: { type: string, enum: [ok, skipped, failed, ""] }
+        error: { type: string }
+        force_full: { type: boolean }
+        verified: { type: string, format: date-time }
+        verify_error: { type: string }
+    BackupRun:
+      type: object
+      properties:
+        id: { type: string }
+        mailbox: { type: string, format: uuid }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+        modseq: { type: integer, format: int64 }
+        fuzzy: { type: boolean, description: The mailbox changed while it was copied }
+        full: { type: boolean }
+        manifest_key: { type: string }
+        packs: { type: array, items: { type: string } }
+        bytes: { type: integer, format: int64 }
+        messages: { type: integer }
+        new_messages: { type: integer }
+        expires: { type: string, format: date-time }
+    BackupJob:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [restore, restore-message, export, verify, forget] }
+        mailbox: { type: string, format: uuid }
+        run_id: { type: string }
+        target: { type: string, format: uuid, description: The restored mailbox, or the mailbox restored into }
+        message_id: { type: string, format: uuid }
+        object_key: { type: string }
+        url: { type: string, description: Presigned download link (S3), valid until expires }
+        bytes: { type: integer, format: int64 }
+        messages: { type: integer }
+        detail: { type: object, description: Verification report or restore summary }
+        state: { type: string, enum: [pending, running, done, failed] }
+        error: { type: string }
+        requested_by: { type: string }
+        created: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+        expires: { type: string, format: date-time }
+    BackupSummary:
+      type: object
+      properties:
+        mailboxes: { type: integer }
+        scheduled: { type: integer }
+        disabled: { type: integer }
+        overdue: { type: integer }
+        failed: { type: integer }
+        verify_failed: { type: integer }
+        oldest_due: { type: string, format: date-time }
+        rate_per_hour: { type: number }
+        runs: { type: integer, format: int64 }
+        bytes: { type: integer, format: int64 }
+        blobs: { type: integer, format: int64 }
+        jobs_pending: { type: integer }
     Hold:
       type: object
       properties:
@@ -1243,6 +1401,7 @@ components:
         quota: { $ref: "#/components/schemas/QuotaLimits" }
         hold: { $ref: "#/components/schemas/Hold" }
         released: { type: string, format: date-time }
+        backup: { $ref: "#/components/schemas/BackupSettings" }
         created: { type: string, format: date-time }
         updated: { type: string, format: date-time }
     Folder:

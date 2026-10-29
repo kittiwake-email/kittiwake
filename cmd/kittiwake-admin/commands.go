@@ -4,7 +4,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -121,8 +120,8 @@ func (a *cli) mailbox(args []string) error {
        mailbox activate <uuid>
        mailbox hold <uuid> --reason text [--case ref] [--no-delivery] [--allow-send] [--sealed]
        mailbox release <uuid> [--note text]
-       mailbox export <uuid> [--no-gzip] | exports [--mailbox uuid] | download <name> [--out file]
-       mailbox import <uuid> --archive file.tar[.gz] | --dir /path/to/Maildir`
+       mailbox set <uuid> [--backup-interval 24h] [--backup-retention 2160h] [--backup-disabled|--backup-enabled]
+                                               (backup settings; "" clears a field so it inherits again)`
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
@@ -187,61 +186,6 @@ func (a *cli) mailbox(args []string) error {
 			}
 			table([]string{"MAILBOX", "REASON", "CASE", "SET BY", "SET AT", "SEALED"}, rows)
 		})
-	case "exports":
-		fs := newFlagSet("mailbox exports")
-		mb := fs.String("mailbox", "", "only this mailbox")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		items, err := a.c.ListExports(a.ctx, *mb)
-		if err != nil {
-			return err
-		}
-		if items == nil {
-			items = []admin.ExportItem{}
-		}
-		return emit(items, func() {
-			var rows [][]string
-			for _, e := range items {
-				msgs := "-"
-				if e.Result != nil {
-					msgs = strconv.Itoa(e.Result.Messages)
-				}
-				rows = append(rows, []string{e.Name, strconv.FormatInt(e.Bytes, 10), msgs, fmtTime(e.Modified)})
-			}
-			table([]string{"NAME", "BYTES", "MESSAGES", "MODIFIED"}, rows)
-		})
-	case "download":
-		pos, rest, err := splitArgs(args[1:], 1, u)
-		if err != nil {
-			return err
-		}
-		fs := newFlagSet("mailbox download")
-		out := fs.String("out", "", "output file (default: the export's name in the current directory)")
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		dst := *out
-		if dst == "" {
-			dst = pos[0]
-		}
-		rc, err := a.c.DownloadExport(a.ctx, pos[0])
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return err
-		}
-		n, err := io.Copy(f, rc)
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return err
-		}
-		return emit(map[string]any{"file": dst, "bytes": n}, func() { fmt.Printf("saved %s (%d bytes)\n", dst, n) })
 	}
 	// Everything else takes a mailbox uuid first.
 	pos, rest, err := splitArgs(args[1:], 1, u)
@@ -259,11 +203,29 @@ func (a *cli) mailbox(args []string) error {
 	case "set":
 		fs := newFlagSet("mailbox set")
 		sb, hb, sm, hm := quotaFlags(fs)
+		bi := fs.String("backup-interval", "unset", "backup interval, e.g. 24h (\"\" inherits); lower values multiply the load")
+		br := fs.String("backup-retention", "unset", "backup retention, e.g. 2160h (\"\" inherits)")
+		bd := fs.Bool("backup-disabled", false, "switch backups off for this mailbox")
+		be := fs.Bool("backup-enabled", false, "switch backups back on")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
 		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm)}
-		if req.Quota == nil {
+		if *bi != "unset" || *br != "unset" || *bd || *be {
+			b := &admin.BackupSettingsRequest{}
+			if *bi != "unset" {
+				b.Interval = bi
+			}
+			if *br != "unset" {
+				b.Retention = br
+			}
+			if *bd || *be {
+				v := *bd
+				b.Disabled = &v
+			}
+			req.Backup = b
+		}
+		if req.Quota == nil && req.Backup == nil {
 			return errors.New("nothing to change")
 		}
 		m, err := a.c.UpdateMailbox(a.ctx, id, req)
@@ -340,56 +302,6 @@ func (a *cli) mailbox(args []string) error {
 			return err
 		}
 		return emit(m, nil)
-	case "export":
-		fs := newFlagSet("mailbox export")
-		noGzip := fs.Bool("no-gzip", false, "plain tar instead of tar.gz")
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		s, err := a.c.ScheduleExport(a.ctx, id, !*noGzip)
-		if err != nil {
-			return err
-		}
-		return emit(s, func() {
-			fmt.Printf("export scheduled, task %s; poll: kittiwake-admin mailbox exports --mailbox %s\n", s.TaskID, id)
-		})
-	case "import":
-		fs := newFlagSet("mailbox import")
-		archive := fs.String("archive", "", "tar or tar.gz archive")
-		dir := fs.String("dir", "", "Maildir directory (packed and uploaded)")
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		var sum admin.ImportSummary
-		switch {
-		case *archive != "":
-			f, err := os.Open(*archive)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			sum, err = a.c.ImportMailbox(a.ctx, id, f, isGzipName(*archive))
-			if err != nil {
-				return err
-			}
-		case *dir != "":
-			pr, pw := io.Pipe()
-			go func() { pw.CloseWithError(packMaildir(*dir, pw)) }()
-			var err error
-			sum, err = a.c.ImportMailbox(a.ctx, id, pr, true)
-			_ = pr.Close()
-			if err != nil {
-				return err
-			}
-		default:
-			return errors.New("one of --archive or --dir is required")
-		}
-		return emit(sum, func() {
-			fmt.Printf("imported %d messages (%d bytes) into %d folders, %d errors\n", sum.Messages, sum.Bytes, sum.Folders, len(sum.Errors))
-			for _, e := range sum.Errors {
-				fmt.Println("  error:", e)
-			}
-		})
 	}
 	return fmt.Errorf("unknown mailbox subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
@@ -1268,4 +1180,173 @@ func (a *cli) node(args []string) error {
 		}
 		table([]string{"MODE", "ADDRESS", "HOST", "VERSION", "STATE", "STARTED", "LAST SEEN"}, rows)
 	})
+}
+
+// ---- backup ----
+
+func (a *cli) backup(args []string) error {
+	const u = `backup status                                   platform-wide summary and policy
+       backup show <mailbox>                           schedule state, settings and runs of a mailbox
+       backup run <mailbox> [--full]                   back the mailbox up now (full: rewrite every folder)
+       backup restore <mailbox> <run>                  restore the run into a NEW mailbox (job)
+       backup restore-message <mailbox> <run> <message> [--into mailbox]
+       backup export <mailbox> <run>                   Maildir++ tar.gz on the backup target (job; download link when S3)
+       backup verify <mailbox>                         check the mailbox's backups on the target (job)
+       backup forget <mailbox>                         delete every backup of the mailbox (job)
+       backup jobs [--mailbox uuid] [--kind k] | job <id>`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
+		return nil
+	}
+	jobOut := func(j admin.BackupJob, err error) error {
+		if err != nil {
+			return err
+		}
+		return emit(j, func() {
+			fmt.Printf("%s job %s %s; poll: kittiwake-admin backup job %s\n", j.Kind, j.ID, j.State, j.ID)
+		})
+	}
+	switch args[0] {
+	case "status":
+		st, err := a.c.BackupStatus(a.ctx)
+		if err != nil {
+			return err
+		}
+		return emit(st, func() {
+			s := st.Summary
+			fmt.Printf("mailboxes %d  scheduled %d  disabled %d  overdue %d  failed %d  verify-failed %d\n", s.Mailboxes, s.Scheduled, s.Disabled, s.Overdue, s.Failed, s.VerifyFailed)
+			fmt.Printf("runs %d  bytes %d  blobs %d  jobs pending %d  configured load %.1f runs/hour\n", s.Runs, s.Bytes, s.Blobs, s.Jobs, s.Rate)
+			if !s.OldestDue.IsZero() {
+				fmt.Printf("oldest overdue: %s\n", fmtTime(s.OldestDue))
+			}
+			fmt.Printf("policy: interval %s (min %s, max %s), retention %s, maintain %s, export expiry %s\n",
+				st.Policy["default_interval"], st.Policy["min_interval"], st.Policy["max_interval"], st.Policy["default_retention"], st.Policy["maintain_interval"], st.Policy["export_expiry"])
+		})
+	case "show":
+		pos, _, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		mb, err := a.c.MailboxBackups(a.ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		return emit(mb, func() {
+			st := mb.State
+			fmt.Printf("policy: interval %s retention %s enabled %v\n", mb.Policy.Interval, mb.Policy.Retention, mb.Policy.Enabled)
+			fmt.Printf("state: scheduled %v due %s status %s last run %s at %s modseq %d\n", st.Scheduled, fmtTime(st.Due), st.Status, st.LastRun, fmtTime(st.LastAt), st.LastModSeq)
+			if st.Error != "" {
+				fmt.Printf("error: %s\n", st.Error)
+			}
+			if !st.Verified.IsZero() {
+				fmt.Printf("verified: %s %s\n", fmtTime(st.Verified), st.VerifyError)
+			}
+			var rows [][]string
+			for _, r := range mb.Runs {
+				rows = append(rows, []string{r.ID, fmtTime(r.Finished), strconv.Itoa(r.Messages), strconv.Itoa(r.NewMessages), strconv.FormatInt(r.Bytes, 10), strconv.Itoa(len(r.Packs)), fmt.Sprint(r.Full), fmt.Sprint(r.Fuzzy), fmtTime(r.Expires)})
+			}
+			table([]string{"RUN", "FINISHED", "MESSAGES", "NEW", "BYTES", "PACKS", "FULL", "FUZZY", "EXPIRES"}, rows)
+		})
+	case "run":
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("backup run")
+		full := fs.Bool("full", false, "rewrite every folder entry instead of reusing unchanged ones")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		s, err := a.c.RunBackup(a.ctx, pos[0], *full)
+		if err != nil {
+			return err
+		}
+		return emit(s, func() {
+			fmt.Printf("backup scheduled, task %s; poll: kittiwake-admin backup show %s\n", s.TaskID, pos[0])
+		})
+	case "restore":
+		pos, _, err := splitArgs(args[1:], 2, u)
+		if err != nil {
+			return err
+		}
+		return jobOut(a.c.RestoreBackup(a.ctx, pos[0], pos[1]))
+	case "restore-message":
+		pos, rest, err := splitArgs(args[1:], 3, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("backup restore-message")
+		into := fs.String("into", "", "mailbox to restore into (default: the source mailbox)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return jobOut(a.c.RestoreBackupMessage(a.ctx, pos[0], pos[1], pos[2], *into))
+	case "export":
+		pos, _, err := splitArgs(args[1:], 2, u)
+		if err != nil {
+			return err
+		}
+		return jobOut(a.c.ExportBackup(a.ctx, pos[0], pos[1]))
+	case "verify":
+		pos, _, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		return jobOut(a.c.VerifyBackups(a.ctx, pos[0]))
+	case "forget":
+		pos, _, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		return jobOut(a.c.ForgetBackups(a.ctx, pos[0]))
+	case "jobs":
+		fs := newFlagSet("backup jobs")
+		mb := fs.String("mailbox", "", "only this mailbox")
+		kind := fs.String("kind", "", "restore | restore-message | export | verify | forget")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		jobs, err := a.c.ListBackupJobs(a.ctx, *mb, *kind)
+		if err != nil {
+			return err
+		}
+		if jobs == nil {
+			jobs = []admin.BackupJob{}
+		}
+		return emit(jobs, func() {
+			var rows [][]string
+			for _, j := range jobs {
+				rows = append(rows, []string{j.ID, j.Kind, j.Mailbox, j.RunID, j.State, fmtTime(j.Created), firstNonEmpty(j.Target, j.ObjectKey), j.Error})
+			}
+			table([]string{"ID", "KIND", "MAILBOX", "RUN", "STATE", "CREATED", "RESULT", "ERROR"}, rows)
+		})
+	case "job":
+		pos, _, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		j, err := a.c.GetBackupJob(a.ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		return emit(j, func() {
+			fmt.Printf("%s %s %s mailbox %s run %s requested by %s at %s\n", j.Kind, j.ID, j.State, j.Mailbox, j.RunID, j.Requested, fmtTime(j.Created))
+			if j.Target != "" {
+				fmt.Printf("mailbox: %s (%d messages)\n", j.Target, j.Messages)
+			}
+			if j.ObjectKey != "" {
+				fmt.Printf("archive: %s (%d bytes, %d messages, expires %s)\n", j.ObjectKey, j.Bytes, j.Messages, fmtTime(j.Expires))
+			}
+			if j.URL != "" {
+				fmt.Printf("download: %s\n", j.URL)
+			}
+			if j.Error != "" {
+				fmt.Printf("error: %s\n", j.Error)
+			}
+			if len(j.Detail) > 0 {
+				fmt.Printf("detail: %s\n", string(j.Detail))
+			}
+		})
+	}
+	return fmt.Errorf("unknown backup subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }

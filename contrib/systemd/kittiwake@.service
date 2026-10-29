@@ -1,6 +1,6 @@
 # Kittiwake instance template: one process per mode.
 #   systemctl enable --now kittiwake@lmtp kittiwake@imap kittiwake@pop3 kittiwake@jmap \
-#                          kittiwake@admin kittiwake@socketmap kittiwake@worker
+#                          kittiwake@admin kittiwake@socketmap kittiwake@worker kittiwake@backup
 # Every instance reads /etc/kittiwake/kittiwake.yaml; the instance name is the
 # mode it runs, and the mode's own management (metrics/health) address comes
 # from the same file (listen.<mode>.management). Nothing is passed from here

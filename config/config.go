@@ -34,7 +34,7 @@ type Config struct {
 	Session    Session    `yaml:"session"`
 	Cache      Cache      `yaml:"cache"`
 	Audit      Audit      `yaml:"audit"`
-	Export     Export     `yaml:"export"`
+	Backup     Backup     `yaml:"backup"`
 	Log        Log        `yaml:"log"`
 }
 
@@ -78,6 +78,7 @@ type Listen struct {
 	Admin      Listener `yaml:"admin"`     // admin REST API, operators only
 	Socketmap  Listener `yaml:"socketmap"` // MTA recipient/domain/alias lookups (Postfix socketmap protocol)
 	Worker     Listener `yaml:"worker"`    // no listener of its own; only its management address
+	Backup     Listener `yaml:"backup"`    // no listener of its own; only its management address
 	// Management is the metrics/health listener of a process that runs
 	// several modes, or of a mode whose entry has no management address.
 	Management Listener `yaml:"management"`
@@ -115,6 +116,8 @@ func (l Listen) ByMode(mode string) Listener {
 		return l.Socketmap
 	case "worker":
 		return l.Worker
+	case "backup":
+		return l.Backup
 	}
 	return Listener{}
 }
@@ -284,9 +287,65 @@ type Audit struct {
 	Detail map[string]string `yaml:"detail"`
 }
 
-// Export configures worker-run exports.
-type Export struct {
+// Backup configures mailbox backups: the target they are written to, the
+// keys they are sealed with, and the schedule policy. Only the `backup`
+// mode needs the target and the keys; every other mode only reads the
+// schedule limits (the admin API validates settings against them).
+type Backup struct {
+	// Target: "s3", "filesystem" or "" (backups off; the backup mode
+	// refuses to start).
+	Target string `yaml:"target"`
+	S3     S3     `yaml:"s3"`
+	// Directory of the filesystem target (lab, small installations).
 	Directory string `yaml:"directory"`
+	// Prefix prepended to every key on the target.
+	Prefix string `yaml:"prefix"`
+	// Keys: the pre-shared keys (hex, 32 bytes each) by id; CurrentKey
+	// seals new objects, every listed key opens old ones (rotation).
+	Keys       []BackupKey `yaml:"keys"`
+	CurrentKey int         `yaml:"current_key"`
+	// Interval between runs of a mailbox without its own setting;
+	// MinInterval / MaxInterval bound every per-domain and per-mailbox
+	// setting (the floor protects the platform; lower it with care).
+	Interval    time.Duration `yaml:"interval"`
+	MinInterval time.Duration `yaml:"min_interval"`
+	MaxInterval time.Duration `yaml:"max_interval"`
+	// Retention of runs on the target; MaintainInterval between
+	// verification passes of a mailbox; ExportExpiry of export archives.
+	Retention        time.Duration `yaml:"retention"`
+	MaintainInterval time.Duration `yaml:"maintain_interval"`
+	ExportExpiry     time.Duration `yaml:"export_expiry"`
+	// Lock asks the target to retain objects for the retention period
+	// (S3 Object Lock, compliance mode; the bucket must support it).
+	Lock bool `yaml:"lock"`
+	// PackSize caps one pack object; BlobThreshold is the attachment size
+	// from which payloads are deduplicated as separate blobs; SpoolDir
+	// holds packs and exports while they are built.
+	PackSize      int64  `yaml:"pack_size"`
+	BlobThreshold int64  `yaml:"blob_threshold"`
+	SpoolDir      string `yaml:"spool_dir"`
+	// Concurrency: tasks one backup process runs at once; Batch: due
+	// mailboxes the scheduler enqueues per tick.
+	Concurrency int `yaml:"concurrency"`
+	Batch       int `yaml:"batch"`
+}
+
+// BackupKey is one ring entry.
+type BackupKey struct {
+	ID  int    `yaml:"id"`
+	Key Secret `yaml:"key"`
+}
+
+// S3 is an S3-compatible endpoint.
+type S3 struct {
+	Endpoint  string `yaml:"endpoint"`
+	Region    string `yaml:"region"`
+	Bucket    string `yaml:"bucket"`
+	AccessKey Secret `yaml:"access_key"`
+	SecretKey Secret `yaml:"secret_key"`
+	// PathStyle addresses the bucket in the path (MinIO, RGW, most
+	// self-hosted stores); off uses virtual-host addressing (AWS).
+	PathStyle bool `yaml:"path_style"`
 }
 
 // Log configures logging.
@@ -343,6 +402,7 @@ func Default() Config {
 			Admin:      Listener{Address: "[::1]:8081", ProxyProtocol: "off", Management: "[::1]:9095"},
 			Socketmap:  Listener{Address: "[::1]:2525", ProxyProtocol: "off", Management: "[::1]:9096"},
 			Worker:     Listener{Management: "[::1]:9097"},
+			Backup:     Listener{Management: "[::1]:9099"},
 			Management: Listener{Address: "[::1]:9090", ProxyProtocol: "off"},
 		},
 		SMTP:       SMTP{RelayHost: "[::1]:25", TLS: "opportunistic"},
@@ -367,7 +427,13 @@ func Default() Config {
 		Database: Database{ReadStickiness: 2 * time.Second, MaxOpen: 32, MaxIdle: 8, ConnLifetime: 30 * time.Minute},
 		Node:     Node{Heartbeat: 10 * time.Second},
 		Audit:    Audit{Retention: 365 * 24 * time.Hour},
-		Log:      Log{Level: "info", Format: "json"},
+		Backup: Backup{
+			Prefix: "kittiwake/", S3: S3{Region: "us-east-1", PathStyle: true},
+			Interval: 24 * time.Hour, MinInterval: 30 * time.Minute, MaxInterval: 30 * 24 * time.Hour,
+			Retention: 90 * 24 * time.Hour, MaintainInterval: 7 * 24 * time.Hour, ExportExpiry: 7 * 24 * time.Hour,
+			Lock: true, PackSize: 1 << 30, BlobThreshold: 1 << 20, Concurrency: 4, Batch: 100,
+		},
+		Log: Log{Level: "info", Format: "json"},
 	}
 }
 
@@ -395,10 +461,10 @@ func Parse(b []byte) (Config, error) {
 }
 
 // ValidModes is the set of accepted mode names.
-var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "submission": true, "admin": true, "socketmap": true, "worker": true}
+var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "submission": true, "admin": true, "socketmap": true, "worker": true, "backup": true}
 
 // AllModes lists every mode name.
-var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "submission", "admin", "socketmap", "worker"}
+var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "submission", "admin", "socketmap", "worker", "backup"}
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
@@ -486,6 +552,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: audit.detail.%s must be full or session", p)
 		}
 	}
+	if err := c.Backup.validate(c.HasMode("backup")); err != nil {
+		return err
+	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -507,4 +576,45 @@ func (c *Config) HasMode(mode string) bool {
 		}
 	}
 	return false
+}
+
+// validate checks the backup section; a process running the backup mode
+// needs a target and keys, every other process only sane limits.
+func (b *Backup) validate(backupMode bool) error {
+	switch b.Target {
+	case "", "s3", "filesystem":
+	default:
+		return fmt.Errorf("config: backup.target %q must be s3, filesystem or empty", b.Target)
+	}
+	if backupMode && b.Target == "" {
+		return errors.New("config: the backup mode needs backup.target (s3 or filesystem)")
+	}
+	if b.Target == "s3" && (b.S3.Endpoint == "" || b.S3.Bucket == "") {
+		return errors.New("config: backup.s3.endpoint and backup.s3.bucket are required")
+	}
+	if b.Target == "filesystem" && b.Directory == "" {
+		return errors.New("config: backup.directory is required for the filesystem target")
+	}
+	if b.Target != "" {
+		if len(b.Keys) == 0 {
+			return errors.New("config: backup.keys needs at least one key (32 random bytes, hex) and backup.current_key names the one that seals new backups")
+		}
+		seen := map[int]bool{}
+		for _, k := range b.Keys {
+			if k.ID < 0 || k.ID > 65535 || seen[k.ID] {
+				return fmt.Errorf("config: backup.keys: id %d invalid or repeated", k.ID)
+			}
+			seen[k.ID] = true
+		}
+		if !seen[b.CurrentKey] {
+			return fmt.Errorf("config: backup.current_key %d is not in backup.keys", b.CurrentKey)
+		}
+	}
+	if b.MinInterval < time.Minute || b.MinInterval > b.Interval || b.Interval > b.MaxInterval {
+		return errors.New("config: backup intervals must satisfy 1m <= min_interval <= interval <= max_interval")
+	}
+	if b.Retention <= 0 || b.MaintainInterval <= 0 || b.ExportExpiry <= 0 || b.PackSize <= 0 || b.BlobThreshold < 0 || b.Concurrency <= 0 || b.Batch <= 0 {
+		return errors.New("config: backup retention, maintain_interval, export_expiry, pack_size, concurrency and batch must be positive")
+	}
+	return nil
 }

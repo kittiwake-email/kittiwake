@@ -154,6 +154,8 @@ Each mode is a separately scalable component:
 - `postfix` – socketmap lookup service for Postfix (domains, recipients, aliases)
 - `worker` – background task execution (trash purge, attachment garbage collection, quota
   recalculation, mailbox removal, reconciliation, …)
+- `backup` – mailbox backups to the backup target, restores, exports, verification (the only
+  mode holding the target credentials and the backup keys)
 - `dav` – CalDAV/CardDAV (future)
 
 Modes can be combined in one process for small setups and split across many processes for
@@ -428,7 +430,7 @@ document rather than becoming tiny RADOS objects.
 ## No raw copy: messages are rendered
 
 The original bytes of a message are **not stored**. IMAP `BODY[]`, POP3 `RETR`, JMAP blob
-downloads and Maildir exports serve a message **rendered from the document**: the verbatim
+downloads and backup exports serve a message **rendered from the document**: the verbatim
 original headers, followed by the MIME tree re-encoded deterministically (UTF-8 bodies,
 base64 attachments, the original boundaries). The rendering is stable, and its length is
 the size the index records and the protocols report. Forensic needs are met by the verbatim
@@ -697,7 +699,6 @@ The `worker` mode executes background tasks:
 - Decrement attachment reference counts and delete orphaned attachment objects
 - Recalculate quota usage for a mailbox
 - Remove all data of a deleted mailbox
-- Maildir export and import of a mailbox
 - Purge audit objects older than the audit retention period
 - Orphan sweep (message objects that never reached an index)
 - Identity reconciliation (repair domain/mailbox/account listings)
@@ -768,27 +769,115 @@ reason, a case reference, who set it and when, and is audited. While a mailbox i
 Hold state is checked in the `Mailbox` service, so every protocol and future protocol
 enforces it automatically.
 
-## Mailbox export and import (Maildir)
+## Backups
 
-A complete mailbox can be exported, for legal requests, migration and backup:
+Mail data is backed up by Kittiwake itself, per mailbox, to an S3-compatible object store
+(any provider) or a directory. Nothing at the Ceph layer does this job: replication and
+erasure coding protect against hardware, not against a deleted mailbox, a writer bug, a
+dropped pool, a lost cluster or a compromised admin token. The design follows the same two
+rules as everything else: storage is cheap, requests are expensive; and nothing runs in the
+delivery or client I/O path.
 
-- **Format: Maildir++** in the Dovecot layout, so the export is directly usable by Dovecot
-  and by standard tools: `cur/new/tmp` per folder, subfolders as `.Folder.Sub` directories,
-  `subscriptions`, IMAP flags in the filename info (`:2,FRST`), keywords via
-  `dovecot-keywords`, internal date as the file mtime, UIDs preserved via `dovecot-uidlist`.
-- Each message is the byte-exact original, rebuilt from the raw skeleton and attachments.
-- Alongside the Maildir, a `manifest.json` with mailbox id, folders, per-message UID/flags/
-  object names and a SHA-256 per file, the mailbox's audit log for the requested period, and
-  the hold record if any, so a chain of custody can be documented.
-- The output is a tar archive (optionally gzip). `kittiwake admin export-mailbox <uuid>` writes
-  it to a path; the admin API creates an export task that a worker executes, writing to a
-  configured export directory, with progress and the result downloadable through the admin
-  API. Exports are audited.
-- mbox can be added later as a second format; Maildir is the primary one.
+**The `backup` mode.** A daemon mode of its own, next to `worker`, and the only process that
+holds the backup target's credentials and the encryption keys. It drains the backup task
+queues (`backup`, `backup-job`, `backup-maintain`, `backup-expire`) from the MariaDB task
+queue with the same lease, retry and dead-letter semantics as the worker, and the backup
+nodes elect a scheduler among themselves (a lease row separate from the worker scheduler's).
+Every other mode only files tasks and reads the catalog. Scale by adding backup nodes.
 
-The reverse, **import** of a Maildir into a mailbox (`kittiwake admin import-mailbox` and an
-admin API task), is planned as the migration path from Dovecot: messages go through the normal
-parse-and-store path, flags, keywords, folders and (where possible) UIDs are preserved.
+**What a backup is.** A logical copy, not a copy of RADOS objects, so it survives index
+format changes: message documents, kept original bytes (`.raw`) and attachment payloads
+verbatim, and the index as the folder list plus the message records of every folder. One run
+of a changed mailbox writes:
+
+- one or more **packs** (`mb/<mailbox>/<run>.<n>.pack`, capped at `pack_size`): the new
+  message documents, their kept originals, small attachments, the records of the folders that
+  changed and the audit-log days since the previous run, each entry sealed on its own so a
+  single message is one ranged GET;
+- **blobs** (`blob/<xx>/<name>`) for attachments from `blob_threshold` up, stored once per
+  content across all mailboxes and all storage clusters, named by an HMAC of the content hash
+  so a provider cannot test for a known file;
+- one **manifest** (`mb/<mailbox>/<run>.manifest`): the folders with references to their
+  record entries, retention entries, audit days, the hold record, accounts, quota, the root
+  modseq and every pack the run references. Folders whose modseq did not move keep pointing at
+  the entries of earlier runs, and messages the previous run holds are never copied again.
+
+**Incremental by construction.** The run reads the mailbox root once: an unchanged modseq
+since the last run is a skip (one RADOS read, no writes). Changed folders are listed and
+compared with the previous run's entries; a changed folder of 150k messages costs one listing
+and one records entry, not a copy of its messages. The root is read again at the end; if the
+modseq moved meanwhile the run is retried once and otherwise marked *fuzzy* (restore relies
+on the index's own recovery). Mailboxes on hold are backed up like any other, their manifests
+record the hold, and their runs never expire.
+
+**Encryption.** Every object is sealed before it leaves the process with AES-256-GCM under a
+per-object key derived (HKDF-SHA256, random salt) from one of the configured pre-shared keys,
+so a public cloud sees only ciphertext and keyed names. Keys have ids: the current key seals,
+every listed key opens, so rotation is adding a key and moving `current_key`. **Losing the
+keys means losing the backups; escrow them outside the platform.**
+
+**Catalog.** MariaDB keeps what the scheduler and the admin API need without listing the
+bucket: per mailbox the effective interval, next due time, last run and modseq, status and
+verification result; the runs with their pack lists; the blobs the target holds and which
+mailboxes reference them; restore and export jobs. Every fact in it is also in the manifests
+on the target, so a restore needs only the bucket and the keys.
+
+**Schedule: a continuous drip, never one big run.** Each mailbox has its own interval and next
+due time; the scheduler enqueues due mailboxes in due order, bounded per tick, so the queue
+holds the next moments of work and nothing else. New mailboxes get their first run spread
+uniformly over one interval; after a run the next due time is the interval plus a little
+jitter. A million mailboxes at the default of 24 hours is about twelve runs per second, most
+of them a single root read. The interval is configurable per mailbox and per domain
+(`backup.interval` and `backup.retention` in the domain settings apply to mailboxes with
+accounts in that domain; a mailbox's own setting wins; `off` disables), bounded by
+`min_interval` (default 30 minutes) and `max_interval` (30 days). **Lower intervals multiply
+the load linearly**: a mailbox at 30 minutes costs 48 times the root reads and, when it is
+active, 48 times the writes of one at 24 hours. The platform summary reports the configured
+aggregate load (runs per hour) so the effect of settings is visible before it arrives.
+
+**Restore** is side by side and never in place: a run is restored into a *new* mailbox
+through the normal append path (new message ids and UIDs; flags, dates, folders, keywords and
+subscriptions kept; attachments re-registered, never copied with their counters), and the
+operator re-points the accounts when satisfied. A single message can be restored into a live
+mailbox, into the folder it was in. Expunged messages still in the retention set are backed
+up too and restored into Trash on request.
+
+**Export** replaces the former Maildir export: an export job renders a run as a
+Dovecot-compatible Maildir++ tar.gz (flags in file names, `dovecot-keywords`,
+`dovecot-uidlist`, a `manifest.json` with a SHA-256 per file, the audit log and the hold
+record for a chain of custody) from the backup alone, never from the mail stores, and writes
+it **unencrypted** under `export/` on the target with an expiry. On S3 the job carries a
+presigned download link; the exports prefix must expire (`export_expiry`) and should be the
+only place mail ever sits in the clear. Importing a Maildir is gone with it: migrating from
+Dovecot is an IMAP-to-IMAP job (imapsync, mbsync).
+
+**Verification** runs per mailbox on its own interval (`maintain_interval`) and on demand:
+every manifest and pack the catalog knows must be on the target with its recorded size (one
+listing, no downloads); a sample of the latest run's entries (all of them on demand) must
+decrypt to the recorded hashes; objects under the mailbox prefix the catalog does not know
+are reported and, past a grace period, removed. A failure is recorded on the mailbox, counted
+in the summary, and forces the next run to be a full one so whatever still exists in RADOS is
+captured again.
+
+**Expiry and GC.** Runs leave retention `retention` after they finished (never while the
+mailbox is on hold); packs no remaining run references are deleted; when a mailbox's last run
+goes, everything under its prefix goes and its blob references are released; blobs no mailbox
+references are deleted after the grace period; export archives expire. With S3 Object Lock
+(`lock: true`, compliance mode, the bucket must support it) nothing can be deleted before
+its retention ends, a compromised admin token included; targets without it simply ignore the
+lock.
+
+**MariaDB is not covered.** The administrator backs up the metadata database, binary logs
+included, so it can be restored to a point in time. Read replicas are recommended, as they are
+also a copy of the database when the primary fails, but a replica replays a dropped table as
+faithfully as anything else and does not protect against accidental removal. Only a backup
+with binlogs does. A database restored to an older point leaves mailbox roots in RADOS the
+database no longer knows; the reconciliation worker reports them.
+
+Operators use `kittiwake-admin backup` (status, show, run, restore, restore-message, export,
+verify, forget, jobs) and `kittiwake-admin mailbox set --backup-interval/--backup-retention/
+--backup-disabled`; the admin API has the same surface under `/v1/admin/backups` and
+`/v1/admin/mailboxes/{id}/backups`.
 
 ## Quotas
 
@@ -1129,8 +1218,9 @@ belonging to an account with the `admin` role, for operating the platform:
    Trash now, re-index for search
 5a. **Legal hold:** place a mailbox on hold (reason, case reference, options), release it,
    list mailboxes on hold
-5b. **Export/import:** start a Maildir export or import task, track progress, download the
-   result
+5b. **Backups:** per-mailbox backup settings, state and runs; run now; restore (into a new
+   mailbox, or one message into a live one), export as Maildir, verify and forget as jobs
+   executed by the backup nodes; platform-wide backup summary
 6. **Worker and queue visibility:** pending and failed tasks, retry, dead-letter set
 7. **Support access:** read a mailbox on behalf of a user, audited
 8. **Platform status:** Ceph health, version, running instances, reconciliation findings
@@ -1166,7 +1256,9 @@ The daemon takes a single YAML file as configuration:
   disabled ones 5xx)
 - Inline attachment size threshold
 - Maximum message size
-- Export directory for worker-run exports; post-hold purge grace period
+- Backups: target (S3 or directory), keys, default interval and its bounds, retention,
+  verification interval, export expiry, Object Lock, pack size, blob threshold, spool
+  directory, concurrency; post-hold purge grace period
 - Management listener (metrics, health)
 - Logging and metrics settings
 - Redis information (only if it ever becomes needed)
@@ -1192,7 +1284,7 @@ the admin API so the daemon's code base stays small.
 `kittiwake-admin` is the operator's tool: a Go client for the admin API (also importable as the
 package `client/admin`) that covers every endpoint: domains, mailboxes, accounts, aliases,
 tokens, sessions, legal hold, audit queries, queues, key rotation, identity export/import and
-Maildir export/import (it packs a local Maildir directory and uploads it). It takes the admin
+backups (settings, runs, restore, export, verify). It takes the admin
 URL and token from flags, environment (`KITTIWAKE_ADMIN_URL`, `KITTIWAKE_ADMIN_TOKEN`) or
 `~/.config/kittiwake/admin.yaml`, and prints tables or JSON (`-o json`).
 
@@ -1258,10 +1350,12 @@ than the schema it talks to (a daemon refuses to start on a schema version it do
   XOAUTH2; account header and optional Postfix XCLIENT for per-account rate limiting at the
   relay
 - Legal hold (read-only / sealed, delivery and sending switches, purge suspension)
-- Maildir++ export (tar, manifest, audit log) and import (directory or archive), as CLI,
-  worker task and admin API
+- Backups: `backup` mode with S3 and filesystem targets, pre-shared-key encryption, packs
+  and deduplicated blobs, incremental runs, per-domain and per-mailbox schedules, side-by-side
+  restore, single-message restore, Maildir++ export from a backup, verification, expiry and
+  GC, catalog in MariaDB, admin API and CLI
 - Workers: trash/expunge retention purge, attachment GC, mailbox removal, quota
-  recalculation, audit purge, orphan sweep, export; lock-elected scheduler
+  recalculation, audit purge, orphan sweep; lock-elected scheduler
 - Structured logging, Prometheus metrics, health endpoints, PROXY protocol on all listeners
 - Unit tests for every package on the in-memory RADOS; no Ceph needed to run them
 
@@ -1270,6 +1364,8 @@ than the schema it talks to (a daemon refuses to start on a schema version it do
 - IMAP CONDSTORE/QRESYNC (modseq is tracked; capability not advertised yet), JMAP over
   WebSocket, `Email/queryChanges`
 - Moving a mailbox between Ceph clusters; per-domain default cluster
+- Backups: blob reclamation is coarse (a blob is released when a mailbox's last run expires,
+  not when its last referencing run does); the lab has no S3 cost and throughput numbers yet
 - Full-text search backend (events are published; no consumer yet)
 - Self-service API token management (tokens are admin-managed)
 - Real integration tests against a Ceph cluster

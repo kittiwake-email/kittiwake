@@ -66,6 +66,7 @@ listen:
   admin:      {address: "[::1]:8081", proxy_protocol: off,      management: "[::1]:9095"}
   socketmap:  {address: "[::1]:2525", proxy_protocol: off,      management: "[::1]:9096"}   # MTA lookups (Postfix socketmap protocol)
   worker:     {management: "[::1]:9097"}                                                    # no listener of its own
+  backup:     {management: "[::1]:9099"}                                                    # no listener of its own
   management: {address: "[::1]:9090"}                                                       # one-process form
 
 proxy:
@@ -119,8 +120,39 @@ audit:
   retention: 8760h             # 365 days
   detail: {}                   # per protocol: full (default) | session, e.g. {imap: session}
 
-export:
-  directory: /var/lib/kittiwake/exports
+# Mailbox backups (see README "Backups"). The backup mode (kittiwake@backup) is
+# the only process that needs the target and the keys; every other process only
+# reads the schedule limits. Back up MariaDB (with binary logs) yourself: it is
+# not covered here.
+backup:
+  target: s3                   # s3 | filesystem | "" (off; the backup mode refuses to start)
+  s3:
+    endpoint: https://s3.example.net   # any S3-compatible store; "http://[2a14:9b80::3144]:9000" for a lab MinIO
+    region: us-east-1
+    bucket: kittiwake-backups
+    access_key: ${KITTIWAKE_S3_ACCESS_KEY}
+    secret_key: ${KITTIWAKE_S3_SECRET_KEY}
+    path_style: true           # bucket in the path (MinIO, RGW); false = virtual host (AWS)
+  # directory: /var/lib/kittiwake/backups   # filesystem target instead of s3
+  prefix: kittiwake/           # key prefix on the target
+  # Pre-shared keys: 32 random bytes in hex (openssl rand -hex 32). The current key seals
+  # new backups, every listed key opens old ones, so rotate by adding a key and moving
+  # current_key. Losing every key means losing every backup: escrow them off the platform.
+  keys:
+    - {id: 1, key: "file:/etc/kittiwake/backup.key"}
+  current_key: 1
+  interval: 24h                # per-mailbox default; domains (settings backup.interval) and mailboxes override
+  min_interval: 30m            # floor for every setting: lower intervals multiply the load on Ceph and the target
+  max_interval: 720h           # 30 days
+  retention: 2160h             # 90 days; runs older than this are deleted (never for mailboxes on hold)
+  maintain_interval: 168h      # per-mailbox verification pass (presence, sampled content, strays)
+  export_expiry: 168h          # export archives (unencrypted) are deleted after this
+  lock: true                   # S3 Object Lock (compliance) for the retention period; ignored by targets without it
+  pack_size: 1073741824        # 1 GiB per pack object
+  blob_threshold: 1048576      # attachments from 1 MiB are stored once per content as blobs
+  spool_dir: /var/lib/kittiwake/spool
+  concurrency: 4               # tasks one backup process runs at once
+  batch: 100                   # due mailboxes enqueued per scheduler tick
 
 log:
   level: info                  # debug | info | warn | error

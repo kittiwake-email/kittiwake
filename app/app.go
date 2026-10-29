@@ -18,6 +18,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"kittiwake/backup"
+	backupcrypto "kittiwake/backup/crypto"
+	"kittiwake/backup/target"
 	"kittiwake/config"
 	"kittiwake/metrics"
 	"kittiwake/proto/httpx"
@@ -29,7 +32,6 @@ import (
 	"kittiwake/service/auditor"
 	authsvc "kittiwake/service/auth"
 	"kittiwake/service/delivery"
-	"kittiwake/service/export"
 	"kittiwake/service/mailbox"
 	"kittiwake/service/submit"
 	"kittiwake/store/attach"
@@ -83,7 +85,9 @@ type Services struct {
 	Mailbox  *mailbox.Service
 	Admin    *admin.Service
 	Submit   *submit.Service
-	Export   *export.Service
+	// Backup runs backups on backup nodes; on every other node it only
+	// carries the catalog and the schedule policy (no target, no keys).
+	Backup *backup.Service
 }
 
 // App is a configured Kittiwake process.
@@ -295,12 +299,77 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 		XClient:  cfg.SMTP.XClient,
 		Hostname: hostname(), MaxMessageSize: cfg.Mail.MaxMessageSize, MaxAliasDepth: cfg.Mail.MaxAliasDepth,
 	}, st.Identity, st.Index, sv.Delivery, aud, nil, log)
-	sv.Export = export.New(st.Identity, st.Index, st.Messages, st.Attachments, st.Audit, sv.Delivery, aud, log)
+	sv.Backup, err = buildBackup(cfg, st, db, sv.Admin, aud, log)
+	if err != nil {
+		return nil, err
+	}
 	a.Stores, a.Services = st, sv
 	if db != nil {
 		a.addCloser(func(context.Context) error { return db.Close() })
 	}
 	return a, nil
+}
+
+// buildBackup wires the backup service: the catalog on every node, the
+// target and key ring only where the backup mode runs (they are the
+// sensitive part and stay out of every other process).
+func buildBackup(cfg config.Config, st Stores, db *mariadb.DB, adm *admin.Service, aud *auditor.Auditor, log *slog.Logger) (*backup.Service, error) {
+	var cat backup.Catalog
+	if db != nil {
+		cat = db
+	} else {
+		mem := backup.NewMemory()
+		mem.Mailboxes = st.Identity.ListMailboxes
+		cat = mem
+	}
+	bc := cfg.Backup
+	svcCfg := backup.Config{
+		Prefix: bc.Prefix, PackSize: bc.PackSize, BlobThreshold: bc.BlobThreshold, SpoolDir: bc.SpoolDir,
+		DefaultInterval: bc.Interval, MinInterval: bc.MinInterval, MaxInterval: bc.MaxInterval,
+		DefaultRetention: bc.Retention, MaintainInterval: bc.MaintainInterval, ExportExpiry: bc.ExportExpiry, Lock: bc.Lock,
+	}
+	stores := backup.Stores{Identity: st.Identity, Index: st.Index, Messages: st.Messages, Attachments: st.Attachments, Audit: st.Audit}
+	if !cfg.HasMode("backup") || bc.Target == "" {
+		return backup.New(svcCfg, stores, cat, nil, nil, adm, aud, log), nil
+	}
+	var keys []backupcrypto.Key
+	for _, k := range bc.Keys {
+		v, err := k.Key.Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("backup key %d: %w", k.ID, err)
+		}
+		raw, err := backupcrypto.ParseKey(v)
+		if err != nil {
+			return nil, fmt.Errorf("backup key %d: %w", k.ID, err)
+		}
+		keys = append(keys, backupcrypto.Key{ID: uint16(k.ID), Key: raw})
+	}
+	ring, err := backupcrypto.NewRing(keys, uint16(bc.CurrentKey))
+	if err != nil {
+		return nil, err
+	}
+	var tg target.Target
+	switch bc.Target {
+	case "s3":
+		ak, err := bc.S3.AccessKey.Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("backup s3 access_key: %w", err)
+		}
+		sk, err := bc.S3.SecretKey.Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("backup s3 secret_key: %w", err)
+		}
+		tg, err = target.NewS3(target.S3Config{Endpoint: bc.S3.Endpoint, Region: bc.S3.Region, Bucket: bc.S3.Bucket, AccessKey: ak, SecretKey: sk, PathStyle: bc.S3.PathStyle, ObjectLock: bc.Lock})
+		if err != nil {
+			return nil, err
+		}
+	case "filesystem":
+		tg, err = target.NewFS(bc.Directory)
+		if err != nil {
+			return nil, fmt.Errorf("backup directory: %w", err)
+		}
+	}
+	return backup.New(svcCfg, stores, cat, tg, ring, adm, aud, log), nil
 }
 
 // registryControl adapts the storage registry for the admin service.
@@ -442,12 +511,11 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.Cfg.HasMode("worker") {
 		w := worker.New(worker.Config{
-			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention, ExportDir: a.Cfg.Export.Directory,
+			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention,
 		}, worker.Stores{
 			Identity: a.Stores.Identity, Index: a.Stores.Index, Messages: a.Stores.Messages,
 			Attachments: a.Stores.Attachments, Audit: a.Stores.Audit, Queue: a.Stores.Queue,
 		}, a.Services.Auditor, a.Log)
-		w.Export = a.Services.Export
 		wctx, wcancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 		// Stop the worker and wait for it: a running task hands itself
@@ -462,6 +530,20 @@ func (a *App) Run(ctx context.Context) error {
 			return nil
 		})
 		start("worker", func() error { defer close(done); return w.Run(wctx) })
+	}
+	if a.Cfg.HasMode("backup") {
+		r := backup.NewRunner(backup.RunnerConfig{Concurrency: a.Cfg.Backup.Concurrency, Batch: a.Cfg.Backup.Batch}, a.Services.Backup, a.Stores.Queue, a.Log)
+		bctx, bcancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		a.addCloser(func(sctx context.Context) error {
+			bcancel()
+			select {
+			case <-done:
+			case <-sctx.Done():
+			}
+			return nil
+		})
+		start("backup", func() error { defer close(done); return r.Run(bctx) })
 	}
 	for _, m := range a.ExtraModes {
 		if err := m(ctx, a, start); err != nil {
@@ -535,7 +617,7 @@ func (a *App) nodeAddresses() map[string]string {
 	out := map[string]string{}
 	for _, m := range a.Cfg.Modes {
 		l := a.Cfg.Listen.ByMode(m)
-		if m == "worker" || l.Address == "" {
+		if m == "worker" || m == "backup" || l.Address == "" {
 			// No listener of its own: register the management address.
 			l = config.Listener{Address: a.Cfg.Listen.ManagementAddress(a.Cfg.Modes)}
 		}

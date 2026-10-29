@@ -161,7 +161,7 @@ func (d *DB) listStrings(ctx context.Context, q string, args ...any) ([]string, 
 
 // ---- mailboxes ----
 
-const mailboxCols = "id, uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated"
+const mailboxCols = "id, uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, backup_interval, backup_retention, backup_disabled, created, updated"
 
 func scanMailbox(row interface{ Scan(...any) error }) (int64, identity.Mailbox, error) {
 	var id int64
@@ -170,11 +170,14 @@ func scanMailbox(row interface{ Scan(...any) error }) (int64, identity.Mailbox, 
 	var storage sql.NullInt64
 	var hold sql.NullString
 	var released sql.NullTime
-	if err := row.Scan(&id, &u, &storage, &m.State, &m.StateReason, &m.StateSince, &m.Quota.SoftBytes, &m.Quota.HardBytes, &m.Quota.SoftMessages, &m.Quota.HardMessages, &hold, &released, &m.Created, &m.Updated); err != nil {
+	var bInterval, bRetention sql.NullInt64
+	if err := row.Scan(&id, &u, &storage, &m.State, &m.StateReason, &m.StateSince, &m.Quota.SoftBytes, &m.Quota.HardBytes, &m.Quota.SoftMessages, &m.Quota.HardMessages, &hold, &released, &bInterval, &bRetention, &m.Backup.Disabled, &m.Created, &m.Updated); err != nil {
 		return 0, identity.Mailbox{}, mapErr(err)
 	}
 	m.ID = toUUID(u)
 	m.StorageID = storage.Int64
+	m.Backup.Interval = time.Duration(bInterval.Int64) * time.Second
+	m.Backup.Retention = time.Duration(bRetention.Int64) * time.Second
 	if hold.Valid && hold.String != "" {
 		var h identity.Hold
 		if json.Unmarshal([]byte(hold.String), &h) == nil {
@@ -203,6 +206,14 @@ func nullID(id int64) any {
 	return id
 }
 
+// nullSeconds stores a duration as whole seconds, NULL when zero.
+func nullSeconds(d time.Duration) any {
+	if d <= 0 {
+		return nil
+	}
+	return int64(d / time.Second)
+}
+
 func (d *DB) CreateMailbox(ctx context.Context, m identity.Mailbox) (identity.Mailbox, error) {
 	if m.ID == uuid.Nil {
 		m.ID = uuid.New()
@@ -227,8 +238,8 @@ func (d *DB) CreateMailbox(ctx context.Context, m identity.Mailbox) (identity.Ma
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO mailboxes (uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
-			bin(m.ID), nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, now, now)
+		_, err = tx.ExecContext(ctx, "INSERT INTO mailboxes (uuid, storage_id, state, state_reason, state_since, soft_bytes, hard_bytes, soft_messages, hard_messages, hold, released, backup_interval, backup_retention, backup_disabled, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)",
+			bin(m.ID), nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, nullSeconds(m.Backup.Interval), nullSeconds(m.Backup.Retention), m.Backup.Disabled, now, now)
 		return err
 	})
 	if err != nil {
@@ -274,8 +285,8 @@ func (d *DB) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*identity.
 		if m.State != prev.State {
 			m.StateSince = m.Updated
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE mailboxes SET storage_id = ?, state = ?, state_reason = ?, state_since = ?, soft_bytes = ?, hard_bytes = ?, soft_messages = ?, hard_messages = ?, hold = ?, released = ?, updated = ? WHERE id = ?",
-			nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, holdJSON(m.Hold), nullTime(m.Released), m.Updated, rid)
+		_, err = tx.ExecContext(ctx, "UPDATE mailboxes SET storage_id = ?, state = ?, state_reason = ?, state_since = ?, soft_bytes = ?, hard_bytes = ?, soft_messages = ?, hard_messages = ?, hold = ?, released = ?, backup_interval = ?, backup_retention = ?, backup_disabled = ?, updated = ? WHERE id = ?",
+			nullID(m.StorageID), m.State, m.StateReason, m.StateSince, m.Quota.SoftBytes, m.Quota.HardBytes, m.Quota.SoftMessages, m.Quota.HardMessages, holdJSON(m.Hold), nullTime(m.Released), nullSeconds(m.Backup.Interval), nullSeconds(m.Backup.Retention), m.Backup.Disabled, m.Updated, rid)
 		if err != nil {
 			return err
 		}

@@ -1,10 +1,6 @@
 package main
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,57 +33,6 @@ func TestResolvePrecedence(t *testing.T) {
 	_ = os.WriteFile(file, []byte("url: [broken"), 0o600)
 	if _, err := resolve("", "", noEnv, file); err == nil {
 		t.Fatal("broken yaml accepted")
-	}
-}
-
-func TestPackMaildir(t *testing.T) {
-	dir := t.TempDir()
-	for _, d := range []string{"cur", "new", "tmp", ".Sent/cur"} {
-		_ = os.MkdirAll(filepath.Join(dir, d), 0o700)
-	}
-	_ = os.WriteFile(filepath.Join(dir, "cur", "1.host:2,S"), []byte("From: a\r\n\r\nx\r\n"), 0o600)
-	_ = os.WriteFile(filepath.Join(dir, ".Sent", "cur", "2.host:2,S"), []byte("From: b\r\n\r\ny\r\n"), 0o600)
-	_ = os.Symlink(filepath.Join(dir, "cur", "1.host:2,S"), filepath.Join(dir, "cur", "link"))
-	var buf bytes.Buffer
-	if err := packMaildir(dir, &buf); err != nil {
-		t.Fatal(err)
-	}
-	gz, err := gzip.NewReader(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := tar.NewReader(gz)
-	files := map[string]string{}
-	var dirs []string
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if h.Typeflag == tar.TypeDir {
-			dirs = append(dirs, h.Name)
-			continue
-		}
-		b, _ := io.ReadAll(tr)
-		files[h.Name] = string(b)
-	}
-	if files["maildir/cur/1.host:2,S"] != "From: a\r\n\r\nx\r\n" || files["maildir/.Sent/cur/2.host:2,S"] == "" {
-		t.Fatalf("files: %v", files)
-	}
-	if _, ok := files["maildir/cur/link"]; ok {
-		t.Fatal("symlink included")
-	}
-	if len(dirs) != 6 || dirs[0] != "maildir/" {
-		t.Fatalf("dirs: %v", dirs)
-	}
-	if err := packMaildir(filepath.Join(dir, "cur", "1.host:2,S"), io.Discard); err == nil {
-		t.Fatal("file accepted as maildir")
-	}
-	if !isGzipName("a.tar.gz") || isGzipName("a.tar") {
-		t.Fatal("isGzipName")
 	}
 }
 

@@ -344,38 +344,86 @@ func (c *Client) ListHolds(ctx context.Context) ([]Mailbox, error) {
 	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/holds", nil, nil, "", &out)
 }
 
-// ScheduleExport asks a worker to export the mailbox as a Maildir archive.
-func (c *Client) ScheduleExport(ctx context.Context, id string, gzip bool) (ExportScheduled, error) {
-	var out ExportScheduled
-	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/export", nil, map[string]bool{"gzip": gzip}, "", &out)
+// ---- backups ----
+
+// BackupStatus returns the platform-wide backup summary and policy.
+func (c *Client) BackupStatus(ctx context.Context) (BackupStatus, error) {
+	var out BackupStatus
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/backups", nil, nil, "", &out)
 }
 
-// ImportMailbox uploads a Maildir archive (tar or tar.gz) into the mailbox.
-func (c *Client) ImportMailbox(ctx context.Context, id string, archive io.Reader, gzipped bool) (ImportSummary, error) {
-	ct := "application/x-tar"
-	if gzipped {
-		ct = "application/gzip"
+// MailboxBackups returns a mailbox's backup state, settings, policy and runs.
+func (c *Client) MailboxBackups(ctx context.Context, id string) (MailboxBackups, error) {
+	var out MailboxBackups
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups", nil, nil, "", &out)
+}
+
+// RunBackup asks the backup nodes to back the mailbox up now.
+func (c *Client) RunBackup(ctx context.Context, id string, full bool) (BackupScheduled, error) {
+	var out BackupScheduled
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups", nil, map[string]bool{"full": full}, "", &out)
+}
+
+// GetBackupRun returns one run.
+func (c *Client) GetBackupRun(ctx context.Context, id, run string) (BackupRun, error) {
+	var out BackupRun
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups/"+pathEscape(run), nil, nil, "", &out)
+}
+
+// RestoreBackup files a job restoring the run into a new mailbox.
+func (c *Client) RestoreBackup(ctx context.Context, id, run string) (BackupJob, error) {
+	var out BackupJob
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups/"+pathEscape(run)+"/restore", nil, struct{}{}, "", &out)
+}
+
+// RestoreBackupMessage files a job restoring one message of the run into
+// the mailbox given by into (empty: the source mailbox).
+func (c *Client) RestoreBackupMessage(ctx context.Context, id, run, message, into string) (BackupJob, error) {
+	var out BackupJob
+	body := map[string]string{"message": message}
+	if into != "" {
+		body["into"] = into
 	}
-	var out ImportSummary
-	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/import", nil, archive, ct, &out)
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups/"+pathEscape(run)+"/restore-message", nil, body, "", &out)
 }
 
-// ListExports lists finished exports, optionally for one mailbox.
-func (c *Client) ListExports(ctx context.Context, mailbox string) ([]ExportItem, error) {
+// ExportBackup files a job rendering the run as a Maildir archive.
+func (c *Client) ExportBackup(ctx context.Context, id, run string) (BackupJob, error) {
+	var out BackupJob
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups/"+pathEscape(run)+"/export", nil, struct{}{}, "", &out)
+}
+
+// VerifyBackups files a verification job for the mailbox.
+func (c *Client) VerifyBackups(ctx context.Context, id string) (BackupJob, error) {
+	var out BackupJob
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups/verify", nil, struct{}{}, "", &out)
+}
+
+// ForgetBackups files a job deleting every backup of the mailbox.
+func (c *Client) ForgetBackups(ctx context.Context, id string) (BackupJob, error) {
+	var out BackupJob
+	return out, c.do(ctx, http.MethodDelete, "/v1/admin/mailboxes/"+pathEscape(id)+"/backups", nil, nil, "", &out)
+}
+
+// ListBackupJobs lists jobs, optionally for one mailbox or kind.
+func (c *Client) ListBackupJobs(ctx context.Context, mailbox, kind string) ([]BackupJob, error) {
 	q := url.Values{}
 	if mailbox != "" {
 		q.Set("mailbox", mailbox)
 	}
-	var out struct {
-		Items []ExportItem `json:"items"`
+	if kind != "" {
+		q.Set("kind", kind)
 	}
-	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/exports", q, nil, "", &out)
+	var out struct {
+		Items []BackupJob `json:"items"`
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/backups/jobs", q, nil, "", &out)
 }
 
-// DownloadExport streams an export archive. The caller closes the reader.
-func (c *Client) DownloadExport(ctx context.Context, name string) (io.ReadCloser, error) {
-	var rc io.ReadCloser
-	return rc, c.do(ctx, http.MethodGet, "/v1/admin/exports/"+pathEscape(name), nil, nil, "", &rc)
+// GetBackupJob returns one job.
+func (c *Client) GetBackupJob(ctx context.Context, id string) (BackupJob, error) {
+	var out BackupJob
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/backups/jobs/"+pathEscape(id), nil, nil, "", &out)
 }
 
 // ---- accounts ----

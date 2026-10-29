@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end test of a built kittiwake binary against a real backend:
 # bootstrap an admin, create domain/mailbox/account through the admin API,
-# deliver over LMTP, read through JMAP, IMAP and POP3, export the mailbox.
+# deliver over LMTP, read through JMAP, IMAP and POP3, back the mailbox up and export it.
 #
 #   scripts/e2e.sh [config]      (default examples/lab.yaml)
 #   E2E_ATTACH=1 scripts/e2e.sh /etc/kittiwake/kittiwake.yaml
@@ -99,8 +99,8 @@ m = imaplib.IMAP4(*IMAP); m.login(USER, PASS); assert m.select("INBOX")[1][0] ==
 typ, d = m.uid("fetch", "1", "(BODY.PEEK[])"); assert d[0][1] == raw, "IMAP BODY[] differs from the JMAP rendering"
 m.uid("store", "1", "+FLAGS", "(\\Seen)"); m.logout(); print("IMAP: select, fetch (same rendering as JMAP), store")
 p = poplib.POP3(*POP3); p.user(USER); p.pass_(PASS); assert p.stat()[0] == 2; p.quit(); print("POP3: stat")
-st, exp = req("POST", adminbase + "/v1/admin/mailboxes/%s/export" % MB, {"gzip": True}, token=TOKEN)
-print("admin: export scheduled task", exp["task_id"][:8])
+st, bk = req("POST", adminbase + "/v1/admin/mailboxes/%s/backups" % MB, {}, token=TOKEN)
+print("admin: backup scheduled task", bk["task_id"][:8])
 st, info = req("GET", adminbase + "/v1/admin/mailboxes/%s" % MB, token=TOKEN)
 assert info["usage"]["messages"] == 2, info["usage"]
 import time; time.sleep(2.5)  # audit records are batched and flushed every second
@@ -108,7 +108,11 @@ st, aud = req("GET", adminbase + "/v1/admin/audit?mailbox=%s&limit=200" % MB, to
 acts = sorted({a["action"] for a in aud["items"]}); print("audit actions:", acts)
 assert "deliver" in acts and "login" in acts
 PY
-echo "== waiting for export task"
-for i in $(seq 1 60); do N=$(api "http://$ADMIN/v1/admin/exports?mailbox=$MB" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))'); [ "$N" -ge 1 ] && break; sleep 1; done
-api "http://$ADMIN/v1/admin/exports?mailbox=$MB" | python3 -c 'import sys,json;i=json.load(sys.stdin)["items"][0];print("export:",i["name"],i["bytes"],"bytes, messages",i["result"]["messages"])'
+echo "== waiting for the backup run"
+for i in $(seq 1 60); do N=$(api "http://$ADMIN/v1/admin/mailboxes/$MB/backups" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["runs"]))'); [ "$N" -ge 1 ] && break; sleep 1; done
+RUN=$(api "http://$ADMIN/v1/admin/mailboxes/$MB/backups" | python3 -c 'import sys,json;r=json.load(sys.stdin)["runs"][0];print("backup:",r["id"],r["messages"],"messages,",r["bytes"],"bytes,",len(r["packs"]),"packs",file=sys.stderr);print(r["id"])')
+JOB=$(api -X POST "http://$ADMIN/v1/admin/mailboxes/$MB/backups/$RUN/export" -d '{}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+echo "== waiting for the export job"
+for i in $(seq 1 60); do S=$(api "http://$ADMIN/v1/admin/backups/jobs/$JOB" | python3 -c 'import sys,json;print(json.load(sys.stdin)["state"])'); [ "$S" = done ] || [ "$S" = failed ] && break; sleep 1; done
+api "http://$ADMIN/v1/admin/backups/jobs/$JOB" | python3 -c 'import sys,json;j=json.load(sys.stdin);assert j["state"]=="done", j;print("export:",j["object_key"],j["bytes"],"bytes, messages",j["messages"])'
 echo "== E2E OK (domain $DOMAIN left in place)"

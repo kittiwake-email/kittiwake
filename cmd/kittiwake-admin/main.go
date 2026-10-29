@@ -58,7 +58,8 @@ flags:
 commands:
   status                              version and time of the admin API
   domain    create|list|get|enable|disable|delete
-  mailbox   create|list|inspect|set|suspend|disable|activate|delete|recalc|purge|hold|release|holds|export|exports|download|import
+  mailbox   create|list|inspect|set|suspend|disable|activate|delete|recalc|purge|hold|release|holds
+  backup    status|show|run|restore|restore-message|export|verify|forget|jobs|job
   account   create|list|get|set|delete|password (set|list|expire|remove)|totp-disable|sessions|revoke-session|token|tokens
   alias     create|list|get|set|delete
   audit     query the audit log
@@ -147,6 +148,8 @@ func run(args []string) error {
 		return app.node(sub)
 	case "keys":
 		return app.keys(sub)
+	case "backup":
+		return app.backup(sub)
 	case "identity":
 		return app.identity(sub)
 	case "openapi":

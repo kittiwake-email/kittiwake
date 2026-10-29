@@ -193,6 +193,8 @@ func runServe(args []string) error {
 				cfg.Listen.Socketmap.Management = ""
 			case "worker":
 				cfg.Listen.Worker.Management = ""
+			case "backup":
+				cfg.Listen.Backup.Management = ""
 			}
 		}
 	}

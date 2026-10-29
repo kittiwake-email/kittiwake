@@ -24,11 +24,11 @@ import (
 	"github.com/google/uuid"
 
 	"kittiwake/api"
+	"kittiwake/backup"
 	"kittiwake/proto/httpx"
 	"kittiwake/service/actor"
 	"kittiwake/service/admin"
 	"kittiwake/service/auth"
-	"kittiwake/service/export"
 	"kittiwake/service/submit"
 	"kittiwake/store/audit"
 	"kittiwake/store/identity"
@@ -54,9 +54,9 @@ type Config struct {
 	// Identity is optional; when set, /v1/me includes the password list and
 	// TOTP state (the auth service does not expose account records).
 	Identity *identity.Store
-	// Export and ExportDir enable mailbox export (worker task) and import.
-	Export    *export.Service
-	ExportDir string
+	// Backup serves backup state and files backup jobs (the backup mode
+	// executes them); nil disables the backup endpoints.
+	Backup *backup.Service
 	// Submit is optional; it backs PATCH /v1/me (display name).
 	Submit *submit.Service
 }
@@ -197,10 +197,17 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"DELETE /v1/admin/mailboxes/{id}", s.mailboxDelete},
 		route{"POST /v1/admin/mailboxes/{id}/recalculate", s.mailboxRecalculate},
 		route{"POST /v1/admin/mailboxes/{id}/purge", s.mailboxPurge},
-		route{"POST /v1/admin/mailboxes/{id}/export", s.mailboxExport},
-		route{"POST /v1/admin/mailboxes/{id}/import", s.mailboxImport},
-		route{"GET /v1/admin/exports", s.exportList},
-		route{"GET /v1/admin/exports/{name}", s.exportDownload},
+		route{"GET /v1/admin/backups", s.backupSummary},
+		route{"GET /v1/admin/backups/jobs", s.backupJobs},
+		route{"GET /v1/admin/backups/jobs/{jid}", s.backupJob},
+		route{"GET /v1/admin/mailboxes/{id}/backups", s.mailboxBackups},
+		route{"POST /v1/admin/mailboxes/{id}/backups", s.mailboxBackupRun},
+		route{"DELETE /v1/admin/mailboxes/{id}/backups", s.mailboxBackupForget},
+		route{"POST /v1/admin/mailboxes/{id}/backups/verify", s.mailboxBackupVerify},
+		route{"GET /v1/admin/mailboxes/{id}/backups/{run}", s.mailboxBackupGet},
+		route{"POST /v1/admin/mailboxes/{id}/backups/{run}/restore", s.mailboxBackupRestore},
+		route{"POST /v1/admin/mailboxes/{id}/backups/{run}/restore-message", s.mailboxBackupRestoreMessage},
+		route{"POST /v1/admin/mailboxes/{id}/backups/{run}/export", s.mailboxBackupExport},
 		route{"POST /v1/admin/mailboxes/{id}/hold", s.mailboxHold},
 		route{"DELETE /v1/admin/mailboxes/{id}/hold", s.mailboxRelease},
 		route{"GET /v1/admin/holds", s.holdList},
@@ -334,10 +341,16 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, identity.ErrInvalid), errors.Is(err, identity.ErrDomainUnknown), errors.Is(err, errBadRequest):
 		status = http.StatusBadRequest
-	case errors.Is(err, admin.ErrForbidden), errors.Is(err, export.ErrForbidden):
+	case errors.Is(err, admin.ErrForbidden), errors.Is(err, backup.ErrForbidden):
 		status = http.StatusForbidden
-	case errors.Is(err, export.ErrNotFound):
+	case errors.Is(err, backup.ErrNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, backup.ErrInvalid):
+		status = http.StatusBadRequest
+	case errors.Is(err, backup.ErrDisabled):
+		status = http.StatusConflict
+	case errors.Is(err, backup.ErrNotConfigured):
+		status = http.StatusNotImplemented
 	case errors.Is(err, auth.ErrTOTPInvalid), errors.Is(err, auth.ErrScope):
 		status = http.StatusBadRequest
 	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired), errors.Is(err, auth.ErrTOTPRequired), errors.Is(err, auth.ErrSessionRevoked):
@@ -856,6 +869,9 @@ type mailboxRequest struct {
 	// StorageID pins the Ceph storage on create (default: random among
 	// storage entries open for placement). Not changeable afterwards.
 	StorageID int64 `json:"storage_id,omitempty"`
+	// Backup settings: interval and retention as durations ("24h"), or
+	// disabled; unset fields inherit (domain settings, then defaults).
+	Backup *backupSettingsRequest `json:"backup,omitempty"`
 }
 
 func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
@@ -873,11 +889,18 @@ func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Quota != nil {
 		m.Quota = *req.Quota
 	}
+	if req.Backup != nil {
+		if err := s.applyBackupSettings(&m.Backup, req.Backup); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	out, err := s.admin.CreateMailbox(r.Context(), m)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	s.scheduleBackup(r.Context(), out)
 	httpx.WriteJSON(w, http.StatusCreated, out)
 }
 
@@ -928,7 +951,17 @@ func (s *Server) mailboxPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Quota == nil && req.State == nil {
+	if req.Backup != nil {
+		out, err = s.admin.UpdateMailbox(r.Context(), id, func(m *identity.Mailbox) error {
+			return s.applyBackupSettings(&m.Backup, req.Backup)
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.scheduleBackup(r.Context(), out)
+	}
+	if req.Quota == nil && req.State == nil && req.Backup == nil {
 		if out, err = s.admin.GetMailbox(r.Context(), id); err != nil {
 			s.fail(w, r, err)
 			return
