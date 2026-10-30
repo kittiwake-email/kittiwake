@@ -42,8 +42,11 @@ const (
 
 // Record is one audit entry.
 type Record struct {
-	Time      time.Time `json:"time"`
-	Mailbox   uuid.UUID `json:"mailbox,omitempty"`
+	Time    time.Time `json:"time"`
+	Mailbox uuid.UUID `json:"mailbox,omitempty"`
+	// Namespace of the target (platform records: the namespace acted
+	// upon, empty for platform-level actions).
+	Namespace string    `json:"namespace,omitempty"`
 	Account   string    `json:"account,omitempty"` // username
 	AccountID uuid.UUID `json:"account_id,omitempty"`
 	TokenID   string    `json:"token_id,omitempty"`
@@ -254,13 +257,15 @@ func (s *Store) Write(ctx context.Context, r Record) error {
 
 // Query describes an audit query.
 type Query struct {
-	Mailbox  uuid.UUID // zero = admin log
-	From, To time.Time // inclusive day range; zero To = From's day, zero From = today
-	Account  string
-	Action   string
-	ClientIP string
-	After    string // cursor: "<day>/<key>"
-	Max      int
+	Mailbox uuid.UUID // zero = admin log
+	// Namespace restricts the admin log to records of one namespace.
+	Namespace string
+	From, To  time.Time // inclusive day range; zero To = From's day, zero From = today
+	Account   string
+	Action    string
+	ClientIP  string
+	After     string // cursor: "<day>/<key>"
+	Max       int
 }
 
 // Read returns matching records, newest day last, with a cursor for more.
@@ -280,6 +285,9 @@ func (s *Store) Read(ctx context.Context, q Query) (records []Record, next strin
 
 // Matches reports whether r passes the query's record filters.
 func (q Query) Matches(r Record) bool {
+	if q.Namespace != "" && r.Namespace != q.Namespace {
+		return false
+	}
 	if q.Account != "" && !strings.EqualFold(r.Account, q.Account) && !strings.EqualFold(r.Admin, q.Account) {
 		return false
 	}

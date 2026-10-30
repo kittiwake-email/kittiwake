@@ -90,9 +90,9 @@ func (s *Service) authorize(ctx context.Context, mb uuid.UUID, role string, writ
 		return identity.Mailbox{}, err
 	}
 	switch {
-	case a.IsAdmin():
+	case a.Administers(m.Namespace):
 		// Support access: allowed, audited with the admin as actor.
-	case a.IsAdminReader() && !write:
+	case a.Reads(m.Namespace) && !write:
 		// Read-only admin: inspection only.
 	case a.MailboxID == mb && a.HasRole(role):
 		if m.Hold != nil && m.Hold.Sealed {

@@ -48,7 +48,7 @@ func TestPlacementUsesFreshHeadroom(t *testing.T) {
 	}
 	counts := map[int64]int{}
 	for i := 0; i < 2000; i++ {
-		id, err := reg.Pick(ctx)
+		id, err := reg.Pick(ctx, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +62,7 @@ func TestPlacementUsesFreshHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 20; i++ {
-		id, err := reg.Pick(ctx)
+		id, err := reg.Pick(ctx, "")
 		if err != nil || id != second.ID {
 			t.Fatalf("reserve exclusion: %d %v", id, err)
 		}
@@ -71,7 +71,7 @@ func TestPlacementUsesFreshHeadroom(t *testing.T) {
 	if err := reg.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.Pick(ctx); !errors.Is(err, storage.ErrNoPlacement) {
+	if _, err := reg.Pick(ctx, ""); !errors.Is(err, storage.ErrNoPlacement) {
 		t.Fatalf("unknown capacity: %v", err)
 	}
 	if _, err := reg.PoolOf(ctx, first.ID, storage.RoleMessages); err != nil {
@@ -82,7 +82,7 @@ func TestPlacementUsesFreshHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(3 * time.Minute)
-	if _, err := reg.Pick(ctx); !errors.Is(err, storage.ErrNoPlacement) {
+	if _, err := reg.Pick(ctx, ""); !errors.Is(err, storage.ErrNoPlacement) {
 		t.Fatalf("stale capacity: %v", err)
 	}
 }

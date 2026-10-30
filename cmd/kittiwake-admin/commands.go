@@ -12,10 +12,118 @@ import (
 	"kittiwake/client/admin"
 )
 
+// ---- namespace ----
+
+func (a *cli) namespace(args []string) error {
+	const u = "namespace create <name> [--disabled] | list | get <name> | set <name> --setting key=value... | enable <name> | disable <name> | delete <name>"
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
+		return nil
+	}
+	printNamespace := func(ns admin.Namespace) {
+		fmt.Printf("name:     %s\nenabled:  %v\ncreated:  %s\n", ns.Name, ns.Enabled, fmtTime(ns.Created))
+		for k, v := range ns.Settings {
+			fmt.Printf("setting:  %s=%s\n", k, v)
+		}
+	}
+	switch args[0] {
+	case "create":
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("namespace create")
+		disabled := fs.Bool("disabled", false, "create disabled")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		req := admin.NamespaceRequest{Name: pos[0]}
+		if *disabled {
+			req.Enabled = boolPtr(false)
+		}
+		ns, err := a.c.CreateNamespace(a.ctx, req)
+		if err != nil {
+			return err
+		}
+		return emit(ns, func() { printNamespace(ns) })
+	case "list":
+		names, err := a.c.ListNamespacesAll(a.ctx)
+		if err != nil {
+			return err
+		}
+		if names == nil {
+			names = []string{}
+		}
+		return emit(names, func() {
+			for _, n := range names {
+				fmt.Println(n)
+			}
+		})
+	case "get", "enable", "disable", "delete":
+		pos, _, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		switch args[0] {
+		case "get":
+			ns, err := a.c.GetNamespace(a.ctx, pos[0])
+			if err != nil {
+				return err
+			}
+			return emit(ns, func() { printNamespace(ns) })
+		case "enable", "disable":
+			ns, err := a.c.UpdateNamespace(a.ctx, pos[0], admin.NamespaceRequest{Enabled: boolPtr(args[0] == "enable")})
+			if err != nil {
+				return err
+			}
+			return emit(ns, func() { printNamespace(ns) })
+		default:
+			if err := a.c.DeleteNamespace(a.ctx, pos[0]); err != nil {
+				return err
+			}
+			return emit(map[string]string{"deleted": pos[0]}, func() { fmt.Println("deleted", pos[0]) })
+		}
+	case "set":
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		fs := newFlagSet("namespace set")
+		var settings stringList
+		fs.Var(&settings, "setting", "key=value (repeatable; replaces all settings)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if len(settings) == 0 {
+			return errors.New("at least one --setting key=value is required")
+		}
+		req := admin.NamespaceRequest{Settings: map[string]string{}}
+		for _, kv := range settings {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok || k == "" {
+				return fmt.Errorf("--setting %q: want key=value", kv)
+			}
+			req.Settings[k] = v
+		}
+		ns, err := a.c.UpdateNamespace(a.ctx, pos[0], req)
+		if err != nil {
+			return err
+		}
+		return emit(ns, func() { printNamespace(ns) })
+	}
+	return fmt.Errorf("unknown namespace subcommand %q\nusage: kittiwake-admin %s", args[0], u)
+}
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
 // ---- domain ----
 
 func (a *cli) domain(args []string) error {
-	const u = "domain create <name> [--disabled] | list | get <name> | enable <name> | disable <name> | delete <name>"
+	const u = "domain create <name> [--namespace ns] [--disabled] | list [--namespace ns] | get <name> | enable <name> | disable <name> | delete <name>"
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
@@ -28,10 +136,11 @@ func (a *cli) domain(args []string) error {
 		}
 		fs := newFlagSet("domain create")
 		disabled := fs.Bool("disabled", false, "create disabled")
+		namespace := fs.String("namespace", "", "namespace the domain belongs to (default: the token's own, else default)")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		req := admin.DomainRequest{Name: pos[0]}
+		req := admin.DomainRequest{Name: pos[0], Namespace: *namespace}
 		if *disabled {
 			req.Enabled = boolPtr(false)
 		}
@@ -41,7 +150,12 @@ func (a *cli) domain(args []string) error {
 		}
 		return emit(d, nil)
 	case "list":
-		names, err := a.c.ListDomainsAll(a.ctx)
+		fs := newFlagSet("domain list")
+		namespace := fs.String("namespace", "", "only this namespace")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		names, err := a.c.ListDomainsAll(a.ctx, *namespace)
 		if err != nil {
 			return err
 		}
@@ -130,11 +244,12 @@ func (a *cli) mailbox(args []string) error {
 	case "create":
 		fs := newFlagSet("mailbox create")
 		sb, hb, sm, hm := quotaFlags(fs)
-		storageID := fs.Int64("storage", 0, "pin the Ceph storage by registry id (default: weighted by fresh capacity headroom among eligible storage entries)")
+		storageID := fs.Int64("storage", 0, "pin the Ceph storage by registry id (default: weighted by fresh capacity headroom among the namespace's eligible storage entries)")
+		namespace := fs.String("namespace", "", "namespace the mailbox belongs to (default: the token's own, else default)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm), StorageID: *storageID}
+		req := admin.MailboxRequest{Quota: quotaFrom(*sb, *hb, *sm, *hm), StorageID: *storageID, Namespace: *namespace}
 		m, err := a.c.CreateMailbox(a.ctx, req)
 		if err != nil {
 			return err
@@ -143,15 +258,16 @@ func (a *cli) mailbox(args []string) error {
 	case "list":
 		fs := newFlagSet("mailbox list")
 		orphaned := fs.Bool("orphaned", false, "only mailboxes without an account (after account/domain removal; attach a new account to keep the data)")
+		namespace := fs.String("namespace", "", "only this namespace")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		var items []admin.MailboxListItem
 		var err error
 		if *orphaned {
-			items, err = a.c.ListOrphanedMailboxes(a.ctx)
+			items, err = a.c.ListOrphanedMailboxes(a.ctx, *namespace)
 		} else {
-			items, err = a.c.ListMailboxes(a.ctx)
+			items, err = a.c.ListMailboxes(a.ctx, *namespace)
 		}
 		if err != nil {
 			return err
@@ -166,12 +282,17 @@ func (a *cli) mailbox(args []string) error {
 				if m.StateReason != "" {
 					st += " (" + m.StateReason + ")"
 				}
-				rows = append(rows, []string{m.ID, strconv.FormatInt(m.StorageID, 10), st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
+				rows = append(rows, []string{m.ID, m.Namespace, strconv.FormatInt(m.StorageID, 10), st, fmt.Sprint(m.OnHold), strings.Join(m.Accounts, ",")})
 			}
-			table([]string{"MAILBOX", "STORAGE", "STATE", "HOLD", "ACCOUNTS"}, rows)
+			table([]string{"MAILBOX", "NAMESPACE", "STORAGE", "STATE", "HOLD", "ACCOUNTS"}, rows)
 		})
 	case "holds":
-		items, err := a.c.ListHolds(a.ctx)
+		fs := newFlagSet("mailbox holds")
+		namespace := fs.String("namespace", "", "only this namespace")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		items, err := a.c.ListHolds(a.ctx, *namespace)
 		if err != nil {
 			return err
 		}
@@ -371,7 +492,7 @@ func (a *cli) account(args []string) error {
 		domains := []string{*domain}
 		if *domain == "" {
 			var err error
-			if domains, err = a.c.ListDomainsAll(a.ctx); err != nil {
+			if domains, err = a.c.ListDomainsAll(a.ctx, ""); err != nil {
 				return err
 			}
 		}
@@ -880,6 +1001,7 @@ func (a *cli) token(args []string) error {
 		expires := fs.String("expires", "", "expiry: YYYY-MM-DD or RFC3339 (required)")
 		comment := fs.String("comment", "", "purpose of the token (required)")
 		readOnly := fs.Bool("read-only", false, "mint a read-only token (role admin-ro: GET-only)")
+		namespace := fs.String("namespace", "", "bind the token to one namespace (a tenant admin); default: the whole platform")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -890,12 +1012,16 @@ func (a *cli) token(args []string) error {
 		if err != nil {
 			return fmt.Errorf("--expires: %w", err)
 		}
-		tk, err := a.c.CreateAdminToken(a.ctx, admin.AdminTokenRequest{ReadOnly: *readOnly, ExpiresAt: exp, Comment: *comment})
+		tk, err := a.c.CreateAdminToken(a.ctx, admin.AdminTokenRequest{ReadOnly: *readOnly, Namespace: *namespace, ExpiresAt: exp, Comment: *comment})
 		if err != nil {
 			return err
 		}
 		return emit(tk, func() {
-			fmt.Printf("token id:     %s (%s, expires %s)\n", tk.Token.ID, strings.Join(tk.Token.Roles, ","), tk.Token.ExpiresAt.Format(time.RFC3339))
+			scope := "platform"
+			if tk.Token.Namespace != "" {
+				scope = "namespace " + tk.Token.Namespace
+			}
+			fmt.Printf("token id:     %s (%s, %s, expires %s)\n", tk.Token.ID, strings.Join(tk.Token.Roles, ","), scope, tk.Token.ExpiresAt.Format(time.RFC3339))
 			fmt.Printf("token secret: %s\n", tk.Secret)
 			fmt.Println("The secret is shown once.")
 		})
@@ -964,14 +1090,15 @@ func (a *cli) storage(args []string) error {
 		return req
 	}
 	printStorage := func(c admin.Storage) {
-		fmt.Printf("id:        %d\nname:      %s\nfsid:      %s\nmon_host:  %s\nuser:      %s\npools:     %s, %s, %s\nplacement: %v\n",
-			c.ID, c.Name, c.FSID, c.MonHost, c.User, c.Pools.Messages, c.Pools.Attachments, c.Pools.Index, c.Placement)
+		fmt.Printf("id:        %d\nname:      %s\nnamespace: %s\nfsid:      %s\nmon_host:  %s\nuser:      %s\npools:     %s, %s, %s\nplacement: %v\n",
+			c.ID, c.Name, c.Namespace, c.FSID, c.MonHost, c.User, c.Pools.Messages, c.Pools.Attachments, c.Pools.Index, c.Placement)
 	}
 	switch args[0] {
 	case "add":
 		fs := newFlagSet("storage add")
 		name, mon, user, pools, keyStdin, keyring := storageFlags(fs)
 		noPlacement := fs.Bool("no-placement", false, "register without accepting new mailboxes")
+		namespace := fs.String("namespace", "", "namespace that owns the storage (default: default)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -983,6 +1110,7 @@ func (a *cli) storage(args []string) error {
 			return err
 		}
 		req := buildReq(*name, *mon, *user, *pools, key)
+		req.Namespace = *namespace
 		if req.Pools == nil {
 			return errors.New("--pools needs exactly three names: messages,attachments,index")
 		}
@@ -1005,9 +1133,9 @@ func (a *cli) storage(args []string) error {
 		return emit(list, func() {
 			var rows [][]string
 			for _, c := range list {
-				rows = append(rows, []string{strconv.FormatInt(c.ID, 10), c.Name, c.FSID, c.MonHost, fmt.Sprint(c.Placement)})
+				rows = append(rows, []string{strconv.FormatInt(c.ID, 10), c.Name, c.Namespace, c.FSID, c.MonHost, fmt.Sprint(c.Placement)})
 			}
-			table([]string{"ID", "NAME", "FSID", "MON_HOST", "PLACEMENT"}, rows)
+			table([]string{"ID", "NAME", "NAMESPACE", "FSID", "MON_HOST", "PLACEMENT"}, rows)
 		})
 	case "get", "set", "enable", "disable", "remove":
 		if len(args) < 2 {
@@ -1176,9 +1304,13 @@ func (a *cli) node(args []string) error {
 			if !n.Alive {
 				state = "dead"
 			}
-			rows = append(rows, []string{n.Mode, n.Address, n.Host, n.Version, state, fmtTime(n.Started), fmtTime(n.LastSeen)})
+			nss := "all"
+			if len(n.Namespaces) > 0 {
+				nss = strings.Join(n.Namespaces, ",")
+			}
+			rows = append(rows, []string{n.Mode, n.Address, n.Host, n.Version, nss, state, fmtTime(n.Started), fmtTime(n.LastSeen)})
 		}
-		table([]string{"MODE", "ADDRESS", "HOST", "VERSION", "STATE", "STARTED", "LAST SEEN"}, rows)
+		table([]string{"MODE", "ADDRESS", "HOST", "VERSION", "NAMESPACES", "STATE", "STARTED", "LAST SEEN"}, rows)
 	})
 }
 

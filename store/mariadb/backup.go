@@ -57,14 +57,32 @@ func (d *DB) BackupState(ctx context.Context, mb uuid.UUID) (backup.State, error
 	return s, nil
 }
 
+// catalogNamespaceID resolves the namespace of a catalog row: the name
+// recorded on it, else the mailbox's, else the default.
+func (d *DB) catalogNamespaceID(ctx context.Context, q querier, namespace string, mb uuid.UUID) (int64, error) {
+	if strings.TrimSpace(namespace) != "" {
+		return d.namespaceID(ctx, q, namespace)
+	}
+	var id int64
+	err := q.QueryRowContext(ctx, "SELECT namespace_id FROM mailboxes WHERE uuid = ?", bin(mb)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 1, nil
+	}
+	return id, err
+}
+
 func (d *DB) FinishRun(ctx context.Context, run backup.Run, every time.Duration, due time.Time) error {
 	packs, _ := json.Marshal(run.Packs)
 	return d.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO backup_runs (mailbox, id, started, finished, modseq, fuzzy, full, manifest_key, packs, bytes, messages, new_messages, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE finished=VALUES(finished)",
-			bin(run.Mailbox), run.ID, run.Started.UTC(), run.Finished.UTC(), run.ModSeq, run.Fuzzy, run.Full, run.ManifestKey, string(packs), run.Bytes, run.Messages, run.NewMessages, nullTimeValue(run.Expires)); err != nil {
+		nsID, err := d.catalogNamespaceID(ctx, tx, run.Namespace, run.Mailbox)
+		if err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE mailboxes SET backup_run=?, backup_modseq=?, backup_at=?, backup_status='ok', backup_error='', backup_full=0, backup_every=?, backup_due=? WHERE uuid=?",
+		if _, err := tx.ExecContext(ctx, "INSERT INTO backup_runs (mailbox, namespace_id, id, started, finished, modseq, fuzzy, full, manifest_key, packs, bytes, messages, new_messages, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE finished=VALUES(finished)",
+			bin(run.Mailbox), nsID, run.ID, run.Started.UTC(), run.Finished.UTC(), run.ModSeq, run.Fuzzy, run.Full, run.ManifestKey, string(packs), run.Bytes, run.Messages, run.NewMessages, nullTimeValue(run.Expires)); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE mailboxes SET backup_run=?, backup_modseq=?, backup_at=?, backup_status='ok', backup_error='', backup_full=0, backup_every=?, backup_due=? WHERE uuid=?",
 			run.ID, run.ModSeq, run.Finished.UTC(), int64(every/time.Second), nullTimeValue(due), bin(run.Mailbox))
 		return err
 	})
@@ -90,14 +108,15 @@ func (d *DB) SetVerified(ctx context.Context, mb uuid.UUID, at time.Time, errTex
 	return err
 }
 
-const runCols = "mailbox, id, started, finished, modseq, fuzzy, full, manifest_key, packs, bytes, messages, new_messages, expires"
+const runCols = "r.mailbox, n.name, r.id, r.started, r.finished, r.modseq, r.fuzzy, r.full, r.manifest_key, r.packs, r.bytes, r.messages, r.new_messages, r.expires"
+const runFrom = " FROM backup_runs r JOIN namespaces n ON n.id = r.namespace_id "
 
 func scanRun(row interface{ Scan(...any) error }) (backup.Run, error) {
 	var r backup.Run
 	var mb []byte
 	var packs sql.NullString
 	var expires sql.NullTime
-	if err := row.Scan(&mb, &r.ID, &r.Started, &r.Finished, &r.ModSeq, &r.Fuzzy, &r.Full, &r.ManifestKey, &packs, &r.Bytes, &r.Messages, &r.NewMessages, &expires); err != nil {
+	if err := row.Scan(&mb, &r.Namespace, &r.ID, &r.Started, &r.Finished, &r.ModSeq, &r.Fuzzy, &r.Full, &r.ManifestKey, &packs, &r.Bytes, &r.Messages, &r.NewMessages, &expires); err != nil {
 		return r, err
 	}
 	r.Mailbox = toUUID(mb)
@@ -112,7 +131,7 @@ func scanRun(row interface{ Scan(...any) error }) (backup.Run, error) {
 }
 
 func (d *DB) GetRun(ctx context.Context, mb uuid.UUID, id string) (backup.Run, error) {
-	r, err := scanRun(d.r(ctx).QueryRowContext(ctx, "SELECT "+runCols+" FROM backup_runs WHERE mailbox=? AND id=?", bin(mb), id))
+	r, err := scanRun(d.r(ctx).QueryRowContext(ctx, "SELECT "+runCols+runFrom+"WHERE r.mailbox=? AND r.id=?", bin(mb), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, backup.ErrNotFound
 	}
@@ -140,7 +159,7 @@ func (d *DB) ListRuns(ctx context.Context, mb uuid.UUID, max int) ([]backup.Run,
 	if max <= 0 {
 		max = 100000
 	}
-	return d.queryRuns(ctx, "SELECT "+runCols+" FROM backup_runs WHERE mailbox=? ORDER BY id DESC LIMIT ?", bin(mb), max)
+	return d.queryRuns(ctx, "SELECT "+runCols+runFrom+"WHERE r.mailbox=? ORDER BY r.id DESC LIMIT ?", bin(mb), max)
 }
 
 func (d *DB) DeleteRun(ctx context.Context, mb uuid.UUID, id string) error {
@@ -148,11 +167,18 @@ func (d *DB) DeleteRun(ctx context.Context, mb uuid.UUID, id string) error {
 	return err
 }
 
-func (d *DB) ExpiredRuns(ctx context.Context, before time.Time, max int) ([]backup.Run, error) {
+func (d *DB) ExpiredRuns(ctx context.Context, namespace string, before time.Time, max int) ([]backup.Run, error) {
 	if max <= 0 {
 		max = 1000
 	}
-	return d.queryRuns(ctx, "SELECT "+runCols+" FROM backup_runs WHERE expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT ?", before.UTC(), max)
+	if namespace == "" {
+		return d.queryRuns(ctx, "SELECT "+runCols+runFrom+"WHERE r.expires IS NOT NULL AND r.expires<=? ORDER BY r.expires LIMIT ?", before.UTC(), max)
+	}
+	nsID, err := d.namespaceID(ctx, d.r(ctx), namespace)
+	if err != nil {
+		return nil, err
+	}
+	return d.queryRuns(ctx, "SELECT "+runCols+runFrom+"WHERE r.namespace_id=? AND r.expires IS NOT NULL AND r.expires<=? ORDER BY r.expires LIMIT ?", nsID, before.UTC(), max)
 }
 
 func (d *DB) RunMailboxes(ctx context.Context, fn func(uuid.UUID) error) error {
@@ -193,14 +219,14 @@ func (d *DB) HaveBlobs(ctx context.Context, names []string) (map[string]backup.B
 	for i, n := range names {
 		args[i] = n
 	}
-	rows, err := d.r(ctx).QueryContext(ctx, "SELECT name, size, sealed, created FROM backup_blobs WHERE name IN (?"+strings.Repeat(",?", len(names)-1)+")", args...)
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT b.name, n.name, b.size, b.sealed, b.created FROM backup_blobs b JOIN namespaces n ON n.id = b.namespace_id WHERE b.name IN (?"+strings.Repeat(",?", len(names)-1)+")", args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var b backup.Blob
-		if err := rows.Scan(&b.Name, &b.Size, &b.Sealed, &b.Created); err != nil {
+		if err := rows.Scan(&b.Name, &b.Namespace, &b.Size, &b.Sealed, &b.Created); err != nil {
 			return nil, err
 		}
 		out[b.Name] = b
@@ -210,7 +236,11 @@ func (d *DB) HaveBlobs(ctx context.Context, names []string) (map[string]backup.B
 
 func (d *DB) AddBlobs(ctx context.Context, blobs []backup.Blob) error {
 	for _, b := range blobs {
-		if _, err := d.exec(ctx, "INSERT IGNORE INTO backup_blobs (name, size, sealed, created) VALUES (?,?,?,?)", b.Name, b.Size, b.Sealed, b.Created.UTC()); err != nil {
+		nsID, err := d.catalogNamespaceID(ctx, d.sql, b.Namespace, uuid.Nil)
+		if err != nil {
+			return err
+		}
+		if _, err := d.exec(ctx, "INSERT IGNORE INTO backup_blobs (name, namespace_id, size, sealed, created) VALUES (?,?,?,?,?)", b.Name, nsID, b.Size, b.Sealed, b.Created.UTC()); err != nil {
 			return err
 		}
 	}
@@ -231,11 +261,21 @@ func (d *DB) DropBlobRefs(ctx context.Context, mb uuid.UUID) error {
 	return err
 }
 
-func (d *DB) UnreferencedBlobs(ctx context.Context, before time.Time, max int) ([]backup.Blob, error) {
+func (d *DB) UnreferencedBlobs(ctx context.Context, namespace string, before time.Time, max int) ([]backup.Blob, error) {
 	if max <= 0 {
 		max = 1000
 	}
-	rows, err := d.r(ctx).QueryContext(ctx, "SELECT b.name, b.size, b.sealed, b.created FROM backup_blobs b LEFT JOIN backup_blob_refs r ON r.name=b.name WHERE r.name IS NULL AND b.created<=? LIMIT ?", before.UTC(), max)
+	q := "SELECT b.name, n.name, b.size, b.sealed, b.created FROM backup_blobs b JOIN namespaces n ON n.id = b.namespace_id LEFT JOIN backup_blob_refs r ON r.name=b.name WHERE r.name IS NULL AND b.created<=?"
+	args := []any{before.UTC()}
+	if namespace != "" {
+		nsID, err := d.namespaceID(ctx, d.r(ctx), namespace)
+		if err != nil {
+			return nil, err
+		}
+		q += " AND b.namespace_id=?"
+		args = append(args, nsID)
+	}
+	rows, err := d.r(ctx).QueryContext(ctx, q+" LIMIT ?", append(args, max)...)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +283,7 @@ func (d *DB) UnreferencedBlobs(ctx context.Context, before time.Time, max int) (
 	var out []backup.Blob
 	for rows.Next() {
 		var b backup.Blob
-		if err := rows.Scan(&b.Name, &b.Size, &b.Sealed, &b.Created); err != nil {
+		if err := rows.Scan(&b.Name, &b.Namespace, &b.Size, &b.Sealed, &b.Created); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -256,14 +296,15 @@ func (d *DB) DeleteBlob(ctx context.Context, name string) error {
 	return err
 }
 
-const jobCols = "id, kind, mailbox, run_id, target, message, object_key, url, detail, bytes, messages, state, error, requested_by, created, finished, expires"
+const jobCols = "j.id, j.kind, j.mailbox, n.name, j.run_id, j.target, j.message, j.object_key, j.url, j.detail, j.bytes, j.messages, j.state, j.error, j.requested_by, j.created, j.finished, j.expires"
+const jobFrom = " FROM backup_jobs j JOIN namespaces n ON n.id = j.namespace_id "
 
 func scanJob(row interface{ Scan(...any) error }) (backup.Job, error) {
 	var j backup.Job
 	var mb, target, msg []byte
 	var detail sql.NullString
 	var finished, expires sql.NullTime
-	if err := row.Scan(&j.ID, &j.Kind, &mb, &j.RunID, &target, &msg, &j.ObjectKey, &j.URL, &detail, &j.Bytes, &j.Messages, &j.State, &j.Error, &j.Requested, &j.Created, &finished, &expires); err != nil {
+	if err := row.Scan(&j.ID, &j.Kind, &mb, &j.Namespace, &j.RunID, &target, &msg, &j.ObjectKey, &j.URL, &detail, &j.Bytes, &j.Messages, &j.State, &j.Error, &j.Requested, &j.Created, &finished, &expires); err != nil {
 		return j, err
 	}
 	j.Mailbox = toUUID(mb)
@@ -291,13 +332,17 @@ func (d *DB) PutJob(ctx context.Context, j backup.Job) error {
 	if len(j.Detail) > 0 {
 		detail = string(j.Detail)
 	}
-	_, err := d.exec(ctx, "INSERT INTO backup_jobs ("+jobCols+") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE target=VALUES(target), object_key=VALUES(object_key), url=VALUES(url), detail=VALUES(detail), bytes=VALUES(bytes), messages=VALUES(messages), state=VALUES(state), error=VALUES(error), finished=VALUES(finished), expires=VALUES(expires)",
-		j.ID, j.Kind, bin(j.Mailbox), j.RunID, nullBin(j.Target), nullBin(j.MessageID), j.ObjectKey, j.URL, detail, j.Bytes, j.Messages, j.State, j.Error, j.Requested, j.Created.UTC(), nullTimeValue(j.Finished), nullTimeValue(j.Expires))
+	nsID, err := d.catalogNamespaceID(ctx, d.sql, j.Namespace, j.Mailbox)
+	if err != nil {
+		return err
+	}
+	_, err = d.exec(ctx, "INSERT INTO backup_jobs (id, kind, mailbox, namespace_id, run_id, target, message, object_key, url, detail, bytes, messages, state, error, requested_by, created, finished, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE target=VALUES(target), object_key=VALUES(object_key), url=VALUES(url), detail=VALUES(detail), bytes=VALUES(bytes), messages=VALUES(messages), state=VALUES(state), error=VALUES(error), finished=VALUES(finished), expires=VALUES(expires)",
+		j.ID, j.Kind, bin(j.Mailbox), nsID, j.RunID, nullBin(j.Target), nullBin(j.MessageID), j.ObjectKey, j.URL, detail, j.Bytes, j.Messages, j.State, j.Error, j.Requested, j.Created.UTC(), nullTimeValue(j.Finished), nullTimeValue(j.Expires))
 	return err
 }
 
 func (d *DB) GetJob(ctx context.Context, id string) (backup.Job, error) {
-	j, err := scanJob(d.r(ctx).QueryRowContext(ctx, "SELECT "+jobCols+" FROM backup_jobs WHERE id=?", id))
+	j, err := scanJob(d.r(ctx).QueryRowContext(ctx, "SELECT "+jobCols+jobFrom+"WHERE j.id=?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return j, backup.ErrNotFound
 	}
@@ -325,26 +370,33 @@ func (d *DB) ListJobs(ctx context.Context, mb uuid.UUID, kind string, max int) (
 	if max <= 0 {
 		max = 100
 	}
-	q := "SELECT " + jobCols + " FROM backup_jobs WHERE 1=1"
+	q := "SELECT " + jobCols + jobFrom + "WHERE 1=1"
 	var args []any
 	if mb != uuid.Nil {
-		q += " AND mailbox=?"
+		q += " AND j.mailbox=?"
 		args = append(args, bin(mb))
 	}
 	if kind != "" {
-		q += " AND kind=?"
+		q += " AND j.kind=?"
 		args = append(args, kind)
 	}
-	q += " ORDER BY created DESC LIMIT ?"
+	q += " ORDER BY j.created DESC LIMIT ?"
 	args = append(args, max)
 	return d.queryJobs(ctx, q, args...)
 }
 
-func (d *DB) ExpiredJobs(ctx context.Context, before time.Time, max int) ([]backup.Job, error) {
+func (d *DB) ExpiredJobs(ctx context.Context, namespace string, before time.Time, max int) ([]backup.Job, error) {
 	if max <= 0 {
 		max = 1000
 	}
-	return d.queryJobs(ctx, "SELECT "+jobCols+" FROM backup_jobs WHERE expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT ?", before.UTC(), max)
+	if namespace == "" {
+		return d.queryJobs(ctx, "SELECT "+jobCols+jobFrom+"WHERE j.expires IS NOT NULL AND j.expires<=? ORDER BY j.expires LIMIT ?", before.UTC(), max)
+	}
+	nsID, err := d.namespaceID(ctx, d.r(ctx), namespace)
+	if err != nil {
+		return nil, err
+	}
+	return d.queryJobs(ctx, "SELECT "+jobCols+jobFrom+"WHERE j.namespace_id=? AND j.expires IS NOT NULL AND j.expires<=? ORDER BY j.expires LIMIT ?", nsID, before.UTC(), max)
 }
 
 func (d *DB) DeleteJob(ctx context.Context, id string) error {
@@ -356,12 +408,16 @@ func (d *DB) DeleteJob(ctx context.Context, id string) error {
 // the same transaction that moves their due time, with the periodic key
 // coalescing a pending or leased task for the same mailbox. The enqueue
 // callback is not used: the task rows are written here.
-func (d *DB) EnqueueDue(ctx context.Context, limit int, _ func(context.Context, string, uuid.UUID) error) (int, error) {
+func (d *DB) EnqueueDue(ctx context.Context, namespace string, limit int, _ func(context.Context, string, uuid.UUID) error) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
 	now := d.Now().UTC()
 	total := 0
+	nsID, err := d.namespaceID(ctx, d.sql, namespace)
+	if err != nil {
+		return 0, err
+	}
 	for _, kind := range []struct {
 		typ, col, bump string
 	}{
@@ -369,7 +425,7 @@ func (d *DB) EnqueueDue(ctx context.Context, limit int, _ func(context.Context, 
 		{backup.TaskMaintain, "backup_maintain_due", "backup_maintain_due=DATE_ADD(?, INTERVAL 1 DAY)"},
 	} {
 		err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
-			rows, err := tx.QueryContext(ctx, "SELECT id, uuid FROM mailboxes WHERE "+kind.col+"<=? AND backup_every>0 ORDER BY "+kind.col+", id LIMIT ? FOR UPDATE SKIP LOCKED", now, limit)
+			rows, err := tx.QueryContext(ctx, "SELECT id, uuid FROM mailboxes WHERE namespace_id=? AND "+kind.col+"<=? AND backup_every>0 ORDER BY "+kind.col+", id LIMIT ? FOR UPDATE SKIP LOCKED", nsID, now, limit)
 			if err != nil {
 				return err
 			}
@@ -396,7 +452,7 @@ func (d *DB) EnqueueDue(ctx context.Context, limit int, _ func(context.Context, 
 			for _, r := range batch {
 				key := sha256.Sum256([]byte(kind.typ + "\x00" + r.mb.String()))
 				payload, _ := json.Marshal(backup.BackupTask{Mailbox: r.mb})
-				if _, err := tx.ExecContext(ctx, "INSERT INTO tasks (id,type,state,payload,run_after,attempts,created,periodic_key) VALUES (?,?,'pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), kind.typ, string(payload), now, now, key[:]); err != nil {
+				if _, err := tx.ExecContext(ctx, "INSERT INTO tasks (id,type,namespace_id,state,payload,run_after,attempts,created,periodic_key) VALUES (?,?,?,'pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), kind.typ, nsID, string(payload), now, now, key[:]); err != nil {
 					return err
 				}
 				// The task sets the real next due time when it finishes; this
@@ -418,29 +474,33 @@ func (d *DB) EnqueueDue(ctx context.Context, limit int, _ func(context.Context, 
 
 // Reconcile gives mailboxes without backup state their first schedule,
 // walking the registry in bounded, resumable steps.
-func (d *DB) Reconcile(ctx context.Context, limit int, every time.Duration, defaults func(context.Context, uuid.UUID) time.Duration) error {
+func (d *DB) Reconcile(ctx context.Context, namespace string, limit int, every time.Duration, defaults func(context.Context, uuid.UUID) time.Duration) error {
 	if limit <= 0 {
 		return nil
 	}
 	now := d.Now().UTC()
 	return d.backgroundTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO maintenance_scans (name) VALUES ('backup')"); err != nil {
+		nsID, err := d.namespaceID(ctx, tx, namespace)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO maintenance_scans (name, namespace_id) VALUES ('backup', ?)", nsID); err != nil {
 			return err
 		}
 		var after, ceiling int64
 		var completed sql.NullTime
-		if err := tx.QueryRowContext(ctx, "SELECT after_id,ceiling_id,completed_at FROM maintenance_scans WHERE name='backup' FOR UPDATE").Scan(&after, &ceiling, &completed); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT after_id,ceiling_id,completed_at FROM maintenance_scans WHERE name='backup' AND namespace_id=? FOR UPDATE", nsID).Scan(&after, &ceiling, &completed); err != nil {
 			return err
 		}
 		if ceiling == 0 {
 			if completed.Valid && now.Sub(completed.Time) < every/24 {
 				return nil // a full pass per hour at the default interval
 			}
-			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM mailboxes").Scan(&ceiling); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM mailboxes WHERE namespace_id=?", nsID).Scan(&ceiling); err != nil {
 				return err
 			}
 		}
-		rows, err := tx.QueryContext(ctx, "SELECT id, uuid, backup_every FROM mailboxes WHERE id>? AND id<=? ORDER BY id LIMIT ?", after, ceiling, limit)
+		rows, err := tx.QueryContext(ctx, "SELECT id, uuid, backup_every FROM mailboxes WHERE namespace_id=? AND id>? AND id<=? ORDER BY id LIMIT ?", nsID, after, ceiling, limit)
 		if err != nil {
 			return err
 		}
@@ -483,39 +543,18 @@ func (d *DB) Reconcile(ctx context.Context, limit int, every time.Duration, defa
 			after = batch[len(batch)-1].id
 		}
 		if len(batch) < limit || after >= ceiling {
-			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=0,ceiling_id=0,completed_at=? WHERE name='backup'", now)
+			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=0,ceiling_id=0,completed_at=? WHERE name='backup' AND namespace_id=?", now, nsID)
 		} else {
-			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=?,ceiling_id=? WHERE name='backup'", after, ceiling)
+			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=?,ceiling_id=? WHERE name='backup' AND namespace_id=?", after, ceiling, nsID)
 		}
 		return err
 	})
 }
 
-// LeadBackups takes the backup scheduler lease (row 2 of scheduler_lease; the
-// workers' scheduler holds row 1).
-func (d *DB) LeadBackups(ctx context.Context, holder string, ttl time.Duration) (bool, error) {
-	now := d.Now().UTC()
-	var lead bool
-	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
-		var cur string
-		var until time.Time
-		err := tx.QueryRowContext(ctx, "SELECT holder, until FROM scheduler_lease WHERE id = 2 FOR UPDATE").Scan(&cur, &until)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			_, err = tx.ExecContext(ctx, "INSERT INTO scheduler_lease (id, holder, until) VALUES (2, ?, ?)", holder, now.Add(ttl))
-			lead = err == nil
-			return err
-		case err != nil:
-			return err
-		case cur == holder || !until.After(now):
-			_, err = tx.ExecContext(ctx, "UPDATE scheduler_lease SET holder = ?, until = ? WHERE id = 2", holder, now.Add(ttl))
-			lead = err == nil
-			return err
-		}
-		lead = false
-		return nil
-	})
-	return lead, err
+// LeadBackups takes the namespace's backup scheduler lease (lease kind 2;
+// the workers' scheduler holds kind 1).
+func (d *DB) LeadBackups(ctx context.Context, namespace, holder string, ttl time.Duration) (bool, error) {
+	return d.lead(ctx, 2, namespace, holder, ttl)
 }
 
 func (d *DB) Summary(ctx context.Context) (backup.Summary, error) {

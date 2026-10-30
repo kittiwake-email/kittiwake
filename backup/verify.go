@@ -64,6 +64,13 @@ func (s *Service) Verify(ctx context.Context, mb uuid.UUID, opts VerifyOptions) 
 	}
 	now := s.Now().UTC()
 	rep := Report{Mailbox: mb, At: now}
+	ns, err := s.namespaceOf(ctx, mb)
+	if err != nil {
+		return rep, err
+	}
+	if ctx, err = s.enter(ctx, ns); err != nil {
+		return rep, err
+	}
 	runs, err := s.cat.ListRuns(ctx, mb, 0)
 	if err != nil {
 		return rep, err
@@ -71,7 +78,7 @@ func (s *Service) Verify(ctx context.Context, mb uuid.UUID, opts VerifyOptions) 
 	rep.Runs = len(runs)
 	// Presence: one listing of the mailbox prefix.
 	listed := map[string]target.Object{}
-	if err := s.tg.List(ctx, s.mailboxPrefix(mb), func(o target.Object) error {
+	if err := s.be(ctx).tg.List(ctx, s.mailboxPrefix(mb), func(o target.Object) error {
 		listed[o.Key] = o
 		rep.Objects++
 		return nil
@@ -102,7 +109,7 @@ func (s *Service) Verify(ctx context.Context, mb uuid.UUID, opts VerifyOptions) 
 		}
 		rep.Stray = append(rep.Stray, key)
 		if now.Sub(o.Modified) > s.cfg.StrayGrace {
-			if err := s.tg.Delete(ctx, key); err == nil {
+			if err := s.be(ctx).tg.Delete(ctx, key); err == nil {
 				rep.Removed = append(rep.Removed, key)
 			}
 		}
@@ -182,7 +189,7 @@ func (s *Service) verifyEntries(ctx context.Context, man *Manifest, opts VerifyO
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		if _, err := readRef(ctx, s.tg, s.ring, ref); err != nil {
+		if _, err := readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, ref); err != nil {
 			if errors.Is(err, target.ErrNotFound) {
 				rep.Missing = append(rep.Missing, ref.Key)
 			} else {

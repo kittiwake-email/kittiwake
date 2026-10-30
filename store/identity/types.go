@@ -19,7 +19,33 @@ var (
 	ErrInvalid       = errors.New("identity: invalid")
 	ErrDomainUnknown = errors.New("identity: domain unknown")
 	ErrInUse         = errors.New("identity: still in use")
+	// ErrNamespaceUnknown: the named namespace does not exist.
+	ErrNamespaceUnknown = errors.New("identity: namespace unknown")
+	// ErrNamespaceMismatch: the operation would link records of different
+	// namespaces (an account to a mailbox elsewhere, a mailbox to another
+	// namespace's storage). Data never crosses a namespace.
+	ErrNamespaceMismatch = errors.New("identity: namespace mismatch")
 )
+
+// DefaultNamespace is the namespace that always exists: every domain,
+// mailbox and storage created without one lands here.
+const DefaultNamespace = "default"
+
+// Namespace is the unit of tenant isolation. It owns storage (one or more
+// Ceph pool sets with their own credentials), domains and, through them,
+// mailboxes and accounts. Mail data never crosses a namespace: a mailbox is
+// placed on its namespace's storage and only accounts of the namespace's
+// domains may use it. Daemons serve every namespace unless their config
+// restricts them, and admin tokens may be bound to one namespace.
+// Settings hold the same keys domains do and sit below them in the policy
+// chain (mailbox, domain, namespace, configured defaults).
+type Namespace struct {
+	Name     string            `json:"name"`
+	Enabled  bool              `json:"enabled"`
+	Settings map[string]string `json:"settings,omitempty"`
+	Created  time.Time         `json:"created"`
+	Updated  time.Time         `json:"updated"`
+}
 
 // Account roles.
 const (
@@ -76,13 +102,14 @@ const (
 	PasswordApplication = "application"
 )
 
-// Domain is a mail domain.
+// Domain is a mail domain. It belongs to a namespace, fixed at creation.
 type Domain struct {
-	Name     string            `json:"name"`
-	Enabled  bool              `json:"enabled"`
-	Settings map[string]string `json:"settings,omitempty"`
-	Created  time.Time         `json:"created"`
-	Updated  time.Time         `json:"updated"`
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Enabled   bool              `json:"enabled"`
+	Settings  map[string]string `json:"settings,omitempty"`
+	Created   time.Time         `json:"created"`
+	Updated   time.Time         `json:"updated"`
 }
 
 // QuotaLimits are per-mailbox limits; zero means "use the configured default".
@@ -176,9 +203,11 @@ const (
 	DomainBackupRetention = "backup.retention"
 )
 
-// Mailbox is the container for a user's data.
+// Mailbox is the container for a user's data. It belongs to a namespace,
+// fixed at creation, and is placed on one of that namespace's storages.
 type Mailbox struct {
-	ID uuid.UUID `json:"id"`
+	ID        uuid.UUID `json:"id"`
+	Namespace string    `json:"namespace"`
 	// StorageID is the Ceph storage (registry id) holding the mailbox's
 	// data; 0 only in the single-storage memory backend.
 	StorageID   int64          `json:"storage_id"`
@@ -222,11 +251,13 @@ type TOTP struct {
 }
 
 // Account is a set of credentials linked to a mailbox (or an admin).
+// Namespace is the domain's, read-only: the backends fill it.
 type Account struct {
 	ID        uuid.UUID  `json:"id"`
 	Username  string     `json:"username"`       // lowercase, usually user@domain
 	Name      string     `json:"name,omitempty"` // display name, used as the From: name of every identity
 	Domain    string     `json:"domain"`
+	Namespace string     `json:"namespace"`
 	MailboxID uuid.UUID  `json:"mailbox_id"`
 	Roles     []string   `json:"roles"`
 	Services  []string   `json:"services"` // which of KnownServices the account may log in to
@@ -264,9 +295,11 @@ type Destination struct {
 }
 
 // Alias maps an address (or "@domain" for catch-all) to destinations.
+// Namespace is the domain's, read-only; mailbox destinations must be in it.
 type Alias struct {
 	Address      string        `json:"address"` // lowercase
 	Domain       string        `json:"domain"`
+	Namespace    string        `json:"namespace"`
 	Destinations []Destination `json:"destinations"`
 	Enabled      bool          `json:"enabled"`
 	Created      time.Time     `json:"created"`
@@ -277,11 +310,13 @@ type Alias struct {
 func (a *Alias) IsCatchAll() bool { return len(a.Address) > 0 && a.Address[0] == '@' }
 
 // Token is a long-lived API token. The object name is the SHA-256 of the token.
-// An admin token has a zero AccountID and an admin role.
+// An admin token has a zero AccountID and an admin role; Namespace binds it
+// to one namespace (a tenant admin), empty means the whole platform.
 type Token struct {
 	ID        string    `json:"id"`
 	Hash      string    `json:"hash"`
 	AccountID uuid.UUID `json:"account_id"`
+	Namespace string    `json:"namespace,omitempty"`
 	Roles     []string  `json:"roles"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Comment   string    `json:"comment"`
@@ -295,14 +330,17 @@ func (t *Token) Expired(at time.Time) bool { return !at.Before(t.ExpiresAt) }
 // IsAdmin reports whether this is an admin token (not bound to an account).
 func (t *Token) IsAdmin() bool { return t.AccountID == uuid.Nil }
 
-// Storage is one Ceph storage in the registry. Mailboxes reference it by
+// Storage is one Ceph pool set in the registry: a cluster, credentials and
+// three pools, owned by exactly one namespace. Mailboxes reference it by
 // ID; the fsid (read from the storage on connect) verifies that the
-// connection details still point at the same storage. Key is the Ceph
-// secret of User.
+// connection details still point at the same cluster. Several storages
+// may share a cluster (one per namespace, with their own pools and keys),
+// never a pool. Key is the Ceph secret of User.
 type Storage struct {
 	ID        int64     `json:"id"`
 	FSID      uuid.UUID `json:"fsid"`
 	Name      string    `json:"name"`
+	Namespace string    `json:"namespace"`
 	MonHost   string    `json:"mon_host"` // comma-separated, as ceph.conf mon_host
 	User      string    `json:"user"`
 	Key       string    `json:"key"`
@@ -325,18 +363,40 @@ type Pools struct {
 // Address is where the mode is reached: the advertised host joined with
 // the mode's listener port. A node whose Expires has passed is gone.
 type Node struct {
-	ID       int64     `json:"id"`
-	Mode     string    `json:"mode"`
-	Address  string    `json:"address"`
-	Host     string    `json:"host"` // the machine's hostname
-	Version  string    `json:"version"`
-	Started  time.Time `json:"started"`
-	LastSeen time.Time `json:"last_seen"`
-	Expires  time.Time `json:"expires"` // LastSeen + 3 heartbeats
+	ID      int64  `json:"id"`
+	Mode    string `json:"mode"`
+	Address string `json:"address"`
+	Host    string `json:"host"` // the machine's hostname
+	Version string `json:"version"`
+	// Namespaces the process serves; empty means all of them.
+	Namespaces []string  `json:"namespaces,omitempty"`
+	Started    time.Time `json:"started"`
+	LastSeen   time.Time `json:"last_seen"`
+	Expires    time.Time `json:"expires"` // LastSeen + 3 heartbeats
 }
 
 // Alive reports whether the node's heartbeat is current at t.
 func (n *Node) Alive(t time.Time) bool { return t.Before(n.Expires) }
+
+// Serves reports whether the node serves the namespace.
+func (n *Node) Serves(namespace string) bool { return ServesNamespace(n.Namespaces, namespace) }
+
+// ServesNamespace reports whether a served list (empty = all) covers the
+// namespace.
+func ServesNamespace(served []string, namespace string) bool {
+	if len(served) == 0 {
+		return true
+	}
+	if namespace == "" {
+		namespace = DefaultNamespace
+	}
+	for _, s := range served {
+		if s == namespace {
+			return true
+		}
+	}
+	return false
+}
 
 // Versioned pairs an object with the version it was read at (RADOS object
 // version; 0 on backends without one).

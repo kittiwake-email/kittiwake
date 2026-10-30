@@ -51,13 +51,18 @@ func (s *Service) Restore(ctx context.Context, mb uuid.UUID, runID string, opts 
 	if err != nil {
 		return RestoreResult{}, err
 	}
+	ctx, err = s.enter(ctx, run.Namespace)
+	if err != nil {
+		return RestoreResult{}, err
+	}
 	man, err := s.loadManifest(ctx, run.ManifestKey)
 	if err != nil {
 		return RestoreResult{}, err
 	}
 	target := opts.Into
 	if target == uuid.Nil {
-		nm, err := s.adm.CreateMailbox(ctx, identity.Mailbox{Quota: man.Quota, StorageID: opts.StorageID})
+		// The restored mailbox lands in the namespace the backup came from.
+		nm, err := s.adm.CreateMailbox(ctx, identity.Mailbox{Namespace: run.Namespace, Quota: man.Quota, StorageID: opts.StorageID})
 		if err != nil {
 			return RestoreResult{}, err
 		}
@@ -130,6 +135,15 @@ func (s *Service) RestoreMessage(ctx context.Context, mb uuid.UUID, runID string
 	run, err := s.cat.GetRun(ctx, mb, runID)
 	if err != nil {
 		return RestoreResult{}, err
+	}
+	ctx, err = s.enter(ctx, run.Namespace)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	if tv, err := s.st.Identity.GetMailbox(ctx, into); err != nil {
+		return RestoreResult{}, err
+	} else if tv.Value.Namespace != run.Namespace && run.Namespace != "" {
+		return RestoreResult{}, fmt.Errorf("%w: mailbox %s is in namespace %s, the backup in %s", ErrForbidden, into, tv.Value.Namespace, run.Namespace)
 	}
 	man, err := s.loadManifest(ctx, run.ManifestKey)
 	if err != nil {
@@ -235,7 +249,7 @@ func (r *restorer) folder(name, role string, subscribed bool) (string, error) {
 // message appends one backed-up message to a folder of the target mailbox
 // under a new message id, through the index's normal append path.
 func (r *restorer) message(fid string, m Message) error {
-	docBytes, err := readRef(r.ctx, r.s.tg, r.s.ring, m.Doc)
+	docBytes, err := readRef(r.ctx, r.s.be(r.ctx).tg, r.s.be(r.ctx).ring, m.Doc)
 	if err != nil {
 		return err
 	}
@@ -245,13 +259,13 @@ func (r *restorer) message(fid string, m Message) error {
 	}
 	var raw []byte
 	if m.Raw != nil {
-		if raw, err = readRef(r.ctx, r.s.tg, r.s.ring, *m.Raw); err != nil {
+		if raw, err = readRef(r.ctx, r.s.be(r.ctx).tg, r.s.be(r.ctx).ring, *m.Raw); err != nil {
 			return err
 		}
 	}
 	var refs []index.AttachmentRef
 	for _, a := range m.Attachments {
-		data, err := readRef(r.ctx, r.s.tg, r.s.ring, a.Ref)
+		data, err := readRef(r.ctx, r.s.be(r.ctx).tg, r.s.be(r.ctx).ring, a.Ref)
 		if err != nil {
 			return err
 		}

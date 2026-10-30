@@ -9,6 +9,13 @@ info:
 
     Errors use `application/problem+json` (Problem schema) except on the OAuth
     endpoints, which use the RFC 6749 §5.2 error object.
+
+    Namespaces: every domain, mailbox and storage belongs to a namespace
+    (`default` unless told otherwise). An admin token bound to a namespace (a
+    tenant admin) sees and changes only that namespace: creates land in it,
+    listings are filtered to it, records elsewhere read as 404, and
+    platform-level operations (namespaces, storage registration, admin tokens,
+    nodes, queues, keys, identity export) answer 403.
 servers:
   - url: /
 security:
@@ -230,7 +237,7 @@ paths:
                   items: { type: array, items: { $ref: "#/components/schemas/Token" } }
     post:
       tags: [admin]
-      summary: Mint an admin token (full, or read-only with read_only=true); the secret is returned once
+      summary: Mint an admin token (full, or read-only with read_only=true; platform-wide, or bound to a namespace); the secret is returned once
       requestBody:
         required: true
         content:
@@ -240,6 +247,7 @@ paths:
               required: [expires_at, comment]
               properties:
                 read_only: { type: boolean, default: false, description: "role admin-ro: GET-only access" }
+                namespace: { type: string, description: "Bind the token to this namespace (a tenant admin); empty mints a platform admin" }
                 expires_at: { type: string, format: date-time }
                 comment: { type: string }
       responses:
@@ -384,10 +392,58 @@ paths:
                       applied_by: { type: string, description: Product version that applied this schema version }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/namespaces:
+    post:
+      tags: [admin]
+      summary: Create a namespace (platform-level)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NamespaceRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Namespace" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [admin]
+      summary: List namespace names (a tenant admin sees only its own)
+      parameters: [{ $ref: "#/components/parameters/after" }, { $ref: "#/components/parameters/limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/StringList" }
+  /v1/admin/namespaces/{name}:
+    parameters: [{ $ref: "#/components/parameters/namespaceName" }]
+    get:
+      tags: [admin]
+      summary: Get a namespace
+      responses:
+        "200": { $ref: "#/components/responses/Namespace" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update a namespace (enabled, settings; platform-level). Names are immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NamespaceRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Namespace" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Delete an empty namespace (no domains, mailboxes or storage; never the default; platform-level)
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /v1/admin/domains:
     post:
       tags: [admin]
-      summary: Create a domain
+      summary: Create a domain (in the requested namespace; a tenant admin's own)
       requestBody:
         required: true
         content:
@@ -400,7 +456,7 @@ paths:
     get:
       tags: [admin]
       summary: List domain names
-      parameters: [{ $ref: "#/components/parameters/after" }, { $ref: "#/components/parameters/limit" }]
+      parameters: [{ $ref: "#/components/parameters/namespace" }, { $ref: "#/components/parameters/after" }, { $ref: "#/components/parameters/limit" }]
       responses:
         "200": { $ref: "#/components/responses/StringList" }
   /v1/admin/domains/{name}:
@@ -434,6 +490,7 @@ paths:
       tags: [admin]
       summary: List all mailboxes with their accounts (walks the meta pool; operator tool)
       parameters:
+        - { $ref: "#/components/parameters/namespace" }
         - { name: orphaned, in: query, schema: { type: boolean }, description: "Only mailboxes with no account attached" }
       responses:
         "200":
@@ -729,6 +786,7 @@ paths:
     get:
       tags: [admin]
       summary: List mailboxes on hold
+      parameters: [{ $ref: "#/components/parameters/namespace" }]
       responses:
         "200":
           description: Mailboxes
@@ -975,6 +1033,7 @@ paths:
       summary: Query audit records (mailbox log, or the admin log when mailbox is omitted)
       parameters:
         - { name: mailbox, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/namespace" }
         - { name: account, in: query, schema: { type: string } }
         - { name: action, in: query, schema: { type: string } }
         - { name: client_ip, in: query, schema: { type: string } }
@@ -1086,6 +1145,8 @@ components:
     sessionId: { name: id, in: path, required: true, schema: { type: string } }
     passwordId: { name: id, in: path, required: true, schema: { type: string } }
     domainName: { name: name, in: path, required: true, schema: { type: string } }
+    namespaceName: { name: name, in: path, required: true, schema: { type: string } }
+    namespace: { name: namespace, in: query, schema: { type: string }, description: "Only this namespace (a tenant admin is always confined to its own)" }
     mailboxId: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
     accountRef: { name: id, in: path, required: true, schema: { type: string }, description: Account uuid or username }
     queueType: { name: type, in: path, required: true, schema: { type: string } }
@@ -1126,6 +1187,7 @@ components:
               items: { type: array, items: { type: string } }
               more: { type: boolean }
               next: { type: string }
+    Namespace: { description: Namespace, content: { application/json: { schema: { $ref: "#/components/schemas/Namespace" } } } }
     Domain: { description: Domain, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
     Mailbox: { description: Mailbox, content: { application/json: { schema: { $ref: "#/components/schemas/Mailbox" } } } }
     Account: { description: Account, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
@@ -1223,16 +1285,32 @@ components:
         secret: { type: string }
         uri: { type: string }
         recovery_codes: { type: array, items: { type: string } }
+    NamespaceRequest:
+      type: object
+      properties:
+        name: { type: string, description: "DNS label: letters, digits, hyphens; immutable" }
+        enabled: { type: boolean, description: "Disabled: delivery is rejected and logins fail for every domain in it" }
+        settings: { type: object, additionalProperties: { type: string }, description: "Same keys as domain settings; consulted after the domain" }
+    Namespace:
+      type: object
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        settings: { type: object, additionalProperties: { type: string } }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
     DomainRequest:
       type: object
       properties:
         name: { type: string }
+        namespace: { type: string, description: "Create only (default: the token's namespace, else default)" }
         enabled: { type: boolean }
         settings: { type: object, additionalProperties: { type: string } }
     Domain:
       type: object
       properties:
         name: { type: string }
+        namespace: { type: string }
         enabled: { type: boolean }
         settings: { type: object, additionalProperties: { type: string } }
         created: { type: string, format: date-time }
@@ -1261,6 +1339,7 @@ components:
       type: object
       properties:
         name: { type: string, maxLength: 64 }
+        namespace: { type: string, description: "Create only: the owning namespace (default: default). Several storages may share a cluster, never a pool." }
         mon_host: { type: string, description: "mon_host as in ceph.conf, e.g. \"[2001:db8::1]:6789,[2001:db8::2]:6789\"" }
         user: { type: string, description: CephX user without "client." }
         key: { type: string, description: CephX secret of user (write-only) }
@@ -1272,6 +1351,7 @@ components:
         id: { type: integer, format: int64 }
         fsid: { type: string, format: uuid }
         name: { type: string }
+        namespace: { type: string }
         mon_host: { type: string }
         user: { type: string }
         pools: { $ref: "#/components/schemas/Pools" }
@@ -1281,7 +1361,8 @@ components:
     MailboxRequest:
       type: object
       properties:
-        storage_id: { type: integer, format: int64, description: "Create only: pin the storage (default: random among storage entries open for placement)" }
+        namespace: { type: string, description: "Create only (default: the token's namespace, else default); immutable" }
+        storage_id: { type: integer, format: int64, description: "Create only: pin the storage, which must belong to the namespace (default: weighted among the namespace's storage entries open for placement)" }
         state:
           type: string
           enum: [active, suspended, disabled]
@@ -1394,6 +1475,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        namespace: { type: string }
         storage_id: { type: integer, format: int64, description: Storage (Ceph cluster) holding the mailbox data }
         state: { type: string, enum: [active, suspended, disabled] }
         state_reason: { type: string }
@@ -1449,6 +1531,7 @@ components:
         id: { type: string, format: uuid }
         username: { type: string }
         name: { type: string, description: Display name }
+        namespace: { type: string, description: The domain's namespace }
         services: { type: array, items: { type: string, enum: [imap, pop3, jmap] } }
         domain: { type: string }
         mailbox_id: { type: string, format: uuid }
@@ -1470,6 +1553,7 @@ components:
       properties:
         id: { type: string }
         account_id: { type: string, format: uuid }
+        namespace: { type: string, description: "Admin tokens: the namespace the token is bound to; absent for platform admins" }
         roles: { type: array, items: { type: string } }
         expires_at: { type: string, format: date-time }
         comment: { type: string }
@@ -1492,6 +1576,7 @@ components:
       properties:
         address: { type: string }
         domain: { type: string }
+        namespace: { type: string, description: The domain's namespace }
         destinations: { type: array, items: { $ref: "#/components/schemas/Destination" } }
         enabled: { type: boolean }
         created: { type: string, format: date-time }

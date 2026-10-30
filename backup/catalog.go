@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"kittiwake/store/identity"
 	"math/rand/v2"
 	"sort"
 	"sync"
@@ -38,8 +39,8 @@ type Catalog interface {
 	// ListRuns returns the runs of a mailbox, newest first.
 	ListRuns(ctx context.Context, mb uuid.UUID, max int) ([]Run, error)
 	DeleteRun(ctx context.Context, mb uuid.UUID, id string) error
-	// ExpiredRuns returns runs whose expiry has passed.
-	ExpiredRuns(ctx context.Context, before time.Time, max int) ([]Run, error)
+	// ExpiredRuns returns runs of the namespace whose expiry has passed.
+	ExpiredRuns(ctx context.Context, namespace string, before time.Time, max int) ([]Run, error)
 	// RunMailboxes lists every mailbox with at least one run, batched.
 	RunMailboxes(ctx context.Context, fn func(uuid.UUID) error) error
 
@@ -51,27 +52,31 @@ type Catalog interface {
 	// DropBlobRefs releases every blob reference of a mailbox.
 	DropBlobRefs(ctx context.Context, mb uuid.UUID) error
 	// UnreferencedBlobs returns blobs no mailbox references, older than before.
-	UnreferencedBlobs(ctx context.Context, before time.Time, max int) ([]Blob, error)
+	// UnreferencedBlobs returns the namespace's blobs no mailbox
+	// references, created before the given time.
+	UnreferencedBlobs(ctx context.Context, namespace string, before time.Time, max int) ([]Blob, error)
 	DeleteBlob(ctx context.Context, name string) error
 
 	PutJob(ctx context.Context, j Job) error
 	GetJob(ctx context.Context, id string) (Job, error)
 	// ListJobs returns jobs, newest first, optionally for one mailbox or kind.
 	ListJobs(ctx context.Context, mb uuid.UUID, kind string, max int) ([]Job, error)
-	// ExpiredJobs returns finished jobs past their expiry (exports to delete).
-	ExpiredJobs(ctx context.Context, before time.Time, max int) ([]Job, error)
+	// ExpiredJobs returns finished jobs of the namespace past their expiry
+	// (exports to delete).
+	ExpiredJobs(ctx context.Context, namespace string, before time.Time, max int) ([]Job, error)
 	DeleteJob(ctx context.Context, id string) error
 
-	// EnqueueDue enqueues backup tasks for due mailboxes and maintenance
-	// tasks for mailboxes whose maintenance is due, up to limit each.
-	EnqueueDue(ctx context.Context, limit int, enqueue func(ctx context.Context, typ string, mb uuid.UUID) error) (int, error)
-	// Reconcile schedules mailboxes that have no backup state yet (new
-	// mailboxes, mailboxes from before backups existed), spreading their
-	// first run over the default interval. It walks the registry in
-	// bounded steps, like the purge reconciliation.
-	Reconcile(ctx context.Context, limit int, every time.Duration, defaults func(ctx context.Context, mb uuid.UUID) time.Duration) error
-	// LeadBackups takes or renews the backup scheduler lease.
-	LeadBackups(ctx context.Context, holder string, ttl time.Duration) (bool, error)
+	// EnqueueDue enqueues backup tasks for the namespace's due mailboxes
+	// and maintenance tasks for those whose maintenance is due, up to
+	// limit each.
+	EnqueueDue(ctx context.Context, namespace string, limit int, enqueue func(ctx context.Context, typ string, mb uuid.UUID) error) (int, error)
+	// Reconcile schedules the namespace's mailboxes that have no backup
+	// state yet (new mailboxes, mailboxes from before backups existed),
+	// spreading their first run over the default interval. It walks the
+	// registry in bounded steps, like the purge reconciliation.
+	Reconcile(ctx context.Context, namespace string, limit int, every time.Duration, defaults func(ctx context.Context, mb uuid.UUID) time.Duration) error
+	// LeadBackups takes or renews the namespace's backup scheduler lease.
+	LeadBackups(ctx context.Context, namespace, holder string, ttl time.Duration) (bool, error)
 	Summary(ctx context.Context) (Summary, error)
 }
 
@@ -102,17 +107,21 @@ type Memory struct {
 	blobs  map[string]Blob
 	refs   map[string]map[uuid.UUID]bool
 	jobs   map[string]Job
-	lease  struct {
+	leases map[string]struct {
 		holder string
 		until  time.Time
 	}
-	// Mailboxes, when set, lists the mailboxes Reconcile considers.
-	Mailboxes func(ctx context.Context, fn func(uuid.UUID) error) error
+	// Mailboxes, when set, lists the mailboxes of a namespace ("" = all)
+	// that Reconcile considers.
+	Mailboxes func(ctx context.Context, namespace string, fn func(uuid.UUID) error) error
 }
 
 // NewMemory returns an empty memory catalog.
 func NewMemory() *Memory {
-	return &Memory{Now: time.Now, states: map[uuid.UUID]*State{}, runs: map[uuid.UUID]map[string]Run{}, blobs: map[string]Blob{}, refs: map[string]map[uuid.UUID]bool{}, jobs: map[string]Job{}}
+	return &Memory{Now: time.Now, states: map[uuid.UUID]*State{}, runs: map[uuid.UUID]map[string]Run{}, blobs: map[string]Blob{}, refs: map[string]map[uuid.UUID]bool{}, jobs: map[string]Job{}, leases: map[string]struct {
+		holder string
+		until  time.Time
+	}{}}
 }
 
 func (m *Memory) state(mb uuid.UUID) *State {
@@ -231,13 +240,25 @@ func (m *Memory) DeleteRun(_ context.Context, mb uuid.UUID, id string) error {
 	return nil
 }
 
-func (m *Memory) ExpiredRuns(_ context.Context, before time.Time, max int) ([]Run, error) {
+// inNamespace reports whether a record's namespace matches a filter
+// ("" matches everything; records without one count as default).
+func inNamespace(filter, have string) bool {
+	if filter == "" {
+		return true
+	}
+	if have == "" {
+		have = identity.DefaultNamespace
+	}
+	return filter == have
+}
+
+func (m *Memory) ExpiredRuns(_ context.Context, namespace string, before time.Time, max int) ([]Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Run
 	for _, rs := range m.runs {
 		for _, r := range rs {
-			if !r.Expires.IsZero() && !r.Expires.After(before) {
+			if inNamespace(namespace, r.Namespace) && !r.Expires.IsZero() && !r.Expires.After(before) {
 				out = append(out, r)
 			}
 		}
@@ -312,12 +333,12 @@ func (m *Memory) DropBlobRefs(_ context.Context, mb uuid.UUID) error {
 	return nil
 }
 
-func (m *Memory) UnreferencedBlobs(_ context.Context, before time.Time, max int) ([]Blob, error) {
+func (m *Memory) UnreferencedBlobs(_ context.Context, namespace string, before time.Time, max int) ([]Blob, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Blob
 	for n, b := range m.blobs {
-		if len(m.refs[n]) == 0 && !b.Created.After(before) {
+		if inNamespace(namespace, b.Namespace) && len(m.refs[n]) == 0 && !b.Created.After(before) {
 			out = append(out, b)
 		}
 	}
@@ -367,12 +388,12 @@ func (m *Memory) ListJobs(_ context.Context, mb uuid.UUID, kind string, max int)
 	return out, nil
 }
 
-func (m *Memory) ExpiredJobs(_ context.Context, before time.Time, max int) ([]Job, error) {
+func (m *Memory) ExpiredJobs(_ context.Context, namespace string, before time.Time, max int) ([]Job, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Job
 	for _, j := range m.jobs {
-		if !j.Expires.IsZero() && !j.Expires.After(before) {
+		if inNamespace(namespace, j.Namespace) && !j.Expires.IsZero() && !j.Expires.After(before) {
 			out = append(out, j)
 		}
 	}
@@ -389,11 +410,14 @@ func (m *Memory) DeleteJob(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *Memory) EnqueueDue(ctx context.Context, limit int, enqueue func(context.Context, string, uuid.UUID) error) (int, error) {
+func (m *Memory) EnqueueDue(ctx context.Context, namespace string, limit int, enqueue func(context.Context, string, uuid.UUID) error) (int, error) {
 	now := m.Now().UTC()
 	m.mu.Lock()
 	var backups, maint []uuid.UUID
 	for mb, s := range m.states {
+		if !inNamespace(namespace, s.Namespace) {
+			continue
+		}
 		if s.Scheduled && s.Every > 0 && !s.Due.IsZero() && !s.Due.After(now) && len(backups) < limit {
 			backups = append(backups, mb)
 			s.Due = now.Add(s.Every) // reset by the task; a lost task retries next interval
@@ -420,15 +444,19 @@ func (m *Memory) EnqueueDue(ctx context.Context, limit int, enqueue func(context
 	return n, nil
 }
 
-func (m *Memory) Reconcile(ctx context.Context, limit int, every time.Duration, defaults func(context.Context, uuid.UUID) time.Duration) error {
+func (m *Memory) Reconcile(ctx context.Context, namespace string, limit int, every time.Duration, defaults func(context.Context, uuid.UUID) time.Duration) error {
 	if m.Mailboxes == nil {
 		return nil
 	}
 	now := m.Now().UTC()
-	return m.Mailboxes(ctx, func(mb uuid.UUID) error {
+	return m.Mailboxes(ctx, namespace, func(mb uuid.UUID) error {
 		m.mu.Lock()
 		s, ok := m.states[mb]
 		scheduled := ok && s.Scheduled
+		if !ok {
+			s = m.state(mb)
+		}
+		s.Namespace = namespace
 		m.mu.Unlock()
 		if scheduled {
 			return nil
@@ -438,12 +466,17 @@ func (m *Memory) Reconcile(ctx context.Context, limit int, every time.Duration, 
 	})
 }
 
-func (m *Memory) LeadBackups(_ context.Context, holder string, ttl time.Duration) (bool, error) {
+func (m *Memory) LeadBackups(_ context.Context, namespace, holder string, ttl time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if namespace == "" {
+		namespace = identity.DefaultNamespace
+	}
 	now := m.Now()
-	if m.lease.holder == "" || m.lease.holder == holder || !m.lease.until.After(now) {
-		m.lease.holder, m.lease.until = holder, now.Add(ttl)
+	l := m.leases[namespace]
+	if l.holder == "" || l.holder == holder || !l.until.After(now) {
+		l.holder, l.until = holder, now.Add(ttl)
+		m.leases[namespace] = l
 		return true, nil
 	}
 	return false, nil

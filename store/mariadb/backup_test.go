@@ -41,7 +41,7 @@ func TestBackupCatalog(t *testing.T) {
 	if _, err := db.BackupState(ctx, uuid.New()); !errors.Is(err, backup.ErrNotFound) {
 		t.Fatalf("unknown: %v", err)
 	}
-	if err := db.Reconcile(ctx, 100, 24*time.Hour, func(context.Context, uuid.UUID) time.Duration { return time.Hour }); err != nil {
+	if err := db.Reconcile(ctx, "", 100, 24*time.Hour, func(context.Context, uuid.UUID) time.Duration { return time.Hour }); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = db.BackupState(ctx, mb.ID)
@@ -50,11 +50,11 @@ func TestBackupCatalog(t *testing.T) {
 	}
 	// Nothing due yet; then due: a task is inserted once (coalesced) and the
 	// due time bumped.
-	if n, err := db.EnqueueDue(ctx, 10, nil); err != nil || n != 0 {
+	if n, err := db.EnqueueDue(ctx, "", 10, nil); err != nil || n != 0 {
 		t.Fatalf("not due: %d %v", n, err)
 	}
 	_ = db.Schedule(ctx, mb.ID, time.Hour, now.Add(-time.Minute))
-	if n, err := db.EnqueueDue(ctx, 10, nil); err != nil || n != 1 {
+	if n, err := db.EnqueueDue(ctx, "", 10, nil); err != nil || n != 1 {
 		t.Fatalf("due: %d %v", n, err)
 	}
 	st, _ = db.BackupState(ctx, mb.ID)
@@ -62,7 +62,7 @@ func TestBackupCatalog(t *testing.T) {
 		t.Fatalf("bumped due: %+v", st)
 	}
 	_ = db.Schedule(ctx, mb.ID, time.Hour, now.Add(-time.Minute))
-	if n, _ := db.EnqueueDue(ctx, 10, nil); n != 1 {
+	if n, _ := db.EnqueueDue(ctx, "", 10, nil); n != 1 {
 		t.Fatal("second signal recorded")
 	}
 	tasks, err := db.Claim(ctx, backup.TaskBackup, "b1", 10, time.Hour)
@@ -89,7 +89,11 @@ func TestBackupCatalog(t *testing.T) {
 	if len(runs) != 2 || runs[0].ID != run2.ID {
 		t.Fatalf("list: %+v", runs)
 	}
-	exp, _ := db.ExpiredRuns(ctx, now.Add(49*time.Hour), 10)
+	exp, _ := db.ExpiredRuns(ctx, "", now.Add(49*time.Hour), 10)
+	if len(exp) != 1 || exp[0].Namespace != identity.DefaultNamespace {
+		t.Fatalf("expired runs carry their namespace: %+v", exp)
+	}
+	exp, _ = db.ExpiredRuns(ctx, "default", now.Add(49*time.Hour), 10)
 	if len(exp) != 1 || exp[0].ID != run.ID {
 		t.Fatalf("expired: %+v", exp)
 	}
@@ -124,12 +128,12 @@ func TestBackupCatalog(t *testing.T) {
 	}
 	_ = db.AddBlobRefs(ctx, mb.ID, []string{"a"})
 	_ = db.AddBlobRefs(ctx, mb.ID, []string{"a"})
-	un, _ := db.UnreferencedBlobs(ctx, now.Add(-time.Hour), 10)
+	un, _ := db.UnreferencedBlobs(ctx, "default", now.Add(-time.Hour), 10)
 	if len(un) != 0 {
 		t.Fatalf("b is young, a referenced: %+v", un)
 	}
 	_ = db.DropBlobRefs(ctx, mb.ID)
-	un, _ = db.UnreferencedBlobs(ctx, now.Add(-time.Hour), 10)
+	un, _ = db.UnreferencedBlobs(ctx, "", now.Add(-time.Hour), 10)
 	if len(un) != 1 || un[0].Name != "a" {
 		t.Fatalf("unreferenced: %+v", un)
 	}
@@ -157,7 +161,7 @@ func TestBackupCatalog(t *testing.T) {
 	if jobs, _ := db.ListJobs(ctx, uuid.Nil, backup.JobRestore, 10); len(jobs) != 0 {
 		t.Fatal("kind filter")
 	}
-	if ej, _ := db.ExpiredJobs(ctx, now.Add(2*time.Hour), 10); len(ej) != 1 {
+	if ej, _ := db.ExpiredJobs(ctx, "default", now.Add(2*time.Hour), 10); len(ej) != 1 || ej[0].Namespace != identity.DefaultNamespace {
 		t.Fatalf("expired jobs: %+v", ej)
 	}
 	_ = db.DeleteJob(ctx, j.ID)
@@ -166,14 +170,24 @@ func TestBackupCatalog(t *testing.T) {
 	}
 
 	// Lease and summary.
-	if lead, err := db.LeadBackups(ctx, "n1", time.Minute); err != nil || !lead {
+	if lead, err := db.LeadBackups(ctx, "", "n1", time.Minute); err != nil || !lead {
 		t.Fatalf("lead: %v %v", lead, err)
 	}
-	if lead, _ := db.LeadBackups(ctx, "n2", time.Minute); lead {
+	if lead, _ := db.LeadBackups(ctx, "default", "n2", time.Minute); lead {
 		t.Fatal("second leader")
 	}
-	if lead, _ := db.Lead(ctx, "worker", time.Minute); !lead {
+	if lead, _ := db.Lead(ctx, "", "worker", time.Minute); !lead {
 		t.Fatal("the worker scheduler lease is separate")
+	}
+	// Another namespace has its own leaders.
+	if _, err := ids.CreateNamespace(ctx, identity.Namespace{Name: "acme", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if lead, err := db.LeadBackups(ctx, "acme", "n2", time.Minute); err != nil || !lead {
+		t.Fatalf("lead acme: %v %v", lead, err)
+	}
+	if _, err := db.LeadBackups(ctx, "nope", "n2", time.Minute); !errors.Is(err, identity.ErrNamespaceUnknown) {
+		t.Fatalf("unknown namespace lease: %v", err)
 	}
 	sum, err := db.Summary(ctx)
 	if err != nil || sum.Mailboxes != 1 || sum.Scheduled != 1 || sum.Runs != 1 || sum.Blobs != 1 || sum.Rate != 1 {

@@ -61,11 +61,21 @@ type Store interface {
 	Stats(ctx context.Context, typ string) (Stats, error)
 	Dead(ctx context.Context, typ string) ([]Task, error)
 	Retry(ctx context.Context, typ, id string) error
-	// Lead tries to take (or renew) the scheduler lease for the worker.
-	Lead(ctx context.Context, worker string, ttl time.Duration) (bool, error)
-	// Due reports whether the periodic task `name` has not run within
-	// `every`, and records now as its last run when it is due.
-	Due(ctx context.Context, name string, every time.Duration) (bool, error)
+	// Lead tries to take (or renew) the scheduler lease of a namespace
+	// for the worker: every namespace has its own leader ("" = default).
+	Lead(ctx context.Context, namespace, worker string, ttl time.Duration) (bool, error)
+	// Due reports whether the periodic task `name` of the namespace has
+	// not run within `every`, and records now as its last run when it is
+	// due.
+	Due(ctx context.Context, namespace, name string, every time.Duration) (bool, error)
+}
+
+// Namespaced is implemented by queues that partition tasks by namespace:
+// a task's namespace comes from its payload ("namespace" field, else the
+// namespace of the "mailbox" field, else the default), and ServeNamespaces
+// restricts what Claim hands out (nil = every namespace).
+type Namespaced interface {
+	ServeNamespaces(namespaces []string)
 }
 
 // DefaultBackoff is the retry delay before attempt n (1-based).
@@ -106,8 +116,8 @@ func (s *Rados) SetRetryPolicy(maxAttempts int, backoff func(int) time.Duration)
 const schedulerOID = "scheduler"
 
 // Lead takes the scheduler lock object for ttl (renewable by the holder).
-func (s *Rados) Lead(ctx context.Context, worker string, ttl time.Duration) (bool, error) {
-	err := s.io.Lock(ctx, schedulerOID, "leader", worker, ttl)
+func (s *Rados) Lead(ctx context.Context, namespace, worker string, ttl time.Duration) (bool, error) {
+	err := s.io.Lock(ctx, schedulerOID, "leader/"+nsName(namespace), worker, ttl)
 	if errors.Is(err, rados.ErrLocked) {
 		return false, nil
 	}
@@ -116,8 +126,9 @@ func (s *Rados) Lead(ctx context.Context, worker string, ttl time.Duration) (boo
 
 // Due keeps last-run timestamps in the scheduler object's omap so a new
 // leader continues where the old one stopped.
-func (s *Rados) Due(ctx context.Context, name string, every time.Duration) (bool, error) {
+func (s *Rados) Due(ctx context.Context, namespace, name string, every time.Duration) (bool, error) {
 	now := s.Now()
+	name = nsName(namespace) + "/" + name
 	m, err := s.io.OmapGet(ctx, schedulerOID, []string{name})
 	if err != nil && !errors.Is(err, rados.ErrNotFound) {
 		return false, err
@@ -144,6 +155,14 @@ func leaseKey(expiry time.Time, id string) string {
 func deadKey(id string) string { return "dead/" + id }
 
 // Enqueue adds a task. A zero RunAfter means now. Returns the task id.
+// nsName names a namespace in scheduler keys ("" is the default).
+func nsName(namespace string) string {
+	if namespace == "" {
+		return "default"
+	}
+	return namespace
+}
+
 func (s *Rados) Enqueue(ctx context.Context, typ string, payload any, runAfter time.Time) (string, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {

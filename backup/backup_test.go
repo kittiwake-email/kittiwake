@@ -74,6 +74,7 @@ func newFixture(t *testing.T) *fixture {
 	f.cat.Now = f.clock
 	f.cat.Mailboxes = f.ids.ListMailboxes
 	f.tg = target.NewMemory()
+	f.tg.Now = f.clock
 	ring, _ := crypto.NewRing([]crypto.Key{{ID: 1, Key: bytes.Repeat([]byte{7}, 32)}}, 1)
 	f.svc = New(Config{SpoolDir: t.TempDir(), BlobThreshold: 64, PackSize: 1 << 20, Prefix: "kw/", DefaultRetention: 48 * time.Hour, MinInterval: time.Minute},
 		Stores{Identity: f.ids, Index: f.idx, Messages: f.msgs, Attachments: f.atts, Audit: auditSt}, f.cat, f.tg, ring, f.adm, aud, log)
@@ -281,7 +282,7 @@ func TestExportFromBackup(t *testing.T) {
 	if res.Messages != 3 || res.Bytes == 0 || !strings.HasPrefix(res.Key, "kw/export/"+f.mb.ID.String()+"/") || len(res.Errors) != 0 {
 		t.Fatalf("export: %+v", res)
 	}
-	rc, size, err := f.svc.OpenExport(f.cli, res.Key)
+	rc, size, err := f.svc.OpenExport(f.cli, "", res.Key)
 	if err != nil || size != res.Bytes {
 		t.Fatal(err)
 	}
@@ -392,7 +393,7 @@ func TestVerifyAndExpire(t *testing.T) {
 	// Expiry: the first run leaves retention; its remaining packs go, the
 	// blob stays while run2 references it, the mailbox prefix stays.
 	f.now = run.Finished.Add(49 * time.Hour)
-	exp, err := f.svc.Expire(f.cli, 100)
+	exp, err := f.svc.Expire(f.cli, "", 100)
 	if err != nil || exp.Runs != 1 || exp.Mailboxes != 0 {
 		t.Fatalf("expire: %+v %v", exp, err)
 	}
@@ -404,7 +405,7 @@ func TestVerifyAndExpire(t *testing.T) {
 		t.Fatalf("runs: %+v", runs)
 	}
 	f.now = run2.Finished.Add(49 * time.Hour)
-	exp, err = f.svc.Expire(f.cli, 100)
+	exp, err = f.svc.Expire(f.cli, "", 100)
 	// The last run went: the mailbox prefix is emptied, blob references
 	// released, and the blob (past the grace period) collected.
 	if err != nil || exp.Runs != 1 || exp.Mailboxes != 1 || exp.Blobs != 1 {
@@ -427,7 +428,7 @@ func TestHoldKeepsRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.now = run.Finished.Add(100 * time.Hour)
-	if exp, err := f.svc.Expire(f.cli, 100); err != nil || exp.Runs != 0 {
+	if exp, err := f.svc.Expire(f.cli, "", 100); err != nil || exp.Runs != 0 {
 		t.Fatalf("held runs must not expire: %+v %v", exp, err)
 	}
 	if err := f.svc.Forget(f.cli, f.mb.ID); !errors.Is(err, ErrForbidden) {
@@ -565,7 +566,7 @@ func TestRunnerSchedulesAndRunsJobs(t *testing.T) {
 	}
 	// Export expiry removes the archive (and the failed job's record).
 	f.now = f.now.Add(8 * 24 * time.Hour)
-	exp, err := f.svc.Expire(f.cli, 10)
+	exp, err := f.svc.Expire(f.cli, "", 10)
 	if err != nil || exp.Exports != 2 {
 		t.Fatalf("export expiry: %+v %v", exp, err)
 	}

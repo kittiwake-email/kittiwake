@@ -91,6 +91,15 @@ clock (audit objects are per UTC day). Smoke-test the binary with
 `make run-dev` plus Python's smtplib.LMTP/imaplib/poplib and curl against 127.0.0.1 ports
 2424/1143/1110/8080 (jmap) and 8081 (admin) (see examples/dev.yaml); kill it by PID, not by `pkill -f`.
 
+Namespaces (README "Namespaces"): every domain, mailbox and storage carries one; the admin
+service confines a tenant token with `inScope` (records elsewhere read as not found),
+`createNamespace` (creates land in the token's namespace) and `listNamespace`, and
+platform-level operations use `authorizeGlobal`. Task rows carry a namespace (MariaDB
+derives it from the payload's `namespace` or `mailbox` field); schedulers lead per namespace
+(`Lead(ctx, ns, ...)`, `Due(ctx, ns, ...)`); storage sweeps of a namespace-wide task run
+under `storage.WithNamespace(ctx, ns)`; backup operations bind the namespace's target with
+`Service.enter`.
+
 ## What this is
 
 Kittiwake: a massively scalable mail platform intended to replace Dovecot (the name is the

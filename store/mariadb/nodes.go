@@ -7,12 +7,16 @@ import (
 	"kittiwake/store/identity"
 )
 
-const nodeCols = "id, mode, address, host, version, started, last_seen, expires"
+const nodeCols = "id, mode, address, host, version, namespaces, started, last_seen, expires"
 
 func scanNode(row interface{ Scan(...any) error }) (identity.Node, error) {
 	var n identity.Node
-	if err := row.Scan(&n.ID, &n.Mode, &n.Address, &n.Host, &n.Version, &n.Started, &n.LastSeen, &n.Expires); err != nil {
+	var namespaces string
+	if err := row.Scan(&n.ID, &n.Mode, &n.Address, &n.Host, &n.Version, &namespaces, &n.Started, &n.LastSeen, &n.Expires); err != nil {
 		return identity.Node{}, mapErr(err)
+	}
+	if namespaces != "" {
+		n.Namespaces = splitList(namespaces)
 	}
 	return n, nil
 }
@@ -23,6 +27,11 @@ func (d *DB) RegisterNode(ctx context.Context, n identity.Node) (identity.Node, 
 	if n.Mode == "" || n.Address == "" {
 		return identity.Node{}, identity.ErrInvalid
 	}
+	nss, err := identity.NormalizeNamespaces(n.Namespaces)
+	if err != nil {
+		return identity.Node{}, err
+	}
+	n.Namespaces = nss
 	now := d.Now().UTC()
 	n.LastSeen = now
 	if n.Started.IsZero() {
@@ -31,8 +40,8 @@ func (d *DB) RegisterNode(ctx context.Context, n identity.Node) (identity.Node, 
 	if n.Expires.IsZero() {
 		n.Expires = now.Add(30 * time.Second)
 	}
-	if _, err := d.sql.ExecContext(ctx, "INSERT INTO nodes (mode, address, host, version, started, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE host = VALUES(host), version = VALUES(version), started = VALUES(started), last_seen = VALUES(last_seen), expires = VALUES(expires)",
-		n.Mode, n.Address, n.Host, n.Version, n.Started.UTC(), n.LastSeen, n.Expires.UTC()); err != nil {
+	if _, err := d.sql.ExecContext(ctx, "INSERT INTO nodes (mode, address, host, version, namespaces, started, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE host = VALUES(host), version = VALUES(version), namespaces = VALUES(namespaces), started = VALUES(started), last_seen = VALUES(last_seen), expires = VALUES(expires)",
+		n.Mode, n.Address, n.Host, n.Version, joinList(n.Namespaces), n.Started.UTC(), n.LastSeen, n.Expires.UTC()); err != nil {
 		return identity.Node{}, mapErr(err)
 	}
 	return scanNode(d.sql.QueryRowContext(ctx, "SELECT "+nodeCols+" FROM nodes WHERE mode = ? AND address = ?", n.Mode, n.Address))

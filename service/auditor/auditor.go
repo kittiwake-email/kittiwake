@@ -46,10 +46,13 @@ var sessionActions = map[string]bool{
 // Event is the input to Log.
 type Event struct {
 	Mailbox uuid.UUID // target mailbox; zero for platform-level actions
-	Action  string
-	Target  string
-	Detail  string
-	Result  string
+	// Namespace of what was acted upon; empty falls back to the namespace
+	// set on the context with WithNamespace, then to the actor's own scope.
+	Namespace string
+	Action    string
+	Target    string
+	Detail    string
+	Result    string
 	// Subject overrides the account fields with the acted-upon user when an
 	// admin acts on behalf of someone (support access, maintenance).
 	Subject string
@@ -61,8 +64,15 @@ func (a *Auditor) Log(ctx context.Context, ev Event) {
 	if lvl := a.detail[act.Protocol]; lvl == DetailSession && !sessionActions[ev.Action] && ev.Result == audit.ResultOK {
 		return
 	}
+	ns := ev.Namespace
+	if ns == "" {
+		ns = NamespaceFrom(ctx)
+	}
+	if ns == "" {
+		ns = act.Namespace
+	}
 	rec := audit.Record{
-		Time: a.Now().UTC(), Mailbox: ev.Mailbox, Account: act.Username, AccountID: act.AccountID,
+		Time: a.Now().UTC(), Mailbox: ev.Mailbox, Namespace: ns, Account: act.Username, AccountID: act.AccountID,
 		TokenID: act.TokenID, TokenNote: act.TokenNote, SessionID: act.SessionID, Protocol: act.Protocol,
 		ClientIP: act.ClientIP, Action: ev.Action, Target: ev.Target, Detail: ev.Detail, Result: ev.Result, Admin: act.Admin,
 	}
@@ -83,6 +93,23 @@ func (a *Auditor) Log(ctx context.Context, ev Event) {
 			a.log.ErrorContext(ctx, "audit store write failed", slog.String("error", err.Error()), slog.String("action", rec.Action))
 		}
 	}
+}
+
+type nsKey struct{}
+
+// WithNamespace marks the namespace every event logged through ctx is
+// about, so services set it once after resolving the target record.
+func WithNamespace(ctx context.Context, namespace string) context.Context {
+	if namespace == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, nsKey{}, namespace)
+}
+
+// NamespaceFrom returns the namespace set with WithNamespace, or "".
+func NamespaceFrom(ctx context.Context) string {
+	ns, _ := ctx.Value(nsKey{}).(string)
+	return ns
 }
 
 func mbString(id uuid.UUID) string {

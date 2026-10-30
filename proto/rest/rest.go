@@ -180,6 +180,11 @@ func (s *Server) AdminHandler() http.Handler {
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
 		route{"GET /v1/admin/nodes", s.nodeList},
+		route{"POST /v1/admin/namespaces", s.namespaceCreate},
+		route{"GET /v1/admin/namespaces", s.namespaceList},
+		route{"GET /v1/admin/namespaces/{name}", s.namespaceGet},
+		route{"PATCH /v1/admin/namespaces/{name}", s.namespacePatch},
+		route{"DELETE /v1/admin/namespaces/{name}", s.namespaceDelete},
 		route{"POST /v1/admin/storage", s.storageAdd},
 		route{"GET /v1/admin/storage", s.storageList},
 		route{"GET /v1/admin/storage/{sid}", s.storageGet},
@@ -250,7 +255,10 @@ func isAdminWrap(wrap, adm func(http.Handler) http.Handler) bool {
 }
 
 type adminTokenRequest struct {
-	ReadOnly  bool      `json:"read_only"`
+	ReadOnly bool `json:"read_only"`
+	// Namespace binds the token to one namespace (a tenant admin); empty
+	// mints a platform admin.
+	Namespace string    `json:"namespace,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Comment   string    `json:"comment"`
 }
@@ -261,7 +269,7 @@ func (s *Server) adminTokenCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	t, secret, err := s.admin.CreateAdminToken(r.Context(), req.ReadOnly, req.ExpiresAt, req.Comment)
+	t, secret, err := s.admin.CreateAdminToken(r.Context(), req.ReadOnly, req.Namespace, req.ExpiresAt, req.Comment)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -341,8 +349,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, identity.ErrInvalid), errors.Is(err, identity.ErrDomainUnknown), errors.Is(err, errBadRequest):
 		status = http.StatusBadRequest
-	case errors.Is(err, admin.ErrForbidden), errors.Is(err, backup.ErrForbidden):
+	case errors.Is(err, admin.ErrForbidden), errors.Is(err, admin.ErrScope), errors.Is(err, backup.ErrForbidden):
 		status = http.StatusForbidden
+	case errors.Is(err, identity.ErrNamespaceUnknown), errors.Is(err, identity.ErrNamespaceMismatch):
+		status = http.StatusBadRequest
 	case errors.Is(err, backup.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, backup.ErrInvalid):
@@ -355,8 +365,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrTokenExpired), errors.Is(err, auth.ErrTOTPRequired), errors.Is(err, auth.ErrSessionRevoked):
 		status = http.StatusUnauthorized
-	case errors.Is(err, auth.ErrAccountDisabled), errors.Is(err, auth.ErrServiceDisabled):
+	case errors.Is(err, auth.ErrAccountDisabled), errors.Is(err, auth.ErrServiceDisabled), errors.Is(err, auth.ErrNamespaceDisabled):
 		status = http.StatusForbidden
+	case errors.Is(err, auth.ErrNotServed):
+		status = http.StatusServiceUnavailable
 	case errors.Is(err, storage.ErrUnavailable), errors.Is(err, storage.ErrNoPlacement):
 		status = http.StatusServiceUnavailable
 	default:
@@ -515,8 +527,10 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 			writeOAuthError(w, http.StatusBadRequest, "totp_required", "a one-time code is required for this account; resend with totp_code")
 		case errors.Is(err, auth.ErrScope):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "requested scope exceeds the account's roles")
-		case errors.Is(err, auth.ErrAccountDisabled):
+		case errors.Is(err, auth.ErrAccountDisabled), errors.Is(err, auth.ErrNamespaceDisabled):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "account disabled")
+		case errors.Is(err, auth.ErrNotServed):
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "mailbox is not served by this server")
 		case errors.Is(err, auth.ErrServiceDisabled):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "JMAP is not enabled for this account")
 		case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrTOTPInvalid),
@@ -784,12 +798,93 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// ---- admin: domains ----
+// ---- admin: namespaces ----
 
-type domainRequest struct {
+type namespaceRequest struct {
 	Name     string            `json:"name,omitempty"`
 	Enabled  *bool             `json:"enabled,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
+}
+
+func (s *Server) namespaceCreate(w http.ResponseWriter, r *http.Request) {
+	var req namespaceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	ns := identity.Namespace{Name: req.Name, Enabled: true, Settings: req.Settings}
+	if req.Enabled != nil {
+		ns.Enabled = *req.Enabled
+	}
+	out, err := s.admin.CreateNamespace(r.Context(), ns)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) namespaceList(w http.ResponseWriter, r *http.Request) {
+	names, more, err := s.admin.ListNamespaces(r.Context(), r.URL.Query().Get("after"), limitParam(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, listOut(names, more))
+}
+
+func (s *Server) namespaceGet(w http.ResponseWriter, r *http.Request) {
+	out, err := s.admin.GetNamespace(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) namespacePatch(w http.ResponseWriter, r *http.Request) {
+	var req namespaceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if req.Name != "" {
+		s.fail(w, r, badRequest("namespace names are immutable"))
+		return
+	}
+	out, err := s.admin.UpdateNamespace(r.Context(), r.PathValue("name"), func(ns *identity.Namespace) error {
+		if req.Enabled != nil {
+			ns.Enabled = *req.Enabled
+		}
+		if req.Settings != nil {
+			ns.Settings = req.Settings
+		}
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) namespaceDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.admin.DeleteNamespace(r.Context(), r.PathValue("name")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin: domains ----
+
+type domainRequest struct {
+	Name string `json:"name,omitempty"`
+	// Namespace on create (default: the token's own, else "default");
+	// immutable afterwards.
+	Namespace string            `json:"namespace,omitempty"`
+	Enabled   *bool             `json:"enabled,omitempty"`
+	Settings  map[string]string `json:"settings,omitempty"`
 }
 
 func (s *Server) domainCreate(w http.ResponseWriter, r *http.Request) {
@@ -798,7 +893,7 @@ func (s *Server) domainCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	d := identity.Domain{Name: req.Name, Enabled: true, Settings: req.Settings}
+	d := identity.Domain{Name: req.Name, Namespace: req.Namespace, Enabled: true, Settings: req.Settings}
 	if req.Enabled != nil {
 		d.Enabled = *req.Enabled
 	}
@@ -811,7 +906,7 @@ func (s *Server) domainCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) domainList(w http.ResponseWriter, r *http.Request) {
-	names, more, err := s.admin.ListDomains(r.Context(), r.URL.Query().Get("after"), limitParam(r))
+	names, more, err := s.admin.ListDomains(r.Context(), r.URL.Query().Get("namespace"), r.URL.Query().Get("after"), limitParam(r))
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -832,6 +927,10 @@ func (s *Server) domainPatch(w http.ResponseWriter, r *http.Request) {
 	var req domainRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if req.Namespace != "" {
+		s.fail(w, r, badRequest("namespace cannot be changed"))
 		return
 	}
 	out, err := s.admin.UpdateDomain(r.Context(), r.PathValue("name"), func(d *identity.Domain) error {
@@ -866,9 +965,12 @@ type mailboxRequest struct {
 	State       *string               `json:"state,omitempty"`
 	StateReason string                `json:"state_reason,omitempty"`
 	Quota       *identity.QuotaLimits `json:"quota,omitempty"`
-	// StorageID pins the Ceph storage on create (default: random among
-	// storage entries open for placement). Not changeable afterwards.
-	StorageID int64 `json:"storage_id,omitempty"`
+	// Namespace on create (default: the token's own, else "default");
+	// immutable afterwards. StorageID pins the Ceph storage on create
+	// (default: weighted among the namespace's storage entries open for
+	// placement). Not changeable afterwards.
+	Namespace string `json:"namespace,omitempty"`
+	StorageID int64  `json:"storage_id,omitempty"`
 	// Backup settings: interval and retention as durations ("24h"), or
 	// disabled; unset fields inherit (domain settings, then defaults).
 	Backup *backupSettingsRequest `json:"backup,omitempty"`
@@ -882,7 +984,7 @@ func (s *Server) mailboxCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m := identity.Mailbox{State: identity.StateActive, StorageID: req.StorageID}
+	m := identity.Mailbox{State: identity.StateActive, Namespace: req.Namespace, StorageID: req.StorageID}
 	if req.State != nil {
 		m.State, m.StateReason = *req.State, req.StateReason
 	}
@@ -931,6 +1033,10 @@ func (s *Server) mailboxPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.StorageID != 0 {
 		s.fail(w, r, badRequest("storage_id cannot be changed (mailbox moves are a worker task)"))
+		return
+	}
+	if req.Namespace != "" {
+		s.fail(w, r, badRequest("namespace cannot be changed"))
 		return
 	}
 	var out identity.Mailbox
@@ -1064,7 +1170,7 @@ func (s *Server) mailboxRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) holdList(w http.ResponseWriter, r *http.Request) {
-	list, err := s.admin.ListHolds(r.Context())
+	list, err := s.admin.ListHolds(r.Context(), r.URL.Query().Get("namespace"))
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1082,6 +1188,7 @@ type accountView struct {
 	Username    string         `json:"username"`
 	Name        string         `json:"name"`
 	Domain      string         `json:"domain"`
+	Namespace   string         `json:"namespace"`
 	MailboxID   uuid.UUID      `json:"mailbox_id"`
 	Roles       []string       `json:"roles"`
 	Services    []string       `json:"services"`
@@ -1102,7 +1209,7 @@ func viewAccount(a identity.Account) accountView {
 		services = []string{}
 	}
 	return accountView{
-		ID: a.ID, Username: a.Username, Name: a.Name, Domain: a.Domain, MailboxID: a.MailboxID, Roles: roles, Services: services, Enabled: a.Enabled,
+		ID: a.ID, Username: a.Username, Name: a.Name, Domain: a.Domain, Namespace: a.Namespace, MailboxID: a.MailboxID, Roles: roles, Services: services, Enabled: a.Enabled,
 		TOTPEnabled: a.TOTP != nil && a.TOTP.Confirmed, Passwords: passwordViews(a.Passwords, true), Created: a.Created, Updated: a.Updated,
 	}
 }
@@ -1146,6 +1253,7 @@ func (s *Server) accountCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		ID        uuid.UUID            `json:"id"`
+		Namespace string               `json:"namespace"`
 		StorageID int64                `json:"storage_id"`
 		State     string               `json:"state"`
 		Reason    string               `json:"state_reason,omitempty"`
@@ -1156,7 +1264,7 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 	}
 	orphaned := r.URL.Query().Get("orphaned") == "true"
 	items := []item{}
-	err := s.admin.ListMailboxes(r.Context(), func(id uuid.UUID) error {
+	err := s.admin.ListMailboxes(r.Context(), r.URL.Query().Get("namespace"), func(id uuid.UUID) error {
 		m, err := s.admin.GetMailbox(r.Context(), id)
 		if err != nil {
 			return nil
@@ -1168,7 +1276,7 @@ func (s *Server) mailboxList(w http.ResponseWriter, r *http.Request) {
 		if orphaned && len(accts) > 0 {
 			return nil
 		}
-		items = append(items, item{ID: id, StorageID: m.StorageID, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
+		items = append(items, item{ID: id, Namespace: m.Namespace, StorageID: m.StorageID, State: m.State, Reason: m.StateReason, OnHold: m.Hold != nil, Quota: m.Quota, Accounts: accts, Created: m.Created})
 		return nil
 	})
 	if err != nil {
@@ -1420,6 +1528,7 @@ func (s *Server) tokenCreate(w http.ResponseWriter, r *http.Request) {
 type tokenView struct {
 	ID        string    `json:"id"`
 	AccountID uuid.UUID `json:"account_id"`
+	Namespace string    `json:"namespace,omitempty"`
 	Roles     []string  `json:"roles"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Comment   string    `json:"comment"`
@@ -1428,7 +1537,7 @@ type tokenView struct {
 }
 
 func viewToken(t identity.Token) tokenView {
-	return tokenView{ID: t.ID, AccountID: t.AccountID, Roles: t.Roles, ExpiresAt: t.ExpiresAt, Comment: t.Comment, Created: t.Created, LastUsed: t.LastUsed}
+	return tokenView{ID: t.ID, AccountID: t.AccountID, Namespace: t.Namespace, Roles: t.Roles, ExpiresAt: t.ExpiresAt, Comment: t.Comment, Created: t.Created, LastUsed: t.LastUsed}
 }
 
 func (s *Server) tokenList(w http.ResponseWriter, r *http.Request) {
@@ -1545,7 +1654,14 @@ func (s *Server) aliasDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) auditRead(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	aq := audit.Query{Account: q.Get("account"), Action: q.Get("action"), ClientIP: q.Get("client_ip"), After: q.Get("after"), Max: limitParam(r)}
+	aq := audit.Query{Namespace: q.Get("namespace"), Account: q.Get("account"), Action: q.Get("action"), ClientIP: q.Get("client_ip"), After: q.Get("after"), Max: limitParam(r)}
+	if sc := actor.From(r.Context()).Namespace; sc != "" {
+		if aq.Namespace != "" && aq.Namespace != sc {
+			s.fail(w, r, admin.ErrScope)
+			return
+		}
+		aq.Namespace = sc
+	}
 	if m := q.Get("mailbox"); m != "" {
 		id, err := uuid.Parse(m)
 		if err != nil {
@@ -1580,7 +1696,20 @@ func (s *Server) auditRead(w http.ResponseWriter, r *http.Request) {
 
 // ---- admin: queues ----
 
+// platformOnly refuses tenant admins on endpoints that bypass the admin
+// service (queues, keys).
+func (s *Server) platformOnly(w http.ResponseWriter, r *http.Request) bool {
+	if actor.From(r.Context()).Namespace != "" {
+		s.fail(w, r, admin.ErrScope)
+		return false
+	}
+	return true
+}
+
 func (s *Server) queueStats(w http.ResponseWriter, r *http.Request) {
+	if !s.platformOnly(w, r) {
+		return
+	}
 	st, err := s.queue.Stats(r.Context(), r.PathValue("type"))
 	if err != nil {
 		s.fail(w, r, err)
@@ -1590,6 +1719,9 @@ func (s *Server) queueStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) queueDead(w http.ResponseWriter, r *http.Request) {
+	if !s.platformOnly(w, r) {
+		return
+	}
 	list, err := s.queue.Dead(r.Context(), r.PathValue("type"))
 	if err != nil {
 		s.fail(w, r, err)
@@ -1602,6 +1734,9 @@ func (s *Server) queueDead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) queueRetry(w http.ResponseWriter, r *http.Request) {
+	if !s.platformOnly(w, r) {
+		return
+	}
 	if err := s.queue.Retry(r.Context(), r.PathValue("type"), r.PathValue("id")); err != nil {
 		s.fail(w, r, err)
 		return
@@ -1612,6 +1747,9 @@ func (s *Server) queueRetry(w http.ResponseWriter, r *http.Request) {
 // ---- admin: keys, export/import ----
 
 func (s *Server) keysRotate(w http.ResponseWriter, r *http.Request) {
+	if !s.platformOnly(w, r) {
+		return
+	}
 	if err := s.auth.RotateKeys(r.Context()); err != nil {
 		s.fail(w, r, err)
 		return
@@ -1648,7 +1786,9 @@ var _ = context.Background
 // ---- admin: storage ----
 
 type storageRequest struct {
-	Name      string          `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// Namespace owning the storage on create (default "default"); immutable.
+	Namespace string          `json:"namespace,omitempty"`
 	MonHost   string          `json:"mon_host,omitempty"`
 	User      string          `json:"user,omitempty"`
 	Key       string          `json:"key,omitempty"`
@@ -1657,7 +1797,7 @@ type storageRequest struct {
 }
 
 func (r storageRequest) toAdmin() admin.StorageRequest {
-	out := admin.StorageRequest{Name: r.Name, MonHost: r.MonHost, User: r.User, Key: r.Key, Placement: r.Placement}
+	out := admin.StorageRequest{Name: r.Name, Namespace: r.Namespace, MonHost: r.MonHost, User: r.User, Key: r.Key, Placement: r.Placement}
 	if r.Pools != nil {
 		out.Pools = *r.Pools
 	}
@@ -1669,6 +1809,7 @@ type storageView struct {
 	ID        int64          `json:"id"`
 	FSID      uuid.UUID      `json:"fsid"`
 	Name      string         `json:"name"`
+	Namespace string         `json:"namespace"`
 	MonHost   string         `json:"mon_host"`
 	User      string         `json:"user"`
 	Pools     identity.Pools `json:"pools"`
@@ -1678,7 +1819,7 @@ type storageView struct {
 }
 
 func viewStorage(c identity.Storage) storageView {
-	return storageView{ID: c.ID, FSID: c.FSID, Name: c.Name, MonHost: c.MonHost, User: c.User, Pools: c.Pools, Placement: c.Placement, Created: c.Created, Updated: c.Updated}
+	return storageView{ID: c.ID, FSID: c.FSID, Name: c.Name, Namespace: c.Namespace, MonHost: c.MonHost, User: c.User, Pools: c.Pools, Placement: c.Placement, Created: c.Created, Updated: c.Updated}
 }
 
 func pathStorageID(r *http.Request) (int64, error) {
@@ -1765,14 +1906,16 @@ func (s *Server) storageDelete(w http.ResponseWriter, r *http.Request) {
 // ---- admin: nodes ----
 
 type nodeView struct {
-	ID       int64     `json:"id"`
-	Mode     string    `json:"mode"`
-	Address  string    `json:"address"`
-	Host     string    `json:"host"`
-	Version  string    `json:"version"`
-	Started  time.Time `json:"started"`
-	LastSeen time.Time `json:"last_seen"`
-	Alive    bool      `json:"alive"`
+	ID      int64  `json:"id"`
+	Mode    string `json:"mode"`
+	Address string `json:"address"`
+	Host    string `json:"host"`
+	Version string `json:"version"`
+	// Namespaces the node serves; empty means all.
+	Namespaces []string  `json:"namespaces"`
+	Started    time.Time `json:"started"`
+	LastSeen   time.Time `json:"last_seen"`
+	Alive      bool      `json:"alive"`
 }
 
 func (s *Server) nodeList(w http.ResponseWriter, r *http.Request) {
@@ -1784,7 +1927,11 @@ func (s *Server) nodeList(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	out := make([]nodeView, 0, len(list))
 	for _, n := range list {
-		out = append(out, nodeView{ID: n.ID, Mode: n.Mode, Address: n.Address, Host: n.Host, Version: n.Version, Started: n.Started, LastSeen: n.LastSeen, Alive: n.Alive(now)})
+		nss := n.Namespaces
+		if nss == nil {
+			nss = []string{}
+		}
+		out = append(out, nodeView{ID: n.ID, Mode: n.Mode, Address: n.Address, Host: n.Host, Version: n.Version, Namespaces: nss, Started: n.Started, LastSeen: n.LastSeen, Alive: n.Alive(now)})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }

@@ -103,6 +103,10 @@ func (s *session) authErr(err error) error {
 		return noErr(imap.ResponseCodeAuthenticationFailed, "Account disabled")
 	case errors.Is(err, authsvc.ErrServiceDisabled):
 		return noErr(imap.ResponseCodeAuthenticationFailed, "IMAP is not enabled for this account")
+	case errors.Is(err, authsvc.ErrNamespaceDisabled):
+		return noErr(imap.ResponseCodeAuthenticationFailed, "Account disabled")
+	case errors.Is(err, authsvc.ErrNotServed):
+		return noErr(imap.ResponseCodeUnavailable, "Mailbox is not served by this server")
 	case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken), errors.Is(err, authsvc.ErrTokenExpired):
 		return imapserver.ErrAuthFailed
 	}

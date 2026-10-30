@@ -29,7 +29,7 @@ func BenchmarkPurgeScheduler10k(b *testing.B) {
 	b.Run("full-registry", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := db.ListMailboxes(ctx, func(id uuid.UUID) error {
+			if err := db.ListMailboxes(ctx, "", func(id uuid.UUID) error {
 				return db.EnqueuePeriodic(ctx, "purge-trash", id.String(), map[string]uuid.UUID{"mailbox": id})
 			}); err != nil {
 				b.Fatal(err)
@@ -39,7 +39,7 @@ func BenchmarkPurgeScheduler10k(b *testing.B) {
 	b.Run("due-index-idle", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if n, err := db.EnqueueDuePurges(ctx, 512); err != nil || n != 0 {
+			if n, err := db.EnqueueDuePurges(ctx, "", 512); err != nil || n != 0 {
 				b.Fatalf("idle: %d %v", n, err)
 			}
 		}

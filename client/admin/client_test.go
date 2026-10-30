@@ -85,7 +85,7 @@ func newFixture(t *testing.T) *fixture {
 	h, _ := cryptoauth.HashPassword("correct horse")
 	f.user, _ = f.ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: f.mb.ID, Enabled: true, Roles: []string{"read", "write", "send"}, Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}}})
 	_, f.userTk, _ = f.ids.CreateToken(ctx, f.user.ID, nil, f.now.Add(24*time.Hour), "user token")
-	_, f.adminTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdmin, f.now.Add(24*time.Hour), "test admin")
+	_, f.adminTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdmin, "", f.now.Add(24*time.Hour), "test admin")
 	f.c = New(f.ts.URL, f.adminTk, WithTimeout(10*time.Second), WithUserAgent("test"))
 	return f
 }
@@ -160,12 +160,12 @@ func TestDomainsAndPagination(t *testing.T) {
 		_, err := f.c.CreateDomain(ctx, DomainRequest{Name: n})
 		must(t, err)
 	}
-	p, err := f.c.ListDomains(ctx, "", 2)
+	p, err := f.c.ListDomains(ctx, "", "", 2)
 	must(t, err)
 	if len(p.Items) != 2 || !p.More || p.Next != "b.example" {
 		t.Fatalf("page: %+v", p)
 	}
-	all, err := f.c.ListDomainsAll(ctx)
+	all, err := f.c.ListDomainsAll(ctx, "")
 	must(t, err)
 	if len(all) != 4 || all[3] != "example.org" {
 		t.Fatalf("all: %v", all)
@@ -187,7 +187,7 @@ func TestMailboxesAccountsAliasesTokens(t *testing.T) {
 	if mb.ID == "" || mb.State != "active" || mb.Quota.HardBytes != 5 {
 		t.Fatalf("mailbox: %+v", mb)
 	}
-	list, err := f.c.ListMailboxes(ctx)
+	list, err := f.c.ListMailboxes(ctx, "")
 	must(t, err)
 	if len(list) != 2 {
 		t.Fatalf("list: %+v", list)
@@ -326,7 +326,7 @@ func TestHoldAuditQueuesKeysIdentity(t *testing.T) {
 	if _, err := f.c.HoldMailbox(ctx, f.mb.ID.String(), HoldRequest{Reason: "again"}); !IsConflict(err) {
 		t.Fatalf("double hold: %v", err)
 	}
-	holds, err := f.c.ListHolds(ctx)
+	holds, err := f.c.ListHolds(ctx, "")
 	must(t, err)
 	if len(holds) != 1 {
 		t.Fatal("holds")
@@ -502,11 +502,11 @@ func TestRenameViaOrphanedMailboxAndTemporaryPassword(t *testing.T) {
 		t.Fatalf("passwords after temporary: %+v", got.Passwords)
 	}
 	// Rename: remove the account, the mailbox is orphaned, attach a new one.
-	if o, _ := f.c.ListOrphanedMailboxes(ctx); len(o) != 0 {
+	if o, _ := f.c.ListOrphanedMailboxes(ctx, ""); len(o) != 0 {
 		t.Fatalf("orphaned before: %v", o)
 	}
 	must(t, f.c.DeleteAccount(ctx, old.ID))
-	orphans, err := f.c.ListOrphanedMailboxes(ctx)
+	orphans, err := f.c.ListOrphanedMailboxes(ctx, "")
 	must(t, err)
 	if len(orphans) != 1 || orphans[0].ID != mb.ID {
 		t.Fatalf("orphaned after delete: %+v", orphans)
@@ -516,7 +516,7 @@ func TestRenameViaOrphanedMailboxAndTemporaryPassword(t *testing.T) {
 	if nu.MailboxID != mb.ID {
 		t.Fatal("new account not on the old mailbox")
 	}
-	if o, _ := f.c.ListOrphanedMailboxes(ctx); len(o) != 0 {
+	if o, _ := f.c.ListOrphanedMailboxes(ctx, ""); len(o) != 0 {
 		t.Fatalf("still orphaned: %v", o)
 	}
 	info, err := f.c.InspectMailbox(ctx, mb.ID)

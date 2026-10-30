@@ -425,6 +425,10 @@ func (ss *session) finishAuth(act actor.Actor, err error) bool {
 			return ss.failed("[AUTH] account disabled")
 		case errors.Is(err, authsvc.ErrServiceDisabled):
 			return ss.failed("[AUTH] POP3 is not enabled for this account")
+		case errors.Is(err, authsvc.ErrNamespaceDisabled):
+			return ss.failed("[AUTH] account disabled")
+		case errors.Is(err, authsvc.ErrNotServed):
+			return ss.failed("[SYS/TEMP] mailbox is not served by this server")
 		case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken), errors.Is(err, authsvc.ErrTokenExpired):
 			return ss.failed("[AUTH] authentication failed")
 		default:

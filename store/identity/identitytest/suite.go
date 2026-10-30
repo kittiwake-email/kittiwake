@@ -24,6 +24,7 @@ func Run(t *testing.T, f Factory) {
 		name string
 		fn   func(*testing.T, Factory)
 	}{
+		{"Namespaces", testNamespaces},
 		{"Domains", testDomains},
 		{"AccountsAndMailboxes", testAccountsAndMailboxes},
 		{"Aliases", testAliases},
@@ -52,9 +53,12 @@ func testDomains(t *testing.T, f Factory) {
 		t.Fatalf("expected invalid, got %v", err)
 	}
 	_, _ = s.CreateDomain(ctx, identity.Domain{Name: "a.example", Enabled: true})
-	names, more, err := s.ListDomains(ctx, "", 10)
+	names, more, err := s.ListDomains(ctx, "", "", 10)
 	if err != nil || more || len(names) != 2 || names[0] != "a.example" || names[1] != "example.org" {
 		t.Fatalf("list: %v %v %v", names, more, err)
+	}
+	if d.Namespace != identity.DefaultNamespace {
+		t.Fatalf("default namespace: %+v", d)
 	}
 	upd, err := s.UpdateDomain(ctx, "example.org", func(d *identity.Domain) error { d.Enabled = false; return nil })
 	if err != nil || upd.Enabled {
@@ -178,7 +182,7 @@ func testAccountsAndMailboxes(t *testing.T, f Factory) {
 		t.Fatal(err)
 	}
 	var ids []uuid.UUID
-	_ = s.ListMailboxes(ctx, func(id uuid.UUID) error { ids = append(ids, id); return nil })
+	_ = s.ListMailboxes(ctx, "", func(id uuid.UUID) error { ids = append(ids, id); return nil })
 	if len(ids) != 1 || ids[0] != mb2.ID {
 		t.Fatalf("mailboxes: %v", ids)
 	}
@@ -357,23 +361,38 @@ func testAdminTokens(t *testing.T, f Factory) {
 	s := f(t)
 	ctx := context.Background()
 	exp := s.Now().Add(time.Hour)
-	if _, _, err := s.CreateAdminToken(ctx, identity.RoleAdmin, exp, ""); !errors.Is(err, identity.ErrInvalid) {
+	if _, _, err := s.CreateAdminToken(ctx, identity.RoleAdmin, "", exp, ""); !errors.Is(err, identity.ErrInvalid) {
 		t.Fatal("comment required")
 	}
-	if _, _, err := s.CreateAdminToken(ctx, "read", exp, "x"); !errors.Is(err, identity.ErrInvalid) {
+	if _, _, err := s.CreateAdminToken(ctx, "read", "", exp, "x"); !errors.Is(err, identity.ErrInvalid) {
 		t.Fatal("account role rejected as admin role")
 	}
-	full, secret, err := s.CreateAdminToken(ctx, identity.RoleAdmin, exp, "ops")
-	if err != nil || !full.IsAdmin() || full.Roles[0] != identity.RoleAdmin {
+	full, secret, err := s.CreateAdminToken(ctx, identity.RoleAdmin, "", exp, "ops")
+	if err != nil || !full.IsAdmin() || full.Roles[0] != identity.RoleAdmin || full.Namespace != "" {
 		t.Fatalf("%+v %v", full, err)
 	}
-	ro, _, err := s.CreateAdminToken(ctx, identity.RoleAdminRead, exp, "monitoring")
+	ro, _, err := s.CreateAdminToken(ctx, identity.RoleAdminRead, "", exp, "monitoring")
 	if err != nil || ro.Roles[0] != identity.RoleAdminRead {
 		t.Fatal(err)
 	}
 	got, err := s.LookupToken(ctx, secret)
-	if err != nil || got.Value.ID != full.ID || !got.Value.IsAdmin() {
+	if err != nil || got.Value.ID != full.ID || !got.Value.IsAdmin() || got.Value.Namespace != "" {
 		t.Fatalf("lookup: %+v %v", got, err)
+	}
+	// Tenant admin: bound to an existing namespace.
+	if _, _, err := s.CreateAdminToken(ctx, identity.RoleAdmin, "nope", exp, "x"); !errors.Is(err, identity.ErrNamespaceUnknown) {
+		t.Fatalf("unknown namespace: %v", err)
+	}
+	_, _ = s.CreateNamespace(ctx, identity.Namespace{Name: "acme", Enabled: true})
+	tenant, tsecret, err := s.CreateAdminToken(ctx, identity.RoleAdmin, "ACME", exp, "acme ops")
+	if err != nil || tenant.Namespace != "acme" {
+		t.Fatalf("tenant token: %+v %v", tenant, err)
+	}
+	if tg, err := s.LookupToken(ctx, tsecret); err != nil || tg.Value.Namespace != "acme" || !tg.Value.IsAdmin() {
+		t.Fatalf("tenant lookup: %+v %v", tg, err)
+	}
+	if err := s.DeleteAdminToken(ctx, tenant.ID); err != nil {
+		t.Fatal(err)
 	}
 	list, _ := s.ListAdminTokens(ctx)
 	if len(list) != 2 {
@@ -572,5 +591,159 @@ func testNodes(t *testing.T, f Factory) {
 	}
 	if list, _ := s.ListNodes(ctx, ""); len(list) != 0 {
 		t.Fatalf("after delete: %+v", list)
+	}
+}
+
+func testNamespaces(t *testing.T, f Factory) {
+	s := f(t)
+	ctx := context.Background()
+	// The default namespace exists without being created.
+	def, err := s.GetNamespace(ctx, "")
+	if err != nil || def.Value.Name != identity.DefaultNamespace || !def.Value.Enabled {
+		t.Fatalf("default: %+v %v", def.Value, err)
+	}
+	if _, err := s.CreateNamespace(ctx, identity.Namespace{Name: "default"}); !errors.Is(err, identity.ErrExists) {
+		t.Fatalf("default exists: %v", err)
+	}
+	for _, bad := range []string{"Bad Name", "-x", "x-", "a.b", "toolongtoolongtoolongtoolongtoolongtoolongtoolongtoolongtoolongtoolong"} {
+		if _, err := s.CreateNamespace(ctx, identity.Namespace{Name: bad}); !errors.Is(err, identity.ErrInvalid) {
+			t.Fatalf("%q: expected invalid, got %v", bad, err)
+		}
+	}
+	ns, err := s.CreateNamespace(ctx, identity.Namespace{Name: " ACME ", Enabled: true, Settings: map[string]string{"backup.interval": "12h"}})
+	if err != nil || ns.Name != "acme" || !ns.Enabled {
+		t.Fatalf("create: %+v %v", ns, err)
+	}
+	if _, err := s.CreateNamespace(ctx, identity.Namespace{Name: "acme"}); !errors.Is(err, identity.ErrExists) {
+		t.Fatalf("duplicate: %v", err)
+	}
+	names, more, err := s.ListNamespaces(ctx, "", 10)
+	if err != nil || more || len(names) != 2 || names[0] != "acme" || names[1] != "default" {
+		t.Fatalf("list: %v %v %v", names, more, err)
+	}
+	upd, err := s.UpdateNamespace(ctx, "acme", func(n *identity.Namespace) error { n.Enabled = false; return nil })
+	if err != nil || upd.Enabled || upd.Settings["backup.interval"] != "12h" {
+		t.Fatalf("update: %+v %v", upd, err)
+	}
+	if _, err := s.UpdateNamespace(ctx, "acme", func(n *identity.Namespace) error { n.Name = "other"; return nil }); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("rename: %v", err)
+	}
+	if g, _ := s.GetNamespace(ctx, "ACME"); g.Value.Enabled {
+		t.Fatal("update not persisted")
+	}
+	if err := s.DeleteNamespace(ctx, "default"); !errors.Is(err, identity.ErrInUse) {
+		t.Fatalf("delete default: %v", err)
+	}
+
+	// Ownership: domains, mailboxes and storage carry their namespace;
+	// accounts and aliases never link across namespaces.
+	if _, err := s.CreateDomain(ctx, identity.Domain{Name: "nope.example", Namespace: "nope", Enabled: true}); !errors.Is(err, identity.ErrNamespaceUnknown) {
+		t.Fatalf("domain in unknown namespace: %v", err)
+	}
+	d, err := s.CreateDomain(ctx, identity.Domain{Name: "acme.example", Namespace: "acme", Enabled: true})
+	if err != nil || d.Namespace != "acme" {
+		t.Fatalf("domain: %+v %v", d, err)
+	}
+	_, _ = s.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
+	if names, _, _ := s.ListDomains(ctx, "acme", "", 10); len(names) != 1 || names[0] != "acme.example" {
+		t.Fatalf("domains of acme: %v", names)
+	}
+	if names, _, _ := s.ListDomains(ctx, "default", "", 10); len(names) != 1 || names[0] != "example.org" {
+		t.Fatalf("domains of default: %v", names)
+	}
+	if _, err := s.UpdateDomain(ctx, "acme.example", func(x *identity.Domain) error { x.Namespace = "default"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := s.GetDomain(ctx, "acme.example"); g.Value.Namespace != "acme" {
+		t.Fatalf("domain namespace must be immutable: %+v", g.Value)
+	}
+	if err := s.DeleteNamespace(ctx, "acme"); !errors.Is(err, identity.ErrInUse) {
+		t.Fatalf("delete with domains: %v", err)
+	}
+
+	pools := identity.Pools{Messages: "m", Attachments: "a", Index: "i"}
+	fs := uuid.New()
+	defStorage, err := s.CreateStorage(ctx, identity.Storage{Name: "shared-default", FSID: fs, MonHost: "x", Pools: pools, Placement: true})
+	if err != nil || defStorage.Namespace != identity.DefaultNamespace {
+		t.Fatalf("storage: %+v %v", defStorage, err)
+	}
+	// Same cluster, another namespace: fine with other pools, refused with a shared one.
+	if _, err := s.CreateStorage(ctx, identity.Storage{Name: "shared-acme", Namespace: "acme", FSID: fs, MonHost: "x", Pools: identity.Pools{Messages: "m2", Attachments: "a2", Index: "i"}}); !errors.Is(err, identity.ErrExists) {
+		t.Fatalf("shared pool on one cluster: %v", err)
+	}
+	acmeStorage, err := s.CreateStorage(ctx, identity.Storage{Name: "shared-acme", Namespace: "acme", FSID: fs, MonHost: "x", Pools: identity.Pools{Messages: "m2", Attachments: "a2", Index: "i2"}, Placement: true})
+	if err != nil || acmeStorage.Namespace != "acme" {
+		t.Fatalf("storage in acme: %+v %v", acmeStorage, err)
+	}
+	if _, err := s.UpdateStorage(ctx, acmeStorage.ID, func(c *identity.Storage) error { c.Namespace = "default"; return nil }); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("storage namespace must be immutable: %v", err)
+	}
+
+	if _, err := s.CreateMailbox(ctx, identity.Mailbox{Namespace: "acme", StorageID: defStorage.ID}); !errors.Is(err, identity.ErrNamespaceMismatch) {
+		t.Fatalf("mailbox on another namespace's storage: %v", err)
+	}
+	acmeMB, err := s.CreateMailbox(ctx, identity.Mailbox{Namespace: "acme", StorageID: acmeStorage.ID})
+	if err != nil || acmeMB.Namespace != "acme" {
+		t.Fatalf("mailbox: %+v %v", acmeMB, err)
+	}
+	defMB, _ := s.CreateMailbox(ctx, identity.Mailbox{})
+	if defMB.Namespace != identity.DefaultNamespace {
+		t.Fatalf("mailbox default namespace: %+v", defMB)
+	}
+	if _, err := s.UpdateMailbox(ctx, acmeMB.ID, func(m *identity.Mailbox) error { m.Namespace = "default"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := s.GetMailbox(ctx, acmeMB.ID); g.Value.Namespace != "acme" {
+		t.Fatalf("mailbox namespace must be immutable: %+v", g.Value)
+	}
+	var ids []uuid.UUID
+	_ = s.ListMailboxes(ctx, "acme", func(id uuid.UUID) error { ids = append(ids, id); return nil })
+	if len(ids) != 1 || ids[0] != acmeMB.ID {
+		t.Fatalf("mailboxes of acme: %v", ids)
+	}
+	ids = nil
+	_ = s.ListMailboxes(ctx, "", func(id uuid.UUID) error { ids = append(ids, id); return nil })
+	if len(ids) != 2 {
+		t.Fatalf("all mailboxes: %v", ids)
+	}
+
+	if _, err := s.CreateAccount(ctx, identity.Account{Username: "u@acme.example", MailboxID: defMB.ID, Roles: []string{identity.RoleRead}, Enabled: true}); !errors.Is(err, identity.ErrNamespaceMismatch) {
+		t.Fatalf("account across namespaces: %v", err)
+	}
+	a, err := s.CreateAccount(ctx, identity.Account{Username: "u@acme.example", MailboxID: acmeMB.ID, Roles: []string{identity.RoleRead}, Enabled: true})
+	if err != nil || a.Namespace != "acme" {
+		t.Fatalf("account: %+v %v", a, err)
+	}
+	if g, _ := s.GetAccountByUsername(ctx, "u@acme.example"); g.Value.Namespace != "acme" {
+		t.Fatalf("account namespace not read back: %+v", g.Value)
+	}
+	if _, err := s.RelinkAccount(ctx, a.ID, defMB.ID); !errors.Is(err, identity.ErrNamespaceMismatch) {
+		t.Fatalf("relink across namespaces: %v", err)
+	}
+	if _, err := s.CreateAlias(ctx, identity.Alias{Address: "info@acme.example", Enabled: true, Destinations: []identity.Destination{{MailboxID: defMB.ID}}}); !errors.Is(err, identity.ErrNamespaceMismatch) {
+		t.Fatalf("alias across namespaces: %v", err)
+	}
+	al, err := s.CreateAlias(ctx, identity.Alias{Address: "info@acme.example", Enabled: true, Destinations: []identity.Destination{{MailboxID: acmeMB.ID}, {Address: "x@example.org"}}})
+	if err != nil || al.Namespace != "acme" {
+		t.Fatalf("alias: %+v %v", al, err)
+	}
+	if _, err := s.UpdateAlias(ctx, "info@acme.example", func(x *identity.Alias) error {
+		x.Destinations = []identity.Destination{{MailboxID: defMB.ID}}
+		return nil
+	}); !errors.Is(err, identity.ErrNamespaceMismatch) {
+		t.Fatalf("alias retarget across namespaces: %v", err)
+	}
+
+	// Nodes record what they serve.
+	n, err := s.RegisterNode(ctx, identity.Node{Mode: "imap", Address: "[2001:db8::1]:143", Namespaces: []string{"ACME", "acme", "default"}, Expires: s.Now().Add(time.Minute)})
+	if err != nil || len(n.Namespaces) != 2 || n.Namespaces[0] != "acme" || !n.Serves("acme") || n.Serves("other") {
+		t.Fatalf("node namespaces: %+v %v", n, err)
+	}
+	all, _ := s.RegisterNode(ctx, identity.Node{Mode: "imap", Address: "[2001:db8::2]:143", Expires: s.Now().Add(time.Minute)})
+	if len(all.Namespaces) != 0 || !all.Serves("anything") {
+		t.Fatalf("node serving all: %+v", all)
+	}
+	if list, _ := s.ListNodes(ctx, "imap"); len(list) != 2 || len(list[0].Namespaces) != 2 || len(list[1].Namespaces) != 0 {
+		t.Fatalf("listed node namespaces: %+v", list)
 	}
 }

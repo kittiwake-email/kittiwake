@@ -6,6 +6,13 @@
 # runs `serve --modes <mode>`), so the line is left out there.
 # modes: [lmtp, jmap, admin, socketmap]
 
+# Namespaces this process serves (tenant isolation, see README "Namespaces").
+# Empty or absent: every namespace. A restricted process connects only to its
+# namespaces' storage, takes only their tasks and refuses logins and deliveries
+# for mailboxes elsewhere, so IMAP, POP3, JMAP, workers and backup nodes can be
+# scaled out per namespace.
+# namespaces: [default, acme]
+
 # Metadata database (MariaDB 10.6+): domains, mailboxes, accounts, aliases,
 # tokens, sessions, the worker queue and the Ceph cluster registry. Create or
 # upgrade the schema with `kittiwake migrate -c <config>` before starting.
@@ -153,6 +160,16 @@ backup:
   spool_dir: /var/lib/kittiwake/spool
   concurrency: 4               # tasks one backup process runs at once
   batch: 100                   # due mailboxes enqueued per scheduler tick
+  # Per-namespace targets: a tenant's backups in its own bucket under its own
+  # keys. Namespaces not listed use the target above; only the namespaces this
+  # node serves are opened, so other tenants' credentials never load here.
+  # namespaces:
+  #   acme:
+  #     target: s3
+  #     s3: {endpoint: https://s3.acme.example, region: us-east-1, bucket: acme-mail-backups,
+  #          access_key: ${ACME_S3_ACCESS_KEY}, secret_key: ${ACME_S3_SECRET_KEY}, path_style: true}
+  #     keys: [{id: 1, key: "file:/etc/kittiwake/backup-acme.key"}]
+  #     current_key: 1
 
 log:
   level: info                  # debug | info | warn | error

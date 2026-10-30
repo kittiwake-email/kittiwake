@@ -77,6 +77,9 @@ func (s *Server) backupSummary(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, backup.ErrNotConfigured)
 		return
 	}
+	if !s.platformOnly(w, r) {
+		return
+	}
 	sum, err := s.cfg.Backup.Catalog().Summary(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
@@ -106,6 +109,12 @@ func (s *Server) backupJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		mb = id
 	}
+	if mb != uuid.Nil {
+		if _, err := s.admin.GetMailbox(r.Context(), mb); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	jobs, err := s.cfg.Backup.Catalog().ListJobs(r.Context(), mb, r.URL.Query().Get("kind"), 200)
 	if err != nil {
 		s.fail(w, r, err)
@@ -113,6 +122,16 @@ func (s *Server) backupJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	if jobs == nil {
 		jobs = []backup.Job{}
+	}
+	if actor.From(r.Context()).Namespace != "" {
+		// A tenant admin sees only jobs on its own mailboxes.
+		kept := jobs[:0]
+		for _, j := range jobs {
+			if _, err := s.admin.GetMailbox(r.Context(), j.Mailbox); err == nil {
+				kept = append(kept, j)
+			}
+		}
+		jobs = kept
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": jobs})
 }
@@ -124,6 +143,10 @@ func (s *Server) backupJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.cfg.Backup.Catalog().GetJob(r.Context(), r.PathValue("jid"))
 	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if _, err := s.admin.GetMailbox(r.Context(), j.Mailbox); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -178,6 +201,10 @@ func (s *Server) mailboxBackupGet(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, backup.ErrNotConfigured)
 		return
 	}
+	if _, err := s.admin.GetMailbox(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	run, err := s.cfg.Backup.Catalog().GetRun(r.Context(), id, r.PathValue("run"))
 	if err != nil {
 		s.fail(w, r, err)
@@ -225,7 +252,13 @@ func (s *Server) fileJob(w http.ResponseWriter, r *http.Request, j backup.Job) {
 		s.fail(w, r, backup.ErrNotConfigured)
 		return
 	}
+	m, err := s.admin.GetMailbox(r.Context(), j.Mailbox)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	j.ID = uuid.NewString()
+	j.Namespace = m.Namespace
 	j.State = backup.JobPending
 	j.Requested = actor.From(r.Context()).Username
 	j.Created = time.Now().UTC()
@@ -248,6 +281,10 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, kind string) (uu
 	}
 	if s.cfg.Backup == nil {
 		s.fail(w, r, backup.ErrNotConfigured)
+		return uuid.Nil, "", false
+	}
+	if _, err := s.admin.GetMailbox(r.Context(), id); err != nil {
+		s.fail(w, r, err)
 		return uuid.Nil, "", false
 	}
 	runID := r.PathValue("run")

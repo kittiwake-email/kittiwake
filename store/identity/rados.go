@@ -22,14 +22,15 @@ import (
 
 // Namespaces in the meta pool.
 const (
-	nsDomains   = "domains"
-	nsMailboxes = "mailboxes"
-	nsAccounts  = "accounts"
-	nsNames     = "names"
-	nsAliases   = "aliases"
-	nsTokens    = "tokens"
-	nsStorage   = "storage"
-	nsNodes     = "nodes"
+	nsNamespaces = "namespaces"
+	nsDomains    = "domains"
+	nsMailboxes  = "mailboxes"
+	nsAccounts   = "accounts"
+	nsNames      = "names"
+	nsAliases    = "aliases"
+	nsTokens     = "tokens"
+	nsStorage    = "storage"
+	nsNodes      = "nodes"
 
 	allDomainsObject = "_all"
 	schemaVersion    = "1"
@@ -40,15 +41,16 @@ const (
 // record, exclusive create for uniqueness, omap listings. It is the
 // development and test backend; production uses the MariaDB backend.
 type Rados struct {
-	domains   rados.IOContext
-	mailboxes rados.IOContext
-	accounts  rados.IOContext
-	names     rados.IOContext
-	aliases   rados.IOContext
-	tokens    rados.IOContext
-	storage   rados.IOContext
-	nodes     rados.IOContext
-	Now       func() time.Time
+	namespaces rados.IOContext
+	domains    rados.IOContext
+	mailboxes  rados.IOContext
+	accounts   rados.IOContext
+	names      rados.IOContext
+	aliases    rados.IOContext
+	tokens     rados.IOContext
+	storage    rados.IOContext
+	nodes      rados.IOContext
+	Now        func() time.Time
 }
 
 // SetNow installs the clock (the Store wrapper forwards its own).
@@ -57,15 +59,16 @@ func (s *Rados) SetNow(now func() time.Time) { s.Now = now }
 // NewRados returns the RADOS backend on the given meta pool context.
 func NewRados(meta rados.IOContext) *Rados {
 	return &Rados{
-		domains:   meta.Namespace(nsDomains),
-		mailboxes: meta.Namespace(nsMailboxes),
-		accounts:  meta.Namespace(nsAccounts),
-		names:     meta.Namespace(nsNames),
-		aliases:   meta.Namespace(nsAliases),
-		tokens:    meta.Namespace(nsTokens),
-		storage:   meta.Namespace(nsStorage),
-		nodes:     meta.Namespace(nsNodes),
-		Now:       time.Now,
+		namespaces: meta.Namespace(nsNamespaces),
+		domains:    meta.Namespace(nsDomains),
+		mailboxes:  meta.Namespace(nsMailboxes),
+		accounts:   meta.Namespace(nsAccounts),
+		names:      meta.Namespace(nsNames),
+		aliases:    meta.Namespace(nsAliases),
+		tokens:     meta.Namespace(nsTokens),
+		storage:    meta.Namespace(nsStorage),
+		nodes:      meta.Namespace(nsNodes),
+		Now:        time.Now,
 	}
 }
 
@@ -148,6 +151,25 @@ func NormalizeAddress(addr string) (address, domain string, err error) {
 	return addr, addr[i+1:], nil
 }
 
+// NormalizeNamespace lowercases and validates a namespace name: a DNS
+// label (letters, digits and hyphens, 1 to 63 characters, no hyphen at
+// either end). Empty means the default namespace.
+func NormalizeNamespace(name string) (string, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return DefaultNamespace, nil
+	}
+	if len(name) > 63 || name[0] == '-' || name[len(name)-1] == '-' {
+		return "", fmt.Errorf("%w: namespace %q", ErrInvalid, name)
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return "", fmt.Errorf("%w: namespace %q", ErrInvalid, name)
+		}
+	}
+	return name, nil
+}
+
 // NormalizeDomain lowercases and validates a domain name.
 func NormalizeDomain(d string) (string, error) {
 	d = strings.TrimSpace(strings.ToLower(d))
@@ -187,22 +209,191 @@ func validateRoles(roles []string) error {
 	return nil
 }
 
+// ---- Namespaces ----
+
+const allNamespacesObject = "_all"
+
+// ensureDefault creates the default namespace on first use: the memory
+// backend has no migration to seed it.
+func (s *Rados) ensureDefault(ctx context.Context) error {
+	if _, err := getJSON[Namespace](ctx, s.namespaces, DefaultNamespace); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	now := s.Now().UTC()
+	ns := Namespace{Name: DefaultNamespace, Enabled: true, Created: now, Updated: now}
+	if _, err := createJSON(ctx, s.namespaces, DefaultNamespace, ns); err != nil && !errors.Is(err, ErrExists) {
+		return err
+	}
+	_, err := s.namespaces.Write(ctx, allNamespacesObject, rados.NewWriteTx().OmapSet(map[string][]byte{DefaultNamespace: nil}))
+	return mapErr(err)
+}
+
+// requireNamespace normalizes a namespace name and checks that it exists.
+func (s *Rados) requireNamespace(ctx context.Context, name string) (string, error) {
+	name, err := NormalizeNamespace(name)
+	if err != nil {
+		return "", err
+	}
+	if name == DefaultNamespace {
+		return name, s.ensureDefault(ctx)
+	}
+	if _, err := getJSON[Namespace](ctx, s.namespaces, name); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", fmt.Errorf("%w: %s", ErrNamespaceUnknown, name)
+		}
+		return "", err
+	}
+	return name, nil
+}
+
+// CreateNamespace creates a namespace.
+func (s *Rados) CreateNamespace(ctx context.Context, ns Namespace) (Namespace, error) {
+	name, err := NormalizeNamespace(ns.Name)
+	if err != nil {
+		return Namespace{}, err
+	}
+	if name == DefaultNamespace {
+		return Namespace{}, fmt.Errorf("%w: namespace %s", ErrExists, name)
+	}
+	ns.Name = name
+	now := s.Now().UTC()
+	ns.Created, ns.Updated = now, now
+	if _, err := createJSON(ctx, s.namespaces, name, ns); err != nil {
+		return Namespace{}, err
+	}
+	if _, err := s.namespaces.Write(ctx, allNamespacesObject, rados.NewWriteTx().OmapSet(map[string][]byte{name: nil})); err != nil {
+		return Namespace{}, mapErr(err)
+	}
+	return ns, nil
+}
+
+// GetNamespace returns a namespace.
+func (s *Rados) GetNamespace(ctx context.Context, name string) (Versioned[Namespace], error) {
+	name, err := NormalizeNamespace(name)
+	if err != nil {
+		return Versioned[Namespace]{}, err
+	}
+	if name == DefaultNamespace {
+		if err := s.ensureDefault(ctx); err != nil {
+			return Versioned[Namespace]{}, err
+		}
+	}
+	return getJSON[Namespace](ctx, s.namespaces, name)
+}
+
+// UpdateNamespace applies fn (the name is immutable), retrying on conflict.
+func (s *Rados) UpdateNamespace(ctx context.Context, name string, fn func(*Namespace) error) (Namespace, error) {
+	name, err := NormalizeNamespace(name)
+	if err != nil {
+		return Namespace{}, err
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		cur, err := s.GetNamespace(ctx, name)
+		if err != nil {
+			return Namespace{}, err
+		}
+		ns := cur.Value
+		if err := fn(&ns); err != nil {
+			return Namespace{}, err
+		}
+		if ns.Name != name {
+			return Namespace{}, fmt.Errorf("%w: namespace names are immutable", ErrInvalid)
+		}
+		ns.Updated = s.Now().UTC()
+		if _, err := updateJSON(ctx, s.namespaces, name, cur.Version, ns); err != nil {
+			if errors.Is(err, ErrConflict) {
+				continue
+			}
+			return Namespace{}, err
+		}
+		return ns, nil
+	}
+	return Namespace{}, ErrConflict
+}
+
+// DeleteNamespace removes an empty namespace: no domains, mailboxes or
+// storage. The default namespace cannot be removed.
+func (s *Rados) DeleteNamespace(ctx context.Context, name string) error {
+	name, err := NormalizeNamespace(name)
+	if err != nil {
+		return err
+	}
+	if name == DefaultNamespace {
+		return fmt.Errorf("%w: the default namespace cannot be removed", ErrInUse)
+	}
+	if _, err := getJSON[Namespace](ctx, s.namespaces, name); err != nil {
+		return err
+	}
+	kv, _, err := listOmap(ctx, s.domains, allDomainsObject, "", "", 0)
+	if err != nil {
+		return err
+	}
+	for _, e := range kv {
+		if string(e.Value) == name {
+			return fmt.Errorf("%w: namespace %s has domains", ErrInUse, name)
+		}
+	}
+	stor, err := s.ListStorage(ctx)
+	if err != nil {
+		return err
+	}
+	for _, c := range stor {
+		if c.Namespace == name {
+			return fmt.Errorf("%w: namespace %s has storage", ErrInUse, name)
+		}
+	}
+	inUse := errors.New("in use")
+	err = s.ListMailboxes(ctx, name, func(uuid.UUID) error { return inUse })
+	if errors.Is(err, inUse) {
+		return fmt.Errorf("%w: namespace %s has mailboxes", ErrInUse, name)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := s.namespaces.Write(ctx, allNamespacesObject, rados.NewWriteTx().OmapRemove(name)); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		return mapErr(err)
+	}
+	return mapErr(s.namespaces.Delete(ctx, name))
+}
+
+// ListNamespaces lists namespace names after the cursor.
+func (s *Rados) ListNamespaces(ctx context.Context, after string, max int) (names []string, more bool, err error) {
+	if err := s.ensureDefault(ctx); err != nil {
+		return nil, false, err
+	}
+	kv, more, err := listOmap(ctx, s.namespaces, allNamespacesObject, "", after, max)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, e := range kv {
+		names = append(names, e.Key)
+	}
+	return names, more, nil
+}
+
 // ---- Domains ----
 
-// CreateDomain creates a domain.
+// CreateDomain creates a domain in its namespace (default when empty).
 func (s *Rados) CreateDomain(ctx context.Context, d Domain) (Domain, error) {
 	name, err := NormalizeDomain(d.Name)
 	if err != nil {
 		return Domain{}, err
 	}
-	d.Name = name
+	ns, err := s.requireNamespace(ctx, d.Namespace)
+	if err != nil {
+		return Domain{}, err
+	}
+	d.Name, d.Namespace = name, ns
 	now := s.Now().UTC()
 	d.Created, d.Updated = now, now
 	if _, err := createJSON(ctx, s.domains, name, d); err != nil {
 		return Domain{}, err
 	}
-	// Listing (repairable by reconcile).
-	if _, err := s.domains.Write(ctx, allDomainsObject, rados.NewWriteTx().OmapSet(map[string][]byte{name: nil})); err != nil {
+	// Listing (repairable by reconcile); the value is the namespace so a
+	// filtered listing needs no reads.
+	if _, err := s.domains.Write(ctx, allDomainsObject, rados.NewWriteTx().OmapSet(map[string][]byte{name: []byte(ns)})); err != nil {
 		return Domain{}, mapErr(err)
 	}
 	return d, nil
@@ -232,7 +423,7 @@ func (s *Rados) UpdateDomain(ctx context.Context, name string, fn func(*Domain) 
 		if err := fn(&d); err != nil {
 			return Domain{}, err
 		}
-		d.Name = name
+		d.Name, d.Namespace = name, cur.Value.Namespace
 		d.Updated = s.Now().UTC()
 		if _, err := updateJSON(ctx, s.domains, name, cur.Version, d); err != nil {
 			if errors.Is(err, ErrConflict) {
@@ -267,16 +458,41 @@ func (s *Rados) DeleteDomain(ctx context.Context, name string) error {
 	return mapErr(s.domains.Delete(ctx, name))
 }
 
-// ListDomains lists domain names after the cursor.
-func (s *Rados) ListDomains(ctx context.Context, after string, max int) (names []string, more bool, err error) {
-	kv, more, err := listOmap(ctx, s.domains, allDomainsObject, "", after, max)
+// ListDomains lists domain names after the cursor, of one namespace or
+// ("") of all.
+func (s *Rados) ListDomains(ctx context.Context, namespace, after string, max int) (names []string, more bool, err error) {
+	if namespace == "" {
+		kv, more, err := listOmap(ctx, s.domains, allDomainsObject, "", after, max)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, e := range kv {
+			names = append(names, e.Key)
+		}
+		return names, more, nil
+	}
+	ns, err := NormalizeNamespace(namespace)
+	if err != nil {
+		return nil, false, err
+	}
+	if max <= 0 {
+		max = 1000
+	}
+	// Development backend: scan the listing and keep the namespace's rows.
+	kv, _, err := listOmap(ctx, s.domains, allDomainsObject, "", after, 0)
 	if err != nil {
 		return nil, false, err
 	}
 	for _, e := range kv {
+		if string(e.Value) != ns {
+			continue
+		}
+		if len(names) == max {
+			return names, true, nil
+		}
 		names = append(names, e.Key)
 	}
-	return names, more, nil
+	return names, false, nil
 }
 
 // ---- Mailboxes ----
@@ -296,9 +512,18 @@ func (s *Rados) CreateMailbox(ctx context.Context, m Mailbox) (Mailbox, error) {
 		return Mailbox{}, fmt.Errorf("%w: mailbox state %q", ErrInvalid, m.State)
 	}
 	m.StateSince = now
+	ns, err := s.requireNamespace(ctx, m.Namespace)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	m.Namespace = ns
 	if m.StorageID != 0 {
-		if _, err := s.GetStorage(ctx, m.StorageID); err != nil {
+		c, err := s.GetStorage(ctx, m.StorageID)
+		if err != nil {
 			return Mailbox{}, fmt.Errorf("storage %d: %w", m.StorageID, err)
+		}
+		if c.Namespace != ns {
+			return Mailbox{}, fmt.Errorf("%w: storage %d belongs to namespace %s, mailbox to %s", ErrNamespaceMismatch, m.StorageID, c.Namespace, ns)
 		}
 	}
 	if _, err := createJSON(ctx, s.mailboxes, m.ID.String(), m); err != nil {
@@ -323,7 +548,7 @@ func (s *Rados) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*Mailbo
 		if err := fn(&m); err != nil {
 			return Mailbox{}, err
 		}
-		m.ID = id
+		m.ID, m.Namespace = id, cur.Value.Namespace
 		m.Updated = s.Now().UTC()
 		if m.State == "" {
 			m.State = StateActive
@@ -366,12 +591,27 @@ func (s *Rados) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	return mapErr(s.mailboxes.Delete(ctx, id.String()))
 }
 
-// ListMailboxes lists mailbox ids (object listing; unordered, no cursor).
-func (s *Rados) ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) error {
+// ListMailboxes lists mailbox ids (object listing; unordered, no cursor),
+// of one namespace or ("") of all. The namespace filter reads every
+// record: development backend only.
+func (s *Rados) ListMailboxes(ctx context.Context, namespace string, fn func(id uuid.UUID) error) error {
+	ns := ""
+	if namespace != "" {
+		var err error
+		if ns, err = NormalizeNamespace(namespace); err != nil {
+			return err
+		}
+	}
 	return s.mailboxes.List(ctx, func(oid string) error {
 		id, err := uuid.Parse(oid)
 		if err != nil {
 			return nil // ignore foreign objects
+		}
+		if ns != "" {
+			v, err := getJSON[Mailbox](ctx, s.mailboxes, oid)
+			if err != nil || v.Value.Namespace != ns {
+				return nil
+			}
 		}
 		return fn(id)
 	})
@@ -414,15 +654,21 @@ func (s *Rados) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.MailboxID == uuid.Nil {
 		return Account{}, fmt.Errorf("%w: account needs a mailbox", ErrInvalid)
 	}
-	if _, err := s.GetMailbox(ctx, a.MailboxID); err != nil {
+	mb, err := s.GetMailbox(ctx, a.MailboxID)
+	if err != nil {
 		return Account{}, fmt.Errorf("mailbox %s: %w", a.MailboxID, err)
 	}
-	if _, err := s.GetDomain(ctx, domain); err != nil {
+	dom, err := s.GetDomain(ctx, domain)
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return Account{}, fmt.Errorf("%w: %s", ErrDomainUnknown, domain)
 		}
 		return Account{}, err
 	}
+	if mb.Value.Namespace != dom.Value.Namespace {
+		return Account{}, fmt.Errorf("%w: mailbox %s is in namespace %s, domain %s in %s", ErrNamespaceMismatch, a.MailboxID, mb.Value.Namespace, domain, dom.Value.Namespace)
+	}
+	a.Namespace = dom.Value.Namespace
 	now := s.Now().UTC()
 	a.Created, a.Updated = now, now
 	for i := range a.Passwords {
@@ -505,7 +751,7 @@ func (s *Rados) UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*Accoun
 		if err := validateServices(a.Services); err != nil {
 			return Account{}, err
 		}
-		a.ID = id
+		a.ID, a.Namespace = id, cur.Value.Namespace
 		a.Updated = s.Now().UTC()
 		for i := range a.Passwords {
 			if a.Passwords[i].ID == "" {
@@ -531,12 +777,16 @@ func (s *Rados) UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*Accoun
 
 // RelinkAccount moves an account to another mailbox.
 func (s *Rados) RelinkAccount(ctx context.Context, id, mailboxID uuid.UUID) (Account, error) {
-	if _, err := s.GetMailbox(ctx, mailboxID); err != nil {
+	mb, err := s.GetMailbox(ctx, mailboxID)
+	if err != nil {
 		return Account{}, fmt.Errorf("mailbox %s: %w", mailboxID, err)
 	}
 	cur, err := getJSON[Account](ctx, s.accounts, id.String())
 	if err != nil {
 		return Account{}, err
+	}
+	if mb.Value.Namespace != cur.Value.Namespace {
+		return Account{}, fmt.Errorf("%w: mailbox %s is in namespace %s, account in %s", ErrNamespaceMismatch, mailboxID, mb.Value.Namespace, cur.Value.Namespace)
 	}
 	a := cur.Value
 	old := a.MailboxID
@@ -614,30 +864,14 @@ func (s *Rados) CreateAlias(ctx context.Context, al Alias) (Alias, error) {
 	if err != nil {
 		return Alias{}, err
 	}
-	if len(al.Destinations) == 0 {
-		return Alias{}, fmt.Errorf("%w: alias needs at least one destination", ErrInvalid)
-	}
-	for i, d := range al.Destinations {
-		if (d.MailboxID == uuid.Nil) == (d.Address == "") {
-			return Alias{}, fmt.Errorf("%w: destination must be exactly one of mailbox or address", ErrInvalid)
-		}
-		if d.Address != "" {
-			na, _, err := NormalizeAddress(d.Address)
-			if err != nil {
-				return Alias{}, err
-			}
-			if na == address {
-				return Alias{}, fmt.Errorf("%w: alias points at itself", ErrInvalid)
-			}
-			al.Destinations[i].Address = na
-		} else if _, err := s.GetMailbox(ctx, d.MailboxID); err != nil {
-			return Alias{}, fmt.Errorf("mailbox %s: %w", d.MailboxID, err)
-		}
-	}
-	if _, err := s.GetDomain(ctx, domain); err != nil {
+	dom, err := s.GetDomain(ctx, domain)
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return Alias{}, fmt.Errorf("%w: %s", ErrDomainUnknown, domain)
 		}
+		return Alias{}, err
+	}
+	if err := s.checkDestinations(ctx, address, dom.Value.Namespace, al.Destinations); err != nil {
 		return Alias{}, err
 	}
 	if !strings.HasPrefix(address, "@") {
@@ -645,7 +879,7 @@ func (s *Rados) CreateAlias(ctx context.Context, al Alias) (Alias, error) {
 			return Alias{}, fmt.Errorf("%w: %s is an account", ErrExists, address)
 		}
 	}
-	al.Address, al.Domain = address, domain
+	al.Address, al.Domain, al.Namespace = address, domain, dom.Value.Namespace
 	now := s.Now().UTC()
 	al.Created, al.Updated = now, now
 	if _, err := createJSON(ctx, s.aliases, address, al); err != nil {
@@ -661,6 +895,39 @@ func (s *Rados) CreateAlias(ctx context.Context, al Alias) (Alias, error) {
 		return Alias{}, err
 	}
 	return al, nil
+}
+
+// checkDestinations validates and normalizes alias destinations: exactly
+// one of mailbox or address each, no self reference, mailbox destinations
+// existing and in the alias domain's namespace.
+func (s *Rados) checkDestinations(ctx context.Context, address, namespace string, dsts []Destination) error {
+	if len(dsts) == 0 {
+		return fmt.Errorf("%w: alias needs at least one destination", ErrInvalid)
+	}
+	for i, d := range dsts {
+		if (d.MailboxID == uuid.Nil) == (d.Address == "") {
+			return fmt.Errorf("%w: destination must be exactly one of mailbox or address", ErrInvalid)
+		}
+		if d.Address != "" {
+			na, _, err := NormalizeAddress(d.Address)
+			if err != nil {
+				return err
+			}
+			if na == address {
+				return fmt.Errorf("%w: alias points at itself", ErrInvalid)
+			}
+			dsts[i].Address = na
+			continue
+		}
+		mb, err := s.GetMailbox(ctx, d.MailboxID)
+		if err != nil {
+			return fmt.Errorf("mailbox %s: %w", d.MailboxID, err)
+		}
+		if mb.Value.Namespace != namespace {
+			return fmt.Errorf("%w: mailbox %s is in namespace %s, alias domain in %s", ErrNamespaceMismatch, d.MailboxID, mb.Value.Namespace, namespace)
+		}
+	}
+	return nil
 }
 
 // aliasToKey is the reverse listing of an address destination, kept on the
@@ -801,10 +1068,10 @@ func (s *Rados) UpdateAlias(ctx context.Context, address string, fn func(*Alias)
 		if err := fn(&al); err != nil {
 			return Alias{}, err
 		}
-		if len(al.Destinations) == 0 {
-			return Alias{}, fmt.Errorf("%w: alias needs at least one destination", ErrInvalid)
+		if err := s.checkDestinations(ctx, address, cur.Value.Namespace, al.Destinations); err != nil {
+			return Alias{}, err
 		}
-		al.Address, al.Domain = address, domain
+		al.Address, al.Domain, al.Namespace = address, domain, cur.Value.Namespace
 		al.Updated = s.Now().UTC()
 		if _, err := updateJSON(ctx, s.aliases, address, cur.Version, al); err != nil {
 			if errors.Is(err, ErrConflict) {
@@ -930,7 +1197,7 @@ const adminTokensObject = "_admin"
 
 // CreateAdminToken creates an admin API token (full or read-only). Admins
 // are not accounts: the token is the whole identity.
-func (s *Rados) CreateAdminToken(ctx context.Context, role string, expiresAt time.Time, comment string) (Token, string, error) {
+func (s *Rados) CreateAdminToken(ctx context.Context, role, namespace string, expiresAt time.Time, comment string) (Token, string, error) {
 	comment = strings.TrimSpace(comment)
 	if comment == "" {
 		return Token{}, "", fmt.Errorf("%w: token comment is required", ErrInvalid)
@@ -942,11 +1209,19 @@ func (s *Rados) CreateAdminToken(ctx context.Context, role string, expiresAt tim
 	if !expiresAt.After(now) {
 		return Token{}, "", fmt.Errorf("%w: token expiration must be in the future", ErrInvalid)
 	}
+	if strings.TrimSpace(namespace) != "" {
+		var err error
+		if namespace, err = s.requireNamespace(ctx, namespace); err != nil {
+			return Token{}, "", err
+		}
+	} else {
+		namespace = ""
+	}
 	secret, err := NewTokenSecret()
 	if err != nil {
 		return Token{}, "", err
 	}
-	t := Token{ID: uuid.NewString(), Hash: HashToken(secret), Roles: []string{role}, ExpiresAt: expiresAt.UTC(), Comment: comment, Created: now}
+	t := Token{ID: uuid.NewString(), Hash: HashToken(secret), Namespace: namespace, Roles: []string{role}, ExpiresAt: expiresAt.UTC(), Comment: comment, Created: now}
 	if _, err := createJSON(ctx, s.tokens, t.Hash, t); err != nil {
 		return Token{}, "", err
 	}
@@ -1089,6 +1364,11 @@ func validateStorage(c *Storage) error {
 	if c.Name == "" || len(c.Name) > 64 {
 		return fmt.Errorf("%w: storage name", ErrInvalid)
 	}
+	ns, err := NormalizeNamespace(c.Namespace)
+	if err != nil {
+		return err
+	}
+	c.Namespace = ns
 	if strings.TrimSpace(c.MonHost) == "" {
 		return fmt.Errorf("%w: storage mon_host", ErrInvalid)
 	}
@@ -1102,13 +1382,19 @@ func (s *Rados) CreateStorage(ctx context.Context, c Storage) (Storage, error) {
 	if err := validateStorage(&c); err != nil {
 		return Storage{}, err
 	}
+	if _, err := s.requireNamespace(ctx, c.Namespace); err != nil {
+		return Storage{}, err
+	}
 	all, err := s.ListStorage(ctx)
 	if err != nil {
 		return Storage{}, err
 	}
 	for _, x := range all {
-		if x.Name == c.Name || (c.FSID != uuid.Nil && x.FSID == c.FSID) {
+		if x.Name == c.Name {
 			return Storage{}, fmt.Errorf("%w: storage %s", ErrExists, c.Name)
+		}
+		if err := checkPoolsDistinct(x, c); err != nil {
+			return Storage{}, err
 		}
 	}
 	id, err := s.nextStorageID(ctx)
@@ -1169,6 +1455,24 @@ func (s *Rados) UpdateStorage(ctx context.Context, id int64, fn func(*Storage) e
 		if err := validateStorage(&c); err != nil {
 			return Storage{}, err
 		}
+		if c.Namespace != cur.Value.Namespace {
+			return Storage{}, fmt.Errorf("%w: a storage cannot move to another namespace", ErrInvalid)
+		}
+		all, err := s.ListStorage(ctx)
+		if err != nil {
+			return Storage{}, err
+		}
+		for _, x := range all {
+			if x.ID == id {
+				continue
+			}
+			if x.Name == c.Name {
+				return Storage{}, fmt.Errorf("%w: storage %s", ErrExists, c.Name)
+			}
+			if err := checkPoolsDistinct(x, c); err != nil {
+				return Storage{}, err
+			}
+		}
 		c.ID = id
 		c.Updated = s.Now().UTC()
 		if _, err := updateJSON(ctx, s.storage, storageOID(id), cur.Version, c); err != nil {
@@ -1183,13 +1487,28 @@ func (s *Rados) UpdateStorage(ctx context.Context, id int64, fn func(*Storage) e
 	return Storage{}, ErrConflict
 }
 
+// checkPoolsDistinct refuses two storages on one cluster (same fsid)
+// that share a pool: a pool belongs to exactly one storage, and so to one
+// namespace. Two storages may share a cluster.
+func checkPoolsDistinct(a, b Storage) error {
+	if a.FSID == uuid.Nil || b.FSID == uuid.Nil || a.FSID != b.FSID {
+		return nil
+	}
+	for _, p := range [][2]string{{a.Pools.Messages, b.Pools.Messages}, {a.Pools.Attachments, b.Pools.Attachments}, {a.Pools.Index, b.Pools.Index}} {
+		if p[0] == p[1] {
+			return fmt.Errorf("%w: storage %s already uses pool %s on cluster %s", ErrExists, a.Name, p[0], a.FSID)
+		}
+	}
+	return nil
+}
+
 // DeleteStorage removes a storage no mailbox refers to.
 func (s *Rados) DeleteStorage(ctx context.Context, id int64) error {
 	if _, err := s.GetStorage(ctx, id); err != nil {
 		return err
 	}
 	inUse := errors.New("in use")
-	err := s.ListMailboxes(ctx, func(mb uuid.UUID) error {
+	err := s.ListMailboxes(ctx, "", func(mb uuid.UUID) error {
 		v, err := s.GetMailbox(ctx, mb)
 		if err == nil && v.Value.StorageID == id {
 			return inUse
@@ -1237,7 +1556,34 @@ func validateNode(n *Node) error {
 	if n.Mode == "" || n.Address == "" {
 		return fmt.Errorf("%w: node needs mode and address", ErrInvalid)
 	}
+	nss, err := NormalizeNamespaces(n.Namespaces)
+	if err != nil {
+		return err
+	}
+	n.Namespaces = nss
 	return nil
+}
+
+// NormalizeNamespaces normalizes a served-namespace list: names
+// validated, lowercased, deduplicated and sorted; nil stays nil (all).
+func NormalizeNamespaces(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range in {
+		ns, err := NormalizeNamespace(n)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[ns] {
+			seen[ns] = true
+			out = append(out, ns)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (s *Rados) RegisterNode(ctx context.Context, n Node) (Node, error) {

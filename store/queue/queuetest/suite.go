@@ -118,27 +118,31 @@ func testScheduler(t *testing.T, f Factory) {
 	s := f(t, &now)
 	s.SetNow(func() time.Time { return now })
 	ctx := context.Background()
-	if ok, err := s.Lead(ctx, "w1", time.Minute); err != nil || !ok {
+	if ok, err := s.Lead(ctx, "", "w1", time.Minute); err != nil || !ok {
 		t.Fatalf("first lead: %v %v", ok, err)
 	}
-	if ok, _ := s.Lead(ctx, "w2", time.Minute); ok {
+	if ok, _ := s.Lead(ctx, "", "w2", time.Minute); ok {
 		t.Fatal("second worker led while the lease is fresh")
 	}
-	if ok, _ := s.Lead(ctx, "w1", time.Minute); !ok {
+	if ok, _ := s.Lead(ctx, "", "w1", time.Minute); !ok {
 		t.Fatal("holder could not renew")
 	}
+	// Leases are per namespace: another namespace has its own leader.
+	if ok, _ := s.Lead(ctx, "default", "w2", time.Minute); ok {
+		t.Fatal("\"\" and \"default\" must be the same namespace")
+	}
 	now = now.Add(2 * time.Minute)
-	if ok, _ := s.Lead(ctx, "w2", time.Minute); !ok {
+	if ok, _ := s.Lead(ctx, "", "w2", time.Minute); !ok {
 		t.Fatal("expired lease not taken over")
 	}
-	if due, err := s.Due(ctx, "purge", time.Hour); err != nil || !due {
+	if due, err := s.Due(ctx, "", "purge", time.Hour); err != nil || !due {
 		t.Fatalf("first due: %v %v", due, err)
 	}
-	if due, _ := s.Due(ctx, "purge", time.Hour); due {
+	if due, _ := s.Due(ctx, "", "purge", time.Hour); due {
 		t.Fatal("due again within the interval")
 	}
 	now = now.Add(2 * time.Hour)
-	if due, _ := s.Due(ctx, "purge", time.Hour); !due {
+	if due, _ := s.Due(ctx, "", "purge", time.Hour); !due {
 		t.Fatal("not due after the interval")
 	}
 }

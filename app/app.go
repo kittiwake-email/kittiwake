@@ -243,6 +243,7 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 	} else {
 		reg := storage.NewRegistry(st.Identity, Connector(cfg.Ceph), log)
 		reg.PlacementReserve = cfg.Ceph.PlacementReserve
+		reg.Serve = cfg.ServedNamespaces()
 		if err := reg.Reload(context.Background()); err != nil {
 			return nil, fmt.Errorf("storage registry: %w", err)
 		}
@@ -289,6 +290,12 @@ func New(cfg config.Config, client rados.Client, db *mariadb.DB, log *slog.Logge
 	} else {
 		sv.Admin.Storage = memoryControl{}
 	}
+	if served := cfg.ServedNamespaces(); served != nil {
+		sv.Auth.Serves = func(ns string) bool { return identity.ServesNamespace(served, ns) }
+		if q, ok := st.Queue.(queue.Namespaced); ok {
+			q.ServeNamespaces(served)
+		}
+	}
 	smtpPass, err := cfg.SMTP.Password.Resolve()
 	if err != nil {
 		return nil, fmt.Errorf("smtp password: %w", err)
@@ -329,47 +336,75 @@ func buildBackup(cfg config.Config, st Stores, db *mariadb.DB, adm *admin.Servic
 		DefaultRetention: bc.Retention, MaintainInterval: bc.MaintainInterval, ExportExpiry: bc.ExportExpiry, Lock: bc.Lock,
 	}
 	stores := backup.Stores{Identity: st.Identity, Index: st.Index, Messages: st.Messages, Attachments: st.Attachments, Audit: st.Audit}
-	if !cfg.HasMode("backup") || bc.Target == "" {
+	if !cfg.HasMode("backup") {
 		return backup.New(svcCfg, stores, cat, nil, nil, adm, aud, log), nil
 	}
+	var tg target.Target
+	var ring *backupcrypto.Ring
+	if bc.Target != "" {
+		var err error
+		if tg, ring, err = openBackupTarget(bc.BackupTarget, bc.Lock, "backup"); err != nil {
+			return nil, err
+		}
+	}
+	svc := backup.New(svcCfg, stores, cat, tg, ring, adm, aud, log)
+	// Only the namespaces this node serves get their targets opened: the
+	// credentials of other tenants never load here.
+	for ns, t := range bc.Namespaces {
+		if !identity.ServesNamespace(cfg.ServedNamespaces(), ns) {
+			continue
+		}
+		ntg, nring, err := openBackupTarget(t, bc.Lock, "backup.namespaces."+ns)
+		if err != nil {
+			return nil, err
+		}
+		svc.SetBackend(ns, ntg, nring)
+	}
+	return svc, nil
+}
+
+// openBackupTarget opens one target and its key ring.
+func openBackupTarget(bc config.BackupTarget, lock bool, path string) (target.Target, *backupcrypto.Ring, error) {
 	var keys []backupcrypto.Key
 	for _, k := range bc.Keys {
 		v, err := k.Key.Resolve()
 		if err != nil {
-			return nil, fmt.Errorf("backup key %d: %w", k.ID, err)
+			return nil, nil, fmt.Errorf("%s key %d: %w", path, k.ID, err)
 		}
 		raw, err := backupcrypto.ParseKey(v)
 		if err != nil {
-			return nil, fmt.Errorf("backup key %d: %w", k.ID, err)
+			return nil, nil, fmt.Errorf("%s key %d: %w", path, k.ID, err)
 		}
 		keys = append(keys, backupcrypto.Key{ID: uint16(k.ID), Key: raw})
 	}
 	ring, err := backupcrypto.NewRing(keys, uint16(bc.CurrentKey))
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	var tg target.Target
 	switch bc.Target {
 	case "s3":
 		ak, err := bc.S3.AccessKey.Resolve()
 		if err != nil {
-			return nil, fmt.Errorf("backup s3 access_key: %w", err)
+			return nil, nil, fmt.Errorf("%s s3 access_key: %w", path, err)
 		}
 		sk, err := bc.S3.SecretKey.Resolve()
 		if err != nil {
-			return nil, fmt.Errorf("backup s3 secret_key: %w", err)
+			return nil, nil, fmt.Errorf("%s s3 secret_key: %w", path, err)
 		}
-		tg, err = target.NewS3(target.S3Config{Endpoint: bc.S3.Endpoint, Region: bc.S3.Region, Bucket: bc.S3.Bucket, AccessKey: ak, SecretKey: sk, PathStyle: bc.S3.PathStyle, ObjectLock: bc.Lock})
+		tg, err = target.NewS3(target.S3Config{Endpoint: bc.S3.Endpoint, Region: bc.S3.Region, Bucket: bc.S3.Bucket, AccessKey: ak, SecretKey: sk, PathStyle: bc.S3.PathStyle, ObjectLock: lock})
 		if err != nil {
-			return nil, err
+			return nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
 	case "filesystem":
 		tg, err = target.NewFS(bc.Directory)
 		if err != nil {
-			return nil, fmt.Errorf("backup directory: %w", err)
+			return nil, nil, fmt.Errorf("%s directory: %w", path, err)
 		}
+	default:
+		return nil, nil, fmt.Errorf("%s: no target", path)
 	}
-	return backup.New(svcCfg, stores, cat, tg, ring, adm, aud, log), nil
+	return tg, ring, nil
 }
 
 // registryControl adapts the storage registry for the admin service.
@@ -378,7 +413,9 @@ type registryControl struct {
 	connect storage.Connector
 }
 
-func (r registryControl) Pick(ctx context.Context) (int64, error) { return r.reg.Pick(ctx) }
+func (r registryControl) Pick(ctx context.Context, namespace string) (int64, error) {
+	return r.reg.Pick(ctx, namespace)
+}
 func (r registryControl) Verify(c identity.Storage) (uuid.UUID, error) {
 	return storage.Verify(r.connect, c)
 }
@@ -387,8 +424,8 @@ func (r registryControl) Verify(c identity.Storage) (uuid.UUID, error) {
 // registry entries can be created for tests but nothing connects to them.
 type memoryControl struct{}
 
-func (memoryControl) Pick(context.Context) (int64, error)        { return 0, nil }
-func (memoryControl) Verify(identity.Storage) (uuid.UUID, error) { return uuid.New(), nil }
+func (memoryControl) Pick(context.Context, string) (int64, error) { return 0, nil }
+func (memoryControl) Verify(identity.Storage) (uuid.UUID, error)  { return uuid.New(), nil }
 
 // DefaultQuota returns the configured default limits.
 func (a *App) DefaultQuota() identity.QuotaLimits {
@@ -445,7 +482,7 @@ func (a *App) Run(ctx context.Context) error {
 	mgmt.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		if _, _, err := a.Stores.Identity.ListDomains(ctx, "", 1); err != nil {
+		if _, _, err := a.Stores.Identity.ListDomains(ctx, "", "", 1); err != nil {
 			http.Error(w, "metadata: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -511,7 +548,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.Cfg.HasMode("worker") {
 		w := worker.New(worker.Config{
-			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention,
+			PostHoldGrace: a.Cfg.Mail.PostHoldGrace, AuditRetention: a.Cfg.Audit.Retention, Namespaces: a.Cfg.ServedNamespaces(),
 		}, worker.Stores{
 			Identity: a.Stores.Identity, Index: a.Stores.Index, Messages: a.Stores.Messages,
 			Attachments: a.Stores.Attachments, Audit: a.Stores.Audit, Queue: a.Stores.Queue,
@@ -532,7 +569,7 @@ func (a *App) Run(ctx context.Context) error {
 		start("worker", func() error { defer close(done); return w.Run(wctx) })
 	}
 	if a.Cfg.HasMode("backup") {
-		r := backup.NewRunner(backup.RunnerConfig{Concurrency: a.Cfg.Backup.Concurrency, Batch: a.Cfg.Backup.Batch}, a.Services.Backup, a.Stores.Queue, a.Log)
+		r := backup.NewRunner(backup.RunnerConfig{Concurrency: a.Cfg.Backup.Concurrency, Batch: a.Cfg.Backup.Batch, Namespaces: a.Cfg.ServedNamespaces()}, a.Services.Backup, a.Stores.Queue, a.Log)
 		bctx, bcancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 		a.addCloser(func(sctx context.Context) error {
@@ -665,7 +702,7 @@ func (a *App) registerNodes(ctx context.Context) {
 		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for mode, addr := range addrs {
-			n := identity.Node{Mode: mode, Address: addr, Host: hostname(), Version: Version, Started: started, Expires: time.Now().UTC().Add(3 * hb)}
+			n := identity.Node{Mode: mode, Address: addr, Host: hostname(), Version: Version, Namespaces: a.Cfg.ServedNamespaces(), Started: started, Expires: time.Now().UTC().Add(3 * hb)}
 			if _, err := a.Stores.Identity.RegisterNode(cctx, n); err != nil {
 				a.Log.Warn("node registration failed", slog.String("mode", mode), slog.String("address", addr), slog.String("error", err.Error()))
 			}

@@ -44,6 +44,7 @@ func open(t testing.TB) *mariadb.DB {
 		"TRUNCATE attachment_gc", "TRUNCATE maintenance_scans", "TRUNCATE mailbox_removals", "TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE storage", "TRUNCATE signing_keys", "TRUNCATE sessions",
 		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin", "TRUNCATE nodes",
 		"TRUNCATE backup_runs", "TRUNCATE backup_blobs", "TRUNCATE backup_blob_refs", "TRUNCATE backup_jobs",
+		"DELETE FROM namespaces WHERE id <> 1",
 		"SET FOREIGN_KEY_CHECKS = 1",
 	} {
 		if _, err := db.SQL().ExecContext(ctx, stmt); err != nil {
@@ -151,7 +152,7 @@ func TestReadWriteSplit(t *testing.T) {
 	}
 	ids := identity.NewWith(db)
 	// Nothing written yet: a lookup goes to the replica.
-	_, _, _ = ids.ListDomains(ctx, "", 10)
+	_, _, _ = ids.ListDomains(ctx, "", "", 10)
 	if db.ReaderQueries() != 1 {
 		t.Fatalf("first read not on the replica: %d", db.ReaderQueries())
 	}
@@ -193,7 +194,7 @@ func TestReadWriteSplit(t *testing.T) {
 	if _, err := db.Enqueue(ctx, "background", nil, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ids.ListDomains(ctx, "", 10); err != nil {
+	if _, _, err := ids.ListDomains(ctx, "", "", 10); err != nil {
 		t.Fatal(err)
 	}
 	if db.ReaderQueries() != before+1 {
@@ -247,7 +248,7 @@ func TestMailboxListingReleasesConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	visited := 0
-	err = db.ListMailboxes(ctx, func(id uuid.UUID) error { visited++; _, err := db.GetMailbox(ctx, id); return err })
+	err = db.ListMailboxes(ctx, "", func(id uuid.UUID) error { visited++; _, err := db.GetMailbox(ctx, id); return err })
 	if err != nil || visited != 1 {
 		t.Fatalf("nested lookup blocked: %d %v (%s)", visited, err, mb.ID)
 	}

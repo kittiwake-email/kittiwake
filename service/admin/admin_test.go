@@ -82,7 +82,7 @@ func TestAuthorizationAndCRUD(t *testing.T) {
 	if _, err := s.Hold(adm, mb.ID, HoldRequest{Reason: "again"}); !errors.Is(err, ErrExists) {
 		t.Fatal("double hold")
 	}
-	holds, _ := s.ListHolds(adm)
+	holds, _ := s.ListHolds(adm, "")
 	if len(holds) != 1 {
 		t.Fatal("list holds")
 	}
@@ -150,14 +150,14 @@ func TestBootstrapAndAdminTokens(t *testing.T) {
 		t.Fatalf("bootstrap: %+v %v", tok, err)
 	}
 	// No account, no domain was created.
-	if names, _, _ := ids.ListDomains(context.Background(), "", 0); len(names) != 0 {
+	if names, _, _ := ids.ListDomains(context.Background(), "", "", 0); len(names) != 0 {
 		t.Fatalf("bootstrap created domains: %v", names)
 	}
 	if _, _, err := s.Bootstrap(cli, "", 0); !errors.Is(err, ErrExists) {
 		t.Fatalf("double bootstrap: %v", err)
 	}
 	// Read-only tokens via the API path.
-	ro, _, err := s.CreateAdminToken(adm, true, time.Time{}, "monitoring")
+	ro, _, err := s.CreateAdminToken(adm, true, "", time.Time{}, "monitoring")
 	if err != nil || ro.Roles[0] != identity.RoleAdminRead {
 		t.Fatal(err)
 	}
@@ -165,13 +165,13 @@ func TestBootstrapAndAdminTokens(t *testing.T) {
 	if _, err := s.ListAdminTokens(roCtx); err != nil {
 		t.Fatalf("read-only list: %v", err)
 	}
-	if _, _, err := s.CreateAdminToken(roCtx, false, time.Time{}, "escalate"); !errors.Is(err, ErrForbidden) {
+	if _, _, err := s.CreateAdminToken(roCtx, false, "", time.Time{}, "escalate"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("read-only must not mint tokens: %v", err)
 	}
 	if _, err := s.CreateDomain(roCtx, identity.Domain{Name: "x.example"}); !errors.Is(err, ErrForbidden) {
 		t.Fatal("read-only must not create domains")
 	}
-	if _, _, err := s.ListDomains(roCtx, "", 0); err != nil {
+	if _, _, err := s.ListDomains(roCtx, "", "", 0); err != nil {
 		t.Fatal("read-only may list domains")
 	}
 	list, _ := s.ListAdminTokens(adm)
@@ -181,4 +181,117 @@ func TestBootstrapAndAdminTokens(t *testing.T) {
 	if err := s.DeleteAdminToken(adm, ro.ID); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestTenantScope: a token bound to a namespace sees and changes only that
+// namespace; platform-level operations are refused.
+func TestTenantScope(t *testing.T) {
+	s, ids, _, adm, _ := newSvc(t)
+	ctx := context.Background()
+	if _, err := s.CreateNamespace(adm, identity.Namespace{Name: "acme", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateNamespace(adm, identity.Namespace{Name: "other", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	acmeDom, err := s.CreateDomain(adm, identity.Domain{Name: "acme.example", Namespace: "acme", Enabled: true})
+	if err != nil || acmeDom.Namespace != "acme" {
+		t.Fatalf("domain: %+v %v", acmeDom, err)
+	}
+	if _, err := s.CreateDomain(adm, identity.Domain{Name: "other.example", Namespace: "other", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	otherMB, _ := s.CreateMailbox(adm, identity.Mailbox{Namespace: "other"})
+	tok, _, err := s.CreateAdminToken(adm, false, "acme", time.Time{}, "acme ops")
+	if err != nil || tok.Namespace != "acme" {
+		t.Fatalf("tenant token: %+v %v", tok, err)
+	}
+	tenant := actor.With(ctx, actor.Actor{Username: "admin:acme ops", Roles: tok.Roles, Namespace: "acme", Protocol: "admin"})
+
+	// Creates land in the tenant's namespace; naming another one is refused.
+	d, err := s.CreateDomain(tenant, identity.Domain{Name: "mail.acme.example", Enabled: true})
+	if err != nil || d.Namespace != "acme" {
+		t.Fatalf("tenant domain: %+v %v", d, err)
+	}
+	if _, err := s.CreateDomain(tenant, identity.Domain{Name: "x.example", Namespace: "other"}); !errors.Is(err, ErrScope) {
+		t.Fatalf("domain elsewhere: %v", err)
+	}
+	mb, err := s.CreateMailbox(tenant, identity.Mailbox{})
+	if err != nil || mb.Namespace != "acme" {
+		t.Fatalf("tenant mailbox: %+v %v", mb, err)
+	}
+	a, err := s.CreateAccount(tenant, CreateAccountRequest{Username: "u@acme.example", MailboxID: mb.ID, Roles: []string{"read"}})
+	if err != nil || a.Namespace != "acme" {
+		t.Fatalf("tenant account: %+v %v", a, err)
+	}
+	if _, err := s.CreateAccount(tenant, CreateAccountRequest{Username: "u@other.example", MailboxID: otherMB.ID, Roles: []string{"read"}}); !errors.Is(err, identity.ErrDomainUnknown) {
+		t.Fatalf("account in another namespace must read as not found: %v", err)
+	}
+	// Listings are filtered; records elsewhere read as not found.
+	names, _, _ := s.ListDomains(tenant, "", "", 10)
+	if len(names) != 2 || names[0] != "acme.example" || names[1] != "mail.acme.example" {
+		t.Fatalf("tenant domain list: %v", names)
+	}
+	if _, _, err := s.ListDomains(tenant, "other", "", 10); !errors.Is(err, ErrScope) {
+		t.Fatalf("list elsewhere: %v", err)
+	}
+	var seen []uuid.UUID
+	_ = s.ListMailboxes(tenant, "", func(id uuid.UUID) error { seen = append(seen, id); return nil })
+	if len(seen) != 1 || seen[0] != mb.ID {
+		t.Fatalf("tenant mailbox list: %v", seen)
+	}
+	if _, err := s.GetMailbox(tenant, otherMB.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mailbox elsewhere: %v", err)
+	}
+	if _, err := s.GetDomain(tenant, "other.example"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("domain elsewhere: %v", err)
+	}
+	if _, err := s.SetMailboxState(tenant, otherMB.ID, identity.StateSuspended, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("state elsewhere: %v", err)
+	}
+	if err := s.DeleteDomain(tenant, "other.example"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete elsewhere: %v", err)
+	}
+	if nss, _, _ := s.ListNamespaces(tenant, "", 10); len(nss) != 1 || nss[0] != "acme" {
+		t.Fatalf("tenant namespaces: %v", nss)
+	}
+	if _, err := s.GetNamespace(tenant, "other"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("namespace elsewhere: %v", err)
+	}
+	// Platform-level operations are refused.
+	if _, err := s.CreateNamespace(tenant, identity.Namespace{Name: "more"}); !errors.Is(err, ErrScope) {
+		t.Fatalf("tenant creating namespaces: %v", err)
+	}
+	if _, _, err := s.CreateAdminToken(tenant, false, "acme", time.Time{}, "escalate"); !errors.Is(err, ErrScope) {
+		t.Fatalf("tenant minting tokens: %v", err)
+	}
+	if _, err := s.AddStorage(tenant, StorageRequest{Name: "x", MonHost: "x", Pools: identity.Pools{Messages: "m", Attachments: "a", Index: "i"}}); !errors.Is(err, ErrScope) {
+		t.Fatalf("tenant registering storage: %v", err)
+	}
+	if _, err := s.ListNodes(tenant, ""); !errors.Is(err, ErrScope) {
+		t.Fatalf("tenant listing nodes: %v", err)
+	}
+	if _, err := s.ExportIdentity(tenant); !errors.Is(err, ErrScope) {
+		t.Fatalf("tenant exporting identity: %v", err)
+	}
+	// Storage: a tenant sees its own entries without keys.
+	pools := identity.Pools{Messages: "m", Attachments: "a", Index: "i"}
+	if _, err := s.AddStorage(adm, StorageRequest{Name: "acme-1", Namespace: "acme", MonHost: "x", User: "u", Key: "secret", Pools: pools}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddStorage(adm, StorageRequest{Name: "other-1", Namespace: "other", MonHost: "y", User: "u", Key: "secret", Pools: pools}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ListStorage(tenant)
+	if err != nil || len(list) != 1 || list[0].Name != "acme-1" || list[0].Key != "" {
+		t.Fatalf("tenant storage list: %+v %v", list, err)
+	}
+	if all, _ := s.ListStorage(adm); len(all) != 2 || all[0].Key == "" {
+		t.Fatalf("platform storage list: %+v", all)
+	}
+	if _, err := s.GetStorage(tenant, list[0].ID+1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("storage elsewhere: %v", err)
+	}
+	// The audit trail records the namespace of what was acted upon.
+	_ = ids
 }

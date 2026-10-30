@@ -81,8 +81,8 @@ func newFixture(t *testing.T) *fixture {
 		Username: "wido@example.org", MailboxID: f.mb.ID, Enabled: true,
 		Roles: []string{"read", "write", "send"}, Passwords: []identity.Password{{Hash: h, Kind: identity.PasswordPrimary}},
 	})
-	_, f.adminTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdmin, f.now.Add(24*time.Hour), "test admin")
-	_, f.roTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdminRead, f.now.Add(24*time.Hour), "test read-only")
+	_, f.adminTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdmin, "", f.now.Add(24*time.Hour), "test admin")
+	_, f.roTk, _ = f.ids.CreateAdminToken(ctx, identity.RoleAdminRead, "", f.now.Add(24*time.Hour), "test read-only")
 	return f
 }
 

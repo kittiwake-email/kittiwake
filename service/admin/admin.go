@@ -1,8 +1,15 @@
-// Package admin is the platform administration service: identity CRUD
-// (domains, mailboxes, accounts, aliases, tokens), legal hold, mailbox
-// inspection and removal, bootstrap. Every call requires an actor with the
-// admin role (or the CLI's system actor) and is audited. The REST admin API
-// and the `kittiwake admin` CLI are thin adapters over this package.
+// Package admin is the platform administration service: namespaces,
+// identity CRUD (domains, mailboxes, accounts, aliases, tokens), legal
+// hold, mailbox inspection and removal, bootstrap. Every call requires an
+// actor with the admin role (or the CLI's system actor) and is audited.
+//
+// Scope: an admin token may be bound to one namespace (a tenant admin).
+// Such an actor sees and changes only records of that namespace: creates
+// land in it whatever the request says, listings are filtered to it, and
+// a record of another namespace reads as not found. Platform-level
+// operations (namespaces, storage registration, admin tokens, nodes,
+// queues, identity export) need an unbound token. The REST admin API and
+// the `kittiwake admin` CLI are thin adapters over this package.
 package admin
 
 import (
@@ -28,10 +35,13 @@ import (
 // Errors.
 var (
 	ErrForbidden = errors.New("admin: admin role required")
-	ErrNotFound  = identity.ErrNotFound
-	ErrExists    = identity.ErrExists
-	ErrInvalid   = identity.ErrInvalid
-	ErrInUse     = identity.ErrInUse
+	// ErrScope: the operation is platform-level, or names a namespace the
+	// tenant admin is not bound to.
+	ErrScope    = errors.New("admin: outside the token's namespace")
+	ErrNotFound = identity.ErrNotFound
+	ErrExists   = identity.ErrExists
+	ErrInvalid  = identity.ErrInvalid
+	ErrInUse    = identity.ErrInUse
 )
 
 // Task types this service enqueues.
@@ -55,8 +65,8 @@ type Service struct {
 
 // StorageControl is what the admin service needs from the storage registry.
 type StorageControl interface {
-	// Pick chooses the storage for a new mailbox.
-	Pick(ctx context.Context) (int64, error)
+	// Pick chooses the storage for a new mailbox in the namespace.
+	Pick(ctx context.Context, namespace string) (int64, error)
 	// Verify connects to a storage record once and returns its fsid.
 	Verify(c identity.Storage) (uuid.UUID, error)
 }
@@ -86,6 +96,82 @@ func (s *Service) authorizeRead(ctx context.Context, action, target string) erro
 	return ErrForbidden
 }
 
+// scope returns the namespace the actor is confined to; "" is the whole
+// platform.
+func scope(ctx context.Context) string { return actor.From(ctx).Namespace }
+
+// authorizeGlobal guards platform-level mutations: a full admin not bound
+// to a namespace.
+func (s *Service) authorizeGlobal(ctx context.Context, action, target string) error {
+	if err := s.authorize(ctx, action, target); err != nil {
+		return err
+	}
+	if scope(ctx) != "" {
+		s.audit.Log(ctx, auditor.Event{Action: action, Target: target, Result: audit.ResultDenied, Detail: "platform-level operation"})
+		return ErrScope
+	}
+	return nil
+}
+
+// authorizeReadGlobal guards platform-level reads.
+func (s *Service) authorizeReadGlobal(ctx context.Context, action, target string) error {
+	if err := s.authorizeRead(ctx, action, target); err != nil {
+		return err
+	}
+	if scope(ctx) != "" {
+		s.audit.Log(ctx, auditor.Event{Action: action, Target: target, Result: audit.ResultDenied, Detail: "platform-level operation"})
+		return ErrScope
+	}
+	return nil
+}
+
+// inScope reports a record of namespace ns as not found to an actor bound
+// to another namespace: a tenant admin learns nothing about the rest.
+func inScope(ctx context.Context, ns string) error {
+	if sc := scope(ctx); sc != "" && sc != ns {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// createNamespace picks the namespace a new record lands in: the actor's
+// own when bound (a request naming another one is refused), else the
+// requested one, default when none.
+func createNamespace(ctx context.Context, requested string) (string, error) {
+	ns, err := identity.NormalizeNamespace(requested)
+	if err != nil {
+		return "", err
+	}
+	if sc := scope(ctx); sc != "" {
+		if strings.TrimSpace(requested) != "" && ns != sc {
+			return "", ErrScope
+		}
+		return sc, nil
+	}
+	return ns, nil
+}
+
+// listNamespace picks the namespace a listing covers: the actor's own
+// when bound, else the requested one ("" = all).
+func listNamespace(ctx context.Context, requested string) (string, error) {
+	if sc := scope(ctx); sc != "" {
+		if strings.TrimSpace(requested) != "" {
+			ns, err := identity.NormalizeNamespace(requested)
+			if err != nil {
+				return "", err
+			}
+			if ns != sc {
+				return "", ErrScope
+			}
+		}
+		return sc, nil
+	}
+	if strings.TrimSpace(requested) == "" {
+		return "", nil
+	}
+	return identity.NormalizeNamespace(requested)
+}
+
 func (s *Service) ok(ctx context.Context, mb uuid.UUID, action, target, detail string) {
 	s.audit.Log(ctx, auditor.Event{Mailbox: mb, Action: action, Target: target, Detail: detail})
 }
@@ -95,18 +181,95 @@ func (s *Service) fail(ctx context.Context, mb uuid.UUID, action, target string,
 	return err
 }
 
+// ---- namespaces ----
+
+// CreateNamespace creates a namespace (platform-level).
+func (s *Service) CreateNamespace(ctx context.Context, ns identity.Namespace) (identity.Namespace, error) {
+	if err := s.authorizeGlobal(ctx, "namespace-create", ns.Name); err != nil {
+		return identity.Namespace{}, err
+	}
+	out, err := s.ids.CreateNamespace(ctx, ns)
+	if err != nil {
+		return identity.Namespace{}, s.fail(ctx, uuid.Nil, "namespace-create", ns.Name, err)
+	}
+	s.ok(auditor.WithNamespace(ctx, out.Name), uuid.Nil, "namespace-create", out.Name, fmt.Sprintf("enabled=%v", out.Enabled))
+	return out, nil
+}
+
+// GetNamespace returns a namespace; a tenant admin reads only its own.
+func (s *Service) GetNamespace(ctx context.Context, name string) (identity.Namespace, error) {
+	if err := s.authorizeRead(ctx, "namespace-get", name); err != nil {
+		return identity.Namespace{}, err
+	}
+	ns, err := identity.NormalizeNamespace(name)
+	if err != nil {
+		return identity.Namespace{}, err
+	}
+	if err := inScope(ctx, ns); err != nil {
+		return identity.Namespace{}, err
+	}
+	v, err := s.ids.GetNamespace(ctx, ns)
+	return v.Value, err
+}
+
+// UpdateNamespace changes the enabled flag or settings (platform-level).
+func (s *Service) UpdateNamespace(ctx context.Context, name string, fn func(*identity.Namespace) error) (identity.Namespace, error) {
+	if err := s.authorizeGlobal(ctx, "namespace-update", name); err != nil {
+		return identity.Namespace{}, err
+	}
+	out, err := s.ids.UpdateNamespace(ctx, name, fn)
+	if err != nil {
+		return identity.Namespace{}, s.fail(ctx, uuid.Nil, "namespace-update", name, err)
+	}
+	s.ok(auditor.WithNamespace(ctx, out.Name), uuid.Nil, "namespace-update", out.Name, fmt.Sprintf("enabled=%v", out.Enabled))
+	return out, nil
+}
+
+// DeleteNamespace removes an empty namespace (platform-level).
+func (s *Service) DeleteNamespace(ctx context.Context, name string) error {
+	if err := s.authorizeGlobal(ctx, "namespace-delete", name); err != nil {
+		return err
+	}
+	if err := s.ids.DeleteNamespace(ctx, name); err != nil {
+		return s.fail(ctx, uuid.Nil, "namespace-delete", name, err)
+	}
+	s.ok(ctx, uuid.Nil, "namespace-delete", name, "")
+	return nil
+}
+
+// ListNamespaces lists namespace names; a tenant admin sees only its own.
+func (s *Service) ListNamespaces(ctx context.Context, after string, max int) ([]string, bool, error) {
+	if err := s.authorizeRead(ctx, "namespace-list", ""); err != nil {
+		return nil, false, err
+	}
+	if sc := scope(ctx); sc != "" {
+		if after >= sc {
+			return nil, false, nil
+		}
+		return []string{sc}, false, nil
+	}
+	return s.ids.ListNamespaces(ctx, after, max)
+}
+
 // ---- domains ----
 
-// CreateDomain creates a domain.
+// CreateDomain creates a domain in the requested namespace (the actor's
+// own when bound, default when none).
 func (s *Service) CreateDomain(ctx context.Context, d identity.Domain) (identity.Domain, error) {
 	if err := s.authorize(ctx, "domain-create", d.Name); err != nil {
 		return identity.Domain{}, err
 	}
+	ns, err := createNamespace(ctx, d.Namespace)
+	if err != nil {
+		return identity.Domain{}, s.fail(ctx, uuid.Nil, "domain-create", d.Name, err)
+	}
+	d.Namespace = ns
+	ctx = auditor.WithNamespace(ctx, ns)
 	out, err := s.ids.CreateDomain(ctx, d)
 	if err != nil {
 		return identity.Domain{}, s.fail(ctx, uuid.Nil, "domain-create", d.Name, err)
 	}
-	s.ok(ctx, uuid.Nil, "domain-create", out.Name, "")
+	s.ok(ctx, uuid.Nil, "domain-create", out.Name, "namespace="+out.Namespace)
 	return out, nil
 }
 
@@ -115,8 +278,19 @@ func (s *Service) GetDomain(ctx context.Context, name string) (identity.Domain, 
 	if err := s.authorizeRead(ctx, "domain-get", name); err != nil {
 		return identity.Domain{}, err
 	}
+	return s.domain(ctx, name)
+}
+
+// domain loads a domain within the actor's scope.
+func (s *Service) domain(ctx context.Context, name string) (identity.Domain, error) {
 	v, err := s.ids.GetDomain(ctx, name)
-	return v.Value, err
+	if err != nil {
+		return identity.Domain{}, err
+	}
+	if err := inScope(ctx, v.Value.Namespace); err != nil {
+		return identity.Domain{}, err
+	}
+	return v.Value, nil
 }
 
 // UpdateDomain applies fn.
@@ -124,7 +298,15 @@ func (s *Service) UpdateDomain(ctx context.Context, name string, fn func(*identi
 	if err := s.authorize(ctx, "domain-update", name); err != nil {
 		return identity.Domain{}, err
 	}
-	out, err := s.ids.UpdateDomain(ctx, name, fn)
+	var ns string
+	out, err := s.ids.UpdateDomain(ctx, name, func(d *identity.Domain) error {
+		if err := inScope(ctx, d.Namespace); err != nil {
+			return err
+		}
+		ns = d.Namespace
+		return fn(d)
+	})
+	ctx = auditor.WithNamespace(ctx, ns)
 	if err != nil {
 		return identity.Domain{}, s.fail(ctx, uuid.Nil, "domain-update", name, err)
 	}
@@ -137,6 +319,11 @@ func (s *Service) DeleteDomain(ctx context.Context, name string) error {
 	if err := s.authorize(ctx, "domain-delete", name); err != nil {
 		return err
 	}
+	d, err := s.domain(ctx, name)
+	if err != nil {
+		return s.fail(ctx, uuid.Nil, "domain-delete", name, err)
+	}
+	ctx = auditor.WithNamespace(ctx, d.Namespace)
 	if err := s.ids.DeleteDomain(ctx, name); err != nil {
 		return s.fail(ctx, uuid.Nil, "domain-delete", name, err)
 	}
@@ -144,23 +331,34 @@ func (s *Service) DeleteDomain(ctx context.Context, name string) error {
 	return nil
 }
 
-// ListDomains lists domains.
-func (s *Service) ListDomains(ctx context.Context, after string, max int) ([]string, bool, error) {
-	if err := s.authorizeRead(ctx, "domain-list", ""); err != nil {
+// ListDomains lists domains of a namespace ("" = all; a tenant admin's own).
+func (s *Service) ListDomains(ctx context.Context, namespace, after string, max int) ([]string, bool, error) {
+	if err := s.authorizeRead(ctx, "domain-list", namespace); err != nil {
 		return nil, false, err
 	}
-	return s.ids.ListDomains(ctx, after, max)
+	ns, err := listNamespace(ctx, namespace)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.ids.ListDomains(ctx, ns, after, max)
 }
 
 // ---- mailboxes ----
 
-// CreateMailbox creates a mailbox.
+// CreateMailbox creates a mailbox in the requested namespace (the actor's
+// own when bound, default when none), placed on one of its storages.
 func (s *Service) CreateMailbox(ctx context.Context, m identity.Mailbox) (identity.Mailbox, error) {
 	if err := s.authorize(ctx, "mailbox-create", ""); err != nil {
 		return identity.Mailbox{}, err
 	}
+	ns, err := createNamespace(ctx, m.Namespace)
+	if err != nil {
+		return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
+	}
+	m.Namespace = ns
+	ctx = auditor.WithNamespace(ctx, ns)
 	if m.StorageID == 0 && s.Storage != nil {
-		id, err := s.Storage.Pick(ctx)
+		id, err := s.Storage.Pick(ctx, ns)
 		if err != nil {
 			return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
 		}
@@ -170,7 +368,7 @@ func (s *Service) CreateMailbox(ctx context.Context, m identity.Mailbox) (identi
 	if err != nil {
 		return identity.Mailbox{}, s.fail(ctx, uuid.Nil, "mailbox-create", "", err)
 	}
-	s.ok(ctx, out.ID, "mailbox-create", out.ID.String(), fmt.Sprintf("storage=%d", out.StorageID))
+	s.ok(ctx, out.ID, "mailbox-create", out.ID.String(), fmt.Sprintf("namespace=%s storage=%d", out.Namespace, out.StorageID))
 	return out, nil
 }
 
@@ -179,8 +377,33 @@ func (s *Service) GetMailbox(ctx context.Context, id uuid.UUID) (identity.Mailbo
 	if err := s.authorizeRead(ctx, "mailbox-get", id.String()); err != nil {
 		return identity.Mailbox{}, err
 	}
+	return s.mailbox(ctx, id)
+}
+
+// mailbox loads a mailbox within the actor's scope.
+func (s *Service) mailbox(ctx context.Context, id uuid.UUID) (identity.Mailbox, error) {
 	v, err := s.ids.GetMailbox(ctx, id)
-	return v.Value, err
+	if err != nil {
+		return identity.Mailbox{}, err
+	}
+	if err := inScope(ctx, v.Value.Namespace); err != nil {
+		return identity.Mailbox{}, err
+	}
+	return v.Value, nil
+}
+
+// updateMailbox applies fn within the actor's scope and records the
+// namespace for the audit trail.
+func (s *Service) updateMailbox(ctx context.Context, id uuid.UUID, fn func(*identity.Mailbox) error) (identity.Mailbox, context.Context, error) {
+	var ns string
+	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
+		if err := inScope(ctx, m.Namespace); err != nil {
+			return err
+		}
+		ns = m.Namespace
+		return fn(m)
+	})
+	return out, auditor.WithNamespace(ctx, ns), err
 }
 
 // UpdateMailbox changes the quota. Hold is managed by Hold/Release, the
@@ -189,7 +412,7 @@ func (s *Service) UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*iden
 	if err := s.authorize(ctx, "mailbox-update", id.String()); err != nil {
 		return identity.Mailbox{}, err
 	}
-	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
+	out, ctx, err := s.updateMailbox(ctx, id, func(m *identity.Mailbox) error {
 		hold, rel, st, reason, since := m.Hold, m.Released, m.State, m.StateReason, m.StateSince
 		if err := fn(m); err != nil {
 			return err
@@ -217,7 +440,7 @@ func (s *Service) SetMailboxState(ctx context.Context, id uuid.UUID, state, reas
 	if state != identity.StateActive && strings.TrimSpace(reason) == "" {
 		return identity.Mailbox{}, fmt.Errorf("%w: a reason is required to suspend or disable", ErrInvalid)
 	}
-	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
+	out, ctx, err := s.updateMailbox(ctx, id, func(m *identity.Mailbox) error {
 		m.State = state
 		m.StateReason = strings.TrimSpace(reason)
 		return nil
@@ -246,11 +469,12 @@ func (s *Service) InspectMailbox(ctx context.Context, id uuid.UUID, defaults ide
 	if err := s.authorizeRead(ctx, "mailbox-inspect", id.String()); err != nil {
 		return MailboxInfo{}, err
 	}
-	v, err := s.ids.GetMailbox(ctx, id)
+	m, err := s.mailbox(ctx, id)
 	if err != nil {
 		return MailboxInfo{}, err
 	}
-	info := MailboxInfo{Mailbox: v.Value, Hold: v.Value.Hold, Limits: v.Value.Quota}
+	ctx = auditor.WithNamespace(ctx, m.Namespace)
+	info := MailboxInfo{Mailbox: m, Hold: m.Hold, Limits: m.Quota}
 	if info.Limits.SoftBytes == 0 {
 		info.Limits.SoftBytes = defaults.SoftBytes
 	}
@@ -283,15 +507,23 @@ func (s *Service) ListMailboxAccounts(ctx context.Context, id uuid.UUID) ([]stri
 	if err := s.authorizeRead(ctx, "mailbox-accounts", id.String()); err != nil {
 		return nil, false, err
 	}
+	if _, err := s.mailbox(ctx, id); err != nil {
+		return nil, false, err
+	}
 	return s.ids.ListMailboxAccounts(ctx, id, "", 1000)
 }
 
-// ListMailboxes walks all mailbox ids.
-func (s *Service) ListMailboxes(ctx context.Context, fn func(uuid.UUID) error) error {
-	if err := s.authorizeRead(ctx, "mailbox-list", ""); err != nil {
+// ListMailboxes walks the mailbox ids of a namespace ("" = all; a tenant
+// admin's own).
+func (s *Service) ListMailboxes(ctx context.Context, namespace string, fn func(uuid.UUID) error) error {
+	if err := s.authorizeRead(ctx, "mailbox-list", namespace); err != nil {
 		return err
 	}
-	return s.ids.ListMailboxes(ctx, fn)
+	ns, err := listNamespace(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	return s.ids.ListMailboxes(ctx, ns, fn)
 }
 
 // DeleteMailbox removes the mailbox record (no accounts may link to it, no
@@ -300,6 +532,11 @@ func (s *Service) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	if err := s.authorize(ctx, "mailbox-delete", id.String()); err != nil {
 		return err
 	}
+	m, err := s.mailbox(ctx, id)
+	if err != nil {
+		return s.fail(ctx, id, "mailbox-delete", id.String(), err)
+	}
+	ctx = auditor.WithNamespace(ctx, m.Namespace)
 	if supported, err := s.ids.ScheduleMailboxRemoval(ctx, id); supported {
 		if err != nil {
 			return s.fail(ctx, id, "mailbox-delete", id.String(), err)
@@ -309,10 +546,7 @@ func (s *Service) DeleteMailbox(ctx context.Context, id uuid.UUID) error {
 	}
 	// The record carries the storage; the removal task needs it after the
 	// record is gone.
-	var storageID int64
-	if v, err := s.ids.GetMailbox(ctx, id); err == nil {
-		storageID = v.Value.StorageID
-	}
+	storageID := m.StorageID
 	if err := s.ids.DeleteMailbox(ctx, id); err != nil {
 		return s.fail(ctx, id, "mailbox-delete", id.String(), err)
 	}
@@ -332,6 +566,11 @@ func (s *Service) RecalculateQuota(ctx context.Context, id uuid.UUID) (index.Usa
 	if err := s.authorize(ctx, "quota-recalc", id.String()); err != nil {
 		return index.Usage{}, err
 	}
+	m, err := s.mailbox(ctx, id)
+	if err != nil {
+		return index.Usage{}, s.fail(ctx, id, "quota-recalc", id.String(), err)
+	}
+	ctx = auditor.WithNamespace(ctx, m.Namespace)
 	root, err := s.idx.Recalculate(ctx, id)
 	if err != nil {
 		return index.Usage{}, s.fail(ctx, id, "quota-recalc", id.String(), err)
@@ -356,11 +595,12 @@ func (s *Service) PurgeMailbox(ctx context.Context, id uuid.UUID) (PurgeResult, 
 	if err := s.authorize(ctx, "mailbox-purge", id.String()); err != nil {
 		return PurgeResult{}, err
 	}
-	m, err := s.ids.GetMailbox(ctx, id)
+	m, err := s.mailbox(ctx, id)
 	if err != nil {
 		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), err)
 	}
-	if m.Value.Hold != nil {
+	ctx = auditor.WithNamespace(ctx, m.Namespace)
+	if m.Hold != nil {
 		return PurgeResult{}, s.fail(ctx, id, "mailbox-purge", id.String(), fmt.Errorf("%w: mailbox on hold", identity.ErrConflict))
 	}
 	if s.queue == nil {
@@ -401,7 +641,7 @@ func (s *Service) Hold(ctx context.Context, id uuid.UUID, req HoldRequest) (iden
 	if req.AcceptDelivery != nil {
 		accept = *req.AcceptDelivery
 	}
-	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
+	out, ctx, err := s.updateMailbox(ctx, id, func(m *identity.Mailbox) error {
 		if m.Hold != nil {
 			return fmt.Errorf("%w: already on hold since %s", ErrExists, m.Hold.SetAt.Format(time.RFC3339))
 		}
@@ -424,7 +664,7 @@ func (s *Service) Release(ctx context.Context, id uuid.UUID, note string) (ident
 	if err := s.authorize(ctx, "release", id.String()); err != nil {
 		return identity.Mailbox{}, err
 	}
-	out, err := s.ids.UpdateMailbox(ctx, id, func(m *identity.Mailbox) error {
+	out, ctx, err := s.updateMailbox(ctx, id, func(m *identity.Mailbox) error {
 		if m.Hold == nil {
 			return fmt.Errorf("%w: not on hold", ErrNotFound)
 		}
@@ -440,13 +680,17 @@ func (s *Service) Release(ctx context.Context, id uuid.UUID, note string) (ident
 	return out, nil
 }
 
-// ListHolds returns the ids of mailboxes on hold.
-func (s *Service) ListHolds(ctx context.Context) ([]identity.Mailbox, error) {
-	if err := s.authorizeRead(ctx, "hold-list", ""); err != nil {
+// ListHolds returns the mailboxes on hold in a namespace ("" = all).
+func (s *Service) ListHolds(ctx context.Context, namespace string) ([]identity.Mailbox, error) {
+	if err := s.authorizeRead(ctx, "hold-list", namespace); err != nil {
+		return nil, err
+	}
+	ns, err := listNamespace(ctx, namespace)
+	if err != nil {
 		return nil, err
 	}
 	var out []identity.Mailbox
-	err := s.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+	err = s.ids.ListMailboxes(ctx, ns, func(id uuid.UUID) error {
 		v, err := s.ids.GetMailbox(ctx, id)
 		if err != nil {
 			return nil
@@ -480,6 +724,16 @@ type CreateAccountRequest struct {
 func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (identity.Account, error) {
 	if err := s.authorize(ctx, "account-create", req.Username); err != nil {
 		return identity.Account{}, err
+	}
+	if _, domain, err := identity.NormalizeAddress(req.Username); err == nil {
+		d, err := s.domain(ctx, domain)
+		if err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				err = fmt.Errorf("%w: %s", identity.ErrDomainUnknown, domain)
+			}
+			return identity.Account{}, s.fail(ctx, req.MailboxID, "account-create", req.Username, err)
+		}
+		ctx = auditor.WithNamespace(ctx, d.Namespace)
 	}
 	a := identity.Account{Username: req.Username, Name: strings.TrimSpace(req.Name), MailboxID: req.MailboxID, Roles: req.Roles, Services: req.Services, Enabled: true}
 	if req.Enabled != nil {
@@ -515,8 +769,19 @@ func (s *Service) GetAccount(ctx context.Context, id uuid.UUID) (identity.Accoun
 	if err := s.authorizeRead(ctx, "account-get", id.String()); err != nil {
 		return identity.Account{}, err
 	}
+	return s.account(ctx, id)
+}
+
+// account loads an account within the actor's scope.
+func (s *Service) account(ctx context.Context, id uuid.UUID) (identity.Account, error) {
 	v, err := s.ids.GetAccount(ctx, id)
-	return v.Value, err
+	if err != nil {
+		return identity.Account{}, err
+	}
+	if err := inScope(ctx, v.Value.Namespace); err != nil {
+		return identity.Account{}, err
+	}
+	return v.Value, nil
 }
 
 // GetAccountByUsername returns an account by username.
@@ -525,7 +790,13 @@ func (s *Service) GetAccountByUsername(ctx context.Context, username string) (id
 		return identity.Account{}, err
 	}
 	v, err := s.ids.GetAccountByUsername(ctx, username)
-	return v.Value, err
+	if err != nil {
+		return identity.Account{}, err
+	}
+	if err := inScope(ctx, v.Value.Namespace); err != nil {
+		return identity.Account{}, err
+	}
+	return v.Value, nil
 }
 
 // UpdateAccount changes roles/enabled (not credentials; see service/auth).
@@ -533,7 +804,12 @@ func (s *Service) UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*iden
 	if err := s.authorize(ctx, "account-update", id.String()); err != nil {
 		return identity.Account{}, err
 	}
+	var ns string
 	out, err := s.ids.UpdateAccount(ctx, id, func(a *identity.Account) error {
+		if err := inScope(ctx, a.Namespace); err != nil {
+			return err
+		}
+		ns = a.Namespace
 		pw, totp := a.Passwords, a.TOTP
 		if err := fn(a); err != nil {
 			return err
@@ -541,6 +817,7 @@ func (s *Service) UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*iden
 		a.Passwords, a.TOTP = pw, totp
 		return nil
 	})
+	ctx = auditor.WithNamespace(ctx, ns)
 	if err != nil {
 		return identity.Account{}, s.fail(ctx, uuid.Nil, "account-update", id.String(), err)
 	}
@@ -553,6 +830,11 @@ func (s *Service) RelinkAccount(ctx context.Context, id, mailboxID uuid.UUID) (i
 	if err := s.authorize(ctx, "account-relink", id.String()); err != nil {
 		return identity.Account{}, err
 	}
+	a, err := s.account(ctx, id)
+	if err != nil {
+		return identity.Account{}, s.fail(ctx, mailboxID, "account-relink", id.String(), err)
+	}
+	ctx = auditor.WithNamespace(ctx, a.Namespace)
 	out, err := s.ids.RelinkAccount(ctx, id, mailboxID)
 	if err != nil {
 		return identity.Account{}, s.fail(ctx, mailboxID, "account-relink", id.String(), err)
@@ -566,20 +848,27 @@ func (s *Service) DeleteAccount(ctx context.Context, id uuid.UUID) error {
 	if err := s.authorize(ctx, "account-delete", id.String()); err != nil {
 		return err
 	}
-	v, err := s.ids.GetAccount(ctx, id)
+	a, err := s.account(ctx, id)
 	if err != nil {
 		return err
 	}
+	ctx = auditor.WithNamespace(ctx, a.Namespace)
 	if err := s.ids.DeleteAccount(ctx, id); err != nil {
-		return s.fail(ctx, v.Value.MailboxID, "account-delete", v.Value.Username, err)
+		return s.fail(ctx, a.MailboxID, "account-delete", a.Username, err)
 	}
-	s.ok(ctx, v.Value.MailboxID, "account-delete", v.Value.Username, "")
+	s.ok(ctx, a.MailboxID, "account-delete", a.Username, "")
 	return nil
 }
 
 // ListAccounts lists usernames in a domain with an optional prefix.
 func (s *Service) ListAccounts(ctx context.Context, domain, prefix, after string, max int) ([]string, bool, error) {
 	if err := s.authorizeRead(ctx, "account-list", domain); err != nil {
+		return nil, false, err
+	}
+	if _, err := s.domain(ctx, domain); err != nil {
+		if errors.Is(err, identity.ErrNotFound) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
 	return s.ids.ListDomainAccounts(ctx, domain, prefix, after, max)
@@ -591,6 +880,16 @@ func (s *Service) ListAccounts(ctx context.Context, domain, prefix, after string
 func (s *Service) CreateAlias(ctx context.Context, al identity.Alias) (identity.Alias, error) {
 	if err := s.authorize(ctx, "alias-create", al.Address); err != nil {
 		return identity.Alias{}, err
+	}
+	if _, domain, err := identity.NormalizeAliasAddress(al.Address); err == nil {
+		d, err := s.domain(ctx, domain)
+		if err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				err = fmt.Errorf("%w: %s", identity.ErrDomainUnknown, domain)
+			}
+			return identity.Alias{}, s.fail(ctx, uuid.Nil, "alias-create", al.Address, err)
+		}
+		ctx = auditor.WithNamespace(ctx, d.Namespace)
 	}
 	out, err := s.ids.CreateAlias(ctx, al)
 	if err != nil {
@@ -605,8 +904,19 @@ func (s *Service) GetAlias(ctx context.Context, address string) (identity.Alias,
 	if err := s.authorizeRead(ctx, "alias-get", address); err != nil {
 		return identity.Alias{}, err
 	}
+	return s.alias(ctx, address)
+}
+
+// alias loads an alias within the actor's scope.
+func (s *Service) alias(ctx context.Context, address string) (identity.Alias, error) {
 	v, err := s.ids.GetAlias(ctx, address)
-	return v.Value, err
+	if err != nil {
+		return identity.Alias{}, err
+	}
+	if err := inScope(ctx, v.Value.Namespace); err != nil {
+		return identity.Alias{}, err
+	}
+	return v.Value, nil
 }
 
 // UpdateAlias applies fn.
@@ -614,7 +924,15 @@ func (s *Service) UpdateAlias(ctx context.Context, address string, fn func(*iden
 	if err := s.authorize(ctx, "alias-update", address); err != nil {
 		return identity.Alias{}, err
 	}
-	out, err := s.ids.UpdateAlias(ctx, address, fn)
+	var ns string
+	out, err := s.ids.UpdateAlias(ctx, address, func(al *identity.Alias) error {
+		if err := inScope(ctx, al.Namespace); err != nil {
+			return err
+		}
+		ns = al.Namespace
+		return fn(al)
+	})
+	ctx = auditor.WithNamespace(ctx, ns)
 	if err != nil {
 		return identity.Alias{}, s.fail(ctx, uuid.Nil, "alias-update", address, err)
 	}
@@ -627,6 +945,11 @@ func (s *Service) DeleteAlias(ctx context.Context, address string) error {
 	if err := s.authorize(ctx, "alias-delete", address); err != nil {
 		return err
 	}
+	al, err := s.alias(ctx, address)
+	if err != nil {
+		return s.fail(ctx, uuid.Nil, "alias-delete", address, err)
+	}
+	ctx = auditor.WithNamespace(ctx, al.Namespace)
 	if err := s.ids.DeleteAlias(ctx, address); err != nil {
 		return s.fail(ctx, uuid.Nil, "alias-delete", address, err)
 	}
@@ -639,6 +962,12 @@ func (s *Service) ListAliases(ctx context.Context, domain, after string, max int
 	if err := s.authorizeRead(ctx, "alias-list", domain); err != nil {
 		return nil, false, err
 	}
+	if _, err := s.domain(ctx, domain); err != nil {
+		if errors.Is(err, identity.ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
 	return s.ids.ListDomainAliases(ctx, domain, after, max)
 }
 
@@ -649,6 +978,11 @@ func (s *Service) CreateToken(ctx context.Context, accountID uuid.UUID, roles []
 	if err := s.authorize(ctx, "token-create", accountID.String()); err != nil {
 		return identity.Token{}, "", err
 	}
+	a, err := s.account(ctx, accountID)
+	if err != nil {
+		return identity.Token{}, "", s.fail(ctx, uuid.Nil, "token-create", accountID.String(), err)
+	}
+	ctx = auditor.WithNamespace(ctx, a.Namespace)
 	t, secret, err := s.ids.CreateToken(ctx, accountID, roles, expiresAt, comment)
 	if err != nil {
 		return identity.Token{}, "", s.fail(ctx, uuid.Nil, "token-create", accountID.String(), err)
@@ -662,6 +996,9 @@ func (s *Service) ListTokens(ctx context.Context, accountID uuid.UUID) ([]identi
 	if err := s.authorizeRead(ctx, "token-list", accountID.String()); err != nil {
 		return nil, err
 	}
+	if _, err := s.account(ctx, accountID); err != nil {
+		return nil, err
+	}
 	return s.ids.ListTokens(ctx, accountID)
 }
 
@@ -670,6 +1007,11 @@ func (s *Service) DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID 
 	if err := s.authorize(ctx, "token-delete", tokenID); err != nil {
 		return err
 	}
+	a, err := s.account(ctx, accountID)
+	if err != nil {
+		return s.fail(ctx, uuid.Nil, "token-delete", tokenID, err)
+	}
+	ctx = auditor.WithNamespace(ctx, a.Namespace)
 	if err := s.ids.DeleteToken(ctx, accountID, tokenID); err != nil {
 		return s.fail(ctx, uuid.Nil, "token-delete", tokenID, err)
 	}
@@ -679,10 +1021,12 @@ func (s *Service) DeleteToken(ctx context.Context, accountID uuid.UUID, tokenID 
 
 // ---- admin tokens ----
 
-// CreateAdminToken mints an admin API token. readOnly selects the admin-ro
-// role. The secret is returned once.
-func (s *Service) CreateAdminToken(ctx context.Context, readOnly bool, expiresAt time.Time, comment string) (identity.Token, string, error) {
-	if err := s.authorize(ctx, "admin-token-create", comment); err != nil {
+// CreateAdminToken mints an admin API token (platform-level). readOnly
+// selects the admin-ro role; namespace binds the token to one namespace
+// (a tenant admin), empty makes a platform admin. The secret is returned
+// once.
+func (s *Service) CreateAdminToken(ctx context.Context, readOnly bool, namespace string, expiresAt time.Time, comment string) (identity.Token, string, error) {
+	if err := s.authorizeGlobal(ctx, "admin-token-create", comment); err != nil {
 		return identity.Token{}, "", err
 	}
 	role := identity.RoleAdmin
@@ -692,25 +1036,25 @@ func (s *Service) CreateAdminToken(ctx context.Context, readOnly bool, expiresAt
 	if expiresAt.IsZero() {
 		expiresAt = s.Now().Add(24 * time.Hour)
 	}
-	t, secret, err := s.ids.CreateAdminToken(ctx, role, expiresAt, comment)
+	t, secret, err := s.ids.CreateAdminToken(ctx, role, namespace, expiresAt, comment)
 	if err != nil {
 		return identity.Token{}, "", s.fail(ctx, uuid.Nil, "admin-token-create", comment, err)
 	}
-	s.ok(ctx, uuid.Nil, "admin-token-create", t.ID, fmt.Sprintf("role=%s expires=%s comment=%q", role, t.ExpiresAt.Format(time.RFC3339), comment))
+	s.ok(auditor.WithNamespace(ctx, t.Namespace), uuid.Nil, "admin-token-create", t.ID, fmt.Sprintf("role=%s namespace=%q expires=%s comment=%q", role, t.Namespace, t.ExpiresAt.Format(time.RFC3339), comment))
 	return t, secret, nil
 }
 
-// ListAdminTokens lists admin tokens.
+// ListAdminTokens lists admin tokens (platform-level).
 func (s *Service) ListAdminTokens(ctx context.Context) ([]identity.Token, error) {
-	if err := s.authorizeRead(ctx, "admin-token-list", ""); err != nil {
+	if err := s.authorizeReadGlobal(ctx, "admin-token-list", ""); err != nil {
 		return nil, err
 	}
 	return s.ids.ListAdminTokens(ctx)
 }
 
-// DeleteAdminToken revokes an admin token.
+// DeleteAdminToken revokes an admin token (platform-level).
 func (s *Service) DeleteAdminToken(ctx context.Context, id string) error {
-	if err := s.authorize(ctx, "admin-token-delete", id); err != nil {
+	if err := s.authorizeGlobal(ctx, "admin-token-delete", id); err != nil {
 		return err
 	}
 	if err := s.ids.DeleteAdminToken(ctx, id); err != nil {
@@ -724,7 +1068,7 @@ func (s *Service) DeleteAdminToken(ctx context.Context, id string) error {
 // already exist, so it cannot be used to sneak in a token later (use
 // `kittiwake admin token`, which is also audited, for recovery).
 func (s *Service) Bootstrap(ctx context.Context, comment string, lifetime time.Duration) (identity.Token, string, error) {
-	if err := s.authorize(ctx, "bootstrap", comment); err != nil {
+	if err := s.authorizeGlobal(ctx, "bootstrap", comment); err != nil {
 		return identity.Token{}, "", err
 	}
 	existing, err := s.ids.ListAdminTokens(ctx)
@@ -740,7 +1084,7 @@ func (s *Service) Bootstrap(ctx context.Context, comment string, lifetime time.D
 	if lifetime <= 0 {
 		lifetime = 24 * time.Hour
 	}
-	t, secret, err := s.ids.CreateAdminToken(ctx, identity.RoleAdmin, s.Now().Add(lifetime), comment)
+	t, secret, err := s.ids.CreateAdminToken(ctx, identity.RoleAdmin, "", s.Now().Add(lifetime), comment)
 	if err != nil {
 		return identity.Token{}, "", err
 	}
@@ -752,23 +1096,35 @@ func (s *Service) Bootstrap(ctx context.Context, comment string, lifetime time.D
 
 // Export is the JSON dump format.
 type Export struct {
-	Version   int                `json:"version"`
-	Exported  time.Time          `json:"exported"`
-	Domains   []identity.Domain  `json:"domains"`
-	Mailboxes []identity.Mailbox `json:"mailboxes"`
-	Accounts  []identity.Account `json:"accounts"`
-	Aliases   []identity.Alias   `json:"aliases"`
-	Tokens    []identity.Token   `json:"tokens"`
-	Admins    []identity.Token   `json:"admin_tokens"`
+	Version    int                  `json:"version"`
+	Exported   time.Time            `json:"exported"`
+	Namespaces []identity.Namespace `json:"namespaces"`
+	Domains    []identity.Domain    `json:"domains"`
+	Mailboxes  []identity.Mailbox   `json:"mailboxes"`
+	Accounts   []identity.Account   `json:"accounts"`
+	Aliases    []identity.Alias     `json:"aliases"`
+	Tokens     []identity.Token     `json:"tokens"`
+	Admins     []identity.Token     `json:"admin_tokens"`
 }
 
 // ExportIdentity dumps all identity data (hashes included, no plaintext).
 func (s *Service) ExportIdentity(ctx context.Context) (Export, error) {
-	if err := s.authorizeRead(ctx, "export-identity", ""); err != nil {
+	if err := s.authorizeReadGlobal(ctx, "export-identity", ""); err != nil {
 		return Export{}, err
 	}
-	out := Export{Version: 1, Exported: s.Now().UTC()}
-	names, _, err := s.ids.ListDomains(ctx, "", 0)
+	out := Export{Version: 2, Exported: s.Now().UTC()}
+	nss, _, err := s.ids.ListNamespaces(ctx, "", 0)
+	if err != nil {
+		return Export{}, err
+	}
+	for _, n := range nss {
+		ns, err := s.ids.GetNamespace(ctx, n)
+		if err != nil {
+			return Export{}, err
+		}
+		out.Namespaces = append(out.Namespaces, ns.Value)
+	}
+	names, _, err := s.ids.ListDomains(ctx, "", "", 0)
 	if err != nil {
 		return Export{}, err
 	}
@@ -803,7 +1159,7 @@ func (s *Service) ExportIdentity(ctx context.Context) (Export, error) {
 			out.Aliases = append(out.Aliases, al.Value)
 		}
 	}
-	err = s.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+	err = s.ids.ListMailboxes(ctx, "", func(id uuid.UUID) error {
 		m, err := s.ids.GetMailbox(ctx, id)
 		if err != nil {
 			return nil
@@ -824,7 +1180,7 @@ func (s *Service) ExportIdentity(ctx context.Context) (Export, error) {
 // ImportIdentity loads a dump. Existing objects are skipped (not merged);
 // the counts of created/skipped objects are returned as a string.
 func (s *Service) ImportIdentity(ctx context.Context, data []byte) (string, error) {
-	if err := s.authorize(ctx, "import-identity", ""); err != nil {
+	if err := s.authorizeGlobal(ctx, "import-identity", ""); err != nil {
 		return "", err
 	}
 	var in Export
@@ -842,6 +1198,14 @@ func (s *Service) ImportIdentity(ctx context.Context, data []byte) (string, erro
 			return nil
 		}
 		return err
+	}
+	for _, ns := range in.Namespaces {
+		if ns.Name == identity.DefaultNamespace {
+			continue
+		}
+		if _, err := s.ids.CreateNamespace(ctx, ns); count(err) != nil {
+			return "", err
+		}
 	}
 	for _, d := range in.Domains {
 		if _, err := s.ids.CreateDomain(ctx, d); count(err) != nil {
@@ -873,9 +1237,11 @@ func (s *Service) ImportIdentity(ctx context.Context, data []byte) (string, erro
 // ---- storage registry ----
 
 // StorageRequest describes a storage to add or change. On add, Key is
-// the CephX secret of User; on update, empty fields keep their value.
+// the CephX secret of User and Namespace the owner (default when empty);
+// on update, empty fields keep their value and the namespace cannot change.
 type StorageRequest struct {
 	Name      string
+	Namespace string
 	MonHost   string
 	User      string
 	Key       string
@@ -884,12 +1250,13 @@ type StorageRequest struct {
 }
 
 // AddStorage connects to the storage once to verify the details and read
-// its fsid, then registers it. Placement defaults to enabled.
+// its fsid, then registers it in its namespace (platform-level).
+// Placement defaults to enabled.
 func (s *Service) AddStorage(ctx context.Context, req StorageRequest) (identity.Storage, error) {
-	if err := s.authorize(ctx, "storage-add", req.Name); err != nil {
+	if err := s.authorizeGlobal(ctx, "storage-add", req.Name); err != nil {
 		return identity.Storage{}, err
 	}
-	c := identity.Storage{Name: req.Name, MonHost: req.MonHost, User: req.User, Key: req.Key, Pools: req.Pools, Placement: true}
+	c := identity.Storage{Name: req.Name, Namespace: req.Namespace, MonHost: req.MonHost, User: req.User, Key: req.Key, Pools: req.Pools, Placement: true}
 	if req.Placement != nil {
 		c.Placement = *req.Placement
 	}
@@ -907,32 +1274,62 @@ func (s *Service) AddStorage(ctx context.Context, req StorageRequest) (identity.
 	if err != nil {
 		return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-add", req.Name, err)
 	}
-	s.ok(ctx, uuid.Nil, "storage-add", out.Name, fmt.Sprintf("id=%d fsid=%s placement=%v", out.ID, out.FSID, out.Placement))
+	s.ok(auditor.WithNamespace(ctx, out.Namespace), uuid.Nil, "storage-add", out.Name, fmt.Sprintf("id=%d namespace=%s fsid=%s placement=%v", out.ID, out.Namespace, out.FSID, out.Placement))
 	return out, nil
 }
 
-// ListStorage lists the registry (keys included: admin only).
+// ListStorage lists the registry: every storage with its key for a
+// platform admin, a tenant admin's own storages without keys.
 func (s *Service) ListStorage(ctx context.Context) ([]identity.Storage, error) {
 	if err := s.authorizeRead(ctx, "storage-list", ""); err != nil {
 		return nil, err
 	}
-	return s.ids.ListStorage(ctx)
+	all, err := s.ids.ListStorage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sc := scope(ctx)
+	if sc == "" {
+		return all, nil
+	}
+	out := []identity.Storage{}
+	for _, c := range all {
+		if c.Namespace == sc {
+			c.Key = ""
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
-// GetStorage returns one storage.
+// GetStorage returns one storage (without its key for a tenant admin).
 func (s *Service) GetStorage(ctx context.Context, id int64) (identity.Storage, error) {
 	if err := s.authorizeRead(ctx, "storage-get", strconv.FormatInt(id, 10)); err != nil {
 		return identity.Storage{}, err
 	}
-	return s.ids.GetStorage(ctx, id)
+	c, err := s.ids.GetStorage(ctx, id)
+	if err != nil {
+		return identity.Storage{}, err
+	}
+	if err := inScope(ctx, c.Namespace); err != nil {
+		return identity.Storage{}, err
+	}
+	if scope(ctx) != "" {
+		c.Key = ""
+	}
+	return c, nil
 }
 
-// UpdateStorage changes connection details or the placement flag. New
-// connection details are verified against the recorded fsid first.
+// UpdateStorage changes connection details or the placement flag
+// (platform-level). New connection details are verified against the
+// recorded fsid first.
 func (s *Service) UpdateStorage(ctx context.Context, id int64, req StorageRequest) (identity.Storage, error) {
 	target := strconv.FormatInt(id, 10)
-	if err := s.authorize(ctx, "storage-update", target); err != nil {
+	if err := s.authorizeGlobal(ctx, "storage-update", target); err != nil {
 		return identity.Storage{}, err
+	}
+	if req.Namespace != "" {
+		return identity.Storage{}, s.fail(ctx, uuid.Nil, "storage-update", target, fmt.Errorf("%w: a storage cannot move to another namespace", ErrInvalid))
 	}
 	cur, err := s.ids.GetStorage(ctx, id)
 	if err != nil {
@@ -981,10 +1378,10 @@ func (s *Service) UpdateStorage(ctx context.Context, id int64, req StorageReques
 	return out, nil
 }
 
-// DeleteStorage removes a storage that no mailbox refers to.
+// DeleteStorage removes a storage that no mailbox refers to (platform-level).
 func (s *Service) DeleteStorage(ctx context.Context, id int64) error {
 	target := strconv.FormatInt(id, 10)
-	if err := s.authorize(ctx, "storage-delete", target); err != nil {
+	if err := s.authorizeGlobal(ctx, "storage-delete", target); err != nil {
 		return err
 	}
 	if err := s.ids.DeleteStorage(ctx, id); err != nil {
@@ -994,9 +1391,10 @@ func (s *Service) DeleteStorage(ctx context.Context, id int64) error {
 	return nil
 }
 
-// ListNodes lists registered daemon nodes (every mode, alive or recently dead).
+// ListNodes lists registered daemon nodes (every mode, alive or recently
+// dead; platform-level).
 func (s *Service) ListNodes(ctx context.Context, mode string) ([]identity.Node, error) {
-	if err := s.authorizeRead(ctx, "node-list", mode); err != nil {
+	if err := s.authorizeReadGlobal(ctx, "node-list", mode); err != nil {
 		return nil, err
 	}
 	return s.ids.ListNodes(ctx, mode)

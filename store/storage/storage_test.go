@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ func TestRegistry(t *testing.T) {
 	// Placement never picks the unreachable storage.
 	seen := map[int64]int{}
 	for i := 0; i < 200; i++ {
-		id, err := reg.Pick(ctx)
+		id, err := reg.Pick(ctx, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +105,7 @@ func TestRegistry(t *testing.T) {
 	_, _ = ids.UpdateStorage(ctx, a.ID, func(c *identity.Storage) error { c.Placement = false; return nil })
 	_ = reg.Reload(ctx)
 	for i := 0; i < 50; i++ {
-		if id, _ := reg.Pick(ctx); id == a.ID {
+		if id, _ := reg.Pick(ctx, ""); id == a.ID {
 			t.Fatal("disabled storage picked")
 		}
 	}
@@ -171,7 +172,7 @@ func TestReloadDoesNotBlockLookups(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if id, err := reg.Pick(ctx); err != nil || id != g.ID {
+	if id, err := reg.Pick(ctx, ""); err != nil || id != g.ID {
 		t.Fatalf("pick during connect: %d %v", id, err)
 	}
 	for _, s := range reg.Statuses() {
@@ -190,4 +191,56 @@ func TestReloadDoesNotBlockLookups(t *testing.T) {
 	if err := reg.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestRegistryServesSubset: a registry restricted to one namespace never
+// connects the others' storage and reports why a mailbox there is unavailable.
+func TestRegistryServesSubset(t *testing.T) {
+	ids, reg, _ := fixture(t)
+	ctx := context.Background()
+	pools := identity.Pools{Messages: "m", Attachments: "a", Index: "i"}
+	if _, err := ids.CreateNamespace(ctx, identity.Namespace{Name: "acme", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	def, _ := ids.CreateStorage(ctx, identity.Storage{Name: "def", MonHost: "mon-a", Pools: pools, Placement: true})
+	acme, _ := ids.CreateStorage(ctx, identity.Storage{Name: "acme", Namespace: "acme", MonHost: "mon-b", Pools: pools, Placement: true})
+	reg.Serve = []string{"acme"}
+	if err := reg.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := reg.Statuses()
+	if len(st) != 1 || st[0].ID != acme.ID || st[0].Namespace != "acme" || !st[0].Connected {
+		t.Fatalf("only the served namespace connects: %+v", st)
+	}
+	if _, err := reg.Pick(ctx, "default"); !errors.Is(err, storage.ErrNoPlacement) {
+		t.Fatalf("placement in an unserved namespace: %v", err)
+	}
+	if id, err := reg.Pick(ctx, "acme"); err != nil || id != acme.ID {
+		t.Fatalf("placement in the served namespace: %d %v", id, err)
+	}
+	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{StorageID: def.ID})
+	_, _, err := reg.Pool(ctx, mb.ID, storage.RoleIndex)
+	if !errors.Is(err, storage.ErrUnavailable) || err == nil || !containsAll(err.Error(), "namespace default", "does not serve") {
+		t.Fatalf("mailbox of an unserved namespace: %v", err)
+	}
+	// Each walks only the served storage, and only one namespace when asked.
+	var walked []int64
+	_ = reg.Each(ctx, storage.RoleIndex, func(id int64, _ rados.IOContext) error { walked = append(walked, id); return nil })
+	if len(walked) != 1 || walked[0] != acme.ID {
+		t.Fatalf("each: %v", walked)
+	}
+	walked = nil
+	_ = reg.Each(storage.WithNamespace(ctx, "default"), storage.RoleIndex, func(id int64, _ rados.IOContext) error { walked = append(walked, id); return nil })
+	if len(walked) != 0 {
+		t.Fatalf("each confined to another namespace: %v", walked)
+	}
+}
+
+func containsAll(s string, parts ...string) bool {
+	for _, p := range parts {
+		if !strings.Contains(s, p) {
+			return false
+		}
+	}
+	return true
 }

@@ -11,8 +11,10 @@ import (
 // at every purge interval.
 type PurgeScheduler interface {
 	SchedulePurge(context.Context, uuid.UUID, time.Time) error
-	EnqueueDuePurges(context.Context, int) (int, error)
-	ReconcilePurgeSchedule(context.Context, int, time.Duration) error
+	// EnqueueDuePurges enqueues purge tasks for the namespace's due
+	// mailboxes; ReconcilePurgeSchedule walks the namespace's mailboxes.
+	EnqueueDuePurges(ctx context.Context, namespace string, limit int) (int, error)
+	ReconcilePurgeSchedule(ctx context.Context, namespace string, limit int, every time.Duration) error
 }
 
 func SchedulePurge(ctx context.Context, q Store, mb uuid.UUID, at time.Time) error {

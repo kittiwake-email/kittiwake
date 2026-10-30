@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -113,8 +114,8 @@ type Service struct {
 	cfg   Config
 	st    Stores
 	cat   Catalog
-	tg    target.Target
-	ring  *crypto.Ring
+	def   *backend            // the default target and key ring (nil: none)
+	bes   map[string]*backend // per-namespace targets and key rings
 	adm   *admin.Service
 	audit *auditor.Auditor
 	log   *slog.Logger
@@ -123,7 +124,18 @@ type Service struct {
 	Hostname string
 }
 
-// New returns a service. adm creates the mailbox a restore lands in.
+// backend is where one namespace's backups go: a target and the key
+// ring that seals them. Namespaces without their own use the default.
+type backend struct {
+	tg   target.Target
+	ring *crypto.Ring
+}
+
+type backendKey struct{}
+
+// New returns a service. tg and ring are the default target and key
+// ring (nil on nodes that only read the catalog); adm creates the
+// mailbox a restore lands in.
 func New(cfg Config, st Stores, cat Catalog, tg target.Target, ring *crypto.Ring, adm *admin.Service, aud *auditor.Auditor, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
@@ -132,7 +144,75 @@ func New(cfg Config, st Stores, cat Catalog, tg target.Target, ring *crypto.Ring
 	if h == "" {
 		h = "kittiwake"
 	}
-	return &Service{cfg: cfg.Defaults(), st: st, cat: cat, tg: tg, ring: ring, adm: adm, audit: aud, log: log, Now: time.Now, Hostname: h}
+	s := &Service{cfg: cfg.Defaults(), st: st, cat: cat, bes: map[string]*backend{}, adm: adm, audit: aud, log: log, Now: time.Now, Hostname: h}
+	if tg != nil && ring != nil {
+		s.def = &backend{tg: tg, ring: ring}
+	}
+	return s
+}
+
+// SetBackend gives a namespace its own target and key ring.
+func (s *Service) SetBackend(namespace string, tg target.Target, ring *crypto.Ring) {
+	ns, err := identity.NormalizeNamespace(namespace)
+	if err != nil {
+		ns = namespace
+	}
+	s.bes[ns] = &backend{tg: tg, ring: ring}
+}
+
+// Configured reports whether backups of the namespace can be written or
+// read from this process.
+func (s *Service) Configured(namespace string) bool { return s.backendFor(namespace) != nil }
+
+func (s *Service) backendFor(namespace string) *backend {
+	ns, err := identity.NormalizeNamespace(namespace)
+	if err != nil {
+		return nil
+	}
+	if b, ok := s.bes[ns]; ok {
+		return b
+	}
+	return s.def
+}
+
+// enter binds the namespace's backend to ctx for everything an operation
+// reads or writes on the target.
+func (s *Service) enter(ctx context.Context, namespace string) (context.Context, error) {
+	b := s.backendFor(namespace)
+	if b == nil {
+		return ctx, fmt.Errorf("%w: no backup target for namespace %s", ErrNotConfigured, namespace)
+	}
+	return context.WithValue(ctx, backendKey{}, b), nil
+}
+
+// be returns the backend bound to ctx (every entry point binds one).
+func (s *Service) be(ctx context.Context) *backend {
+	if b, ok := ctx.Value(backendKey{}).(*backend); ok {
+		return b
+	}
+	if s.def != nil {
+		return s.def
+	}
+	return &backend{} // unreachable after enter; a nil target fails loudly
+}
+
+// namespaceOf resolves the namespace of a mailbox for operations on its
+// backups: the mailbox record, else the namespace recorded on its runs
+// (a removed mailbox still has backups to expire or verify).
+func (s *Service) namespaceOf(ctx context.Context, mb uuid.UUID) (string, error) {
+	if mv, err := s.st.Identity.GetMailbox(ctx, mb); err == nil {
+		return mv.Value.Namespace, nil
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		return "", err
+	}
+	runs, err := s.cat.ListRuns(ctx, mb, 1)
+	if err != nil {
+		return "", err
+	}
+	if len(runs) > 0 {
+		return runs[0].Namespace, nil
+	}
+	return identity.DefaultNamespace, nil
 }
 
 // Catalog returns the catalog (the admin API reads state through it).
@@ -167,7 +247,8 @@ func (s *Service) exportKey(mb uuid.UUID, run string, at time.Time) string {
 
 // Policy returns the effective interval and retention of a mailbox: its
 // own settings, else the domain settings of its first account, else the
-// defaults; bounded by the configured limits. every is 0 when disabled.
+// namespace settings, else the defaults; bounded by the configured
+// limits. every is 0 when disabled.
 func (s *Service) Policy(ctx context.Context, m identity.Mailbox) (every, retention time.Duration) {
 	every, retention = m.Backup.Interval, m.Backup.Retention
 	if m.Backup.Disabled {
@@ -184,6 +265,16 @@ func (s *Service) Policy(ctx context.Context, m identity.Mailbox) (every, retent
 						retention = parseSetting(d.Value.Settings[identity.DomainBackupRetention])
 					}
 				}
+			}
+		}
+	}
+	if every == 0 || retention == 0 {
+		if ns, err := s.st.Identity.GetNamespace(ctx, m.Namespace); err == nil {
+			if every == 0 {
+				every = parseSetting(ns.Value.Settings[identity.DomainBackupInterval])
+			}
+			if retention == 0 {
+				retention = parseSetting(ns.Value.Settings[identity.DomainBackupRetention])
 			}
 		}
 	}
@@ -259,8 +350,8 @@ func (s *Service) Enable(ctx context.Context, m identity.Mailbox) error {
 	return s.cat.ScheduleMaintenance(ctx, m.ID, FirstDue(now, s.cfg.MaintainInterval))
 }
 
-func (s *Service) retainUntil(now time.Time, retention time.Duration) time.Time {
-	if !s.cfg.Lock || !s.tg.Locking() {
+func (s *Service) retainUntil(ctx context.Context, now time.Time, retention time.Duration) time.Time {
+	if !s.cfg.Lock || !s.be(ctx).tg.Locking() {
 		return time.Time{}
 	}
 	return now.Add(retention)
@@ -268,11 +359,11 @@ func (s *Service) retainUntil(now time.Time, retention time.Duration) time.Time 
 
 // loadManifest fetches and opens a manifest.
 func (s *Service) loadManifest(ctx context.Context, key string) (*Manifest, error) {
-	sealed, err := target.ReadAll(ctx, s.tg, key)
+	sealed, err := target.ReadAll(ctx, s.be(ctx).tg, key)
 	if err != nil {
 		return nil, fmt.Errorf("manifest %s: %w", key, err)
 	}
-	plain, err := s.ring.Open(sealed)
+	plain, err := s.be(ctx).ring.Open(sealed)
 	if err != nil {
 		return nil, fmt.Errorf("manifest %s: %w", key, err)
 	}
@@ -285,7 +376,7 @@ func (s *Service) loadManifest(ctx context.Context, key string) (*Manifest, erro
 
 // loadFolder fetches a folder entry.
 func (s *Service) loadFolder(ctx context.Context, ref Ref) (*FolderEntry, error) {
-	b, err := readRef(ctx, s.tg, s.ring, ref)
+	b, err := readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +391,7 @@ func (s *Service) loadRetained(ctx context.Context, ref *Ref) ([]Retained, error
 	if ref == nil {
 		return nil, nil
 	}
-	b, err := readRef(ctx, s.tg, s.ring, *ref)
+	b, err := readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, *ref)
 	if err != nil {
 		return nil, err
 	}
@@ -317,15 +408,23 @@ func (s *Service) Manifest(ctx context.Context, mb uuid.UUID, runID string) (*Ma
 	if err != nil {
 		return nil, err
 	}
+	ctx, err = s.enter(ctx, run.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	return s.loadManifest(ctx, run.ManifestKey)
 }
 
-// DownloadURL returns a presigned link for an object when the target can
-// issue one (S3); otherwise the empty string and the archive is fetched
-// from the target by its key (a path under the directory for the
-// filesystem target).
-func (s *Service) DownloadURL(key string, validity time.Duration) string {
-	if p, ok := s.tg.(target.Presigner); ok {
+// DownloadURL returns a presigned link for an object on the namespace's
+// target when it can issue one (S3); otherwise the empty string and the
+// archive is fetched from the target by its key (a path under the
+// directory for the filesystem target).
+func (s *Service) DownloadURL(namespace, key string, validity time.Duration) string {
+	b := s.backendFor(namespace)
+	if b == nil {
+		return ""
+	}
+	if p, ok := b.tg.(target.Presigner); ok {
 		if u, err := p.PresignGet(key, validity); err == nil {
 			return u
 		}

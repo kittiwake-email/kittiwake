@@ -16,18 +16,18 @@ func (d *DB) WriteAdmin(ctx context.Context, recs []audit.Record) error {
 		return nil
 	}
 	var sb strings.Builder
-	sb.WriteString("INSERT INTO audit_admin (time, account, admin, action, client_ip, record) VALUES ")
-	args := make([]any, 0, len(recs)*6)
+	sb.WriteString("INSERT INTO audit_admin (time, account, admin, namespace, action, client_ip, record) VALUES ")
+	args := make([]any, 0, len(recs)*7)
 	for i, r := range recs {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString("(?, ?, ?, ?, ?, ?)")
+		sb.WriteString("(?, ?, ?, ?, ?, ?, ?)")
 		b, err := json.Marshal(&r)
 		if err != nil {
 			return err
 		}
-		args = append(args, r.Time.UTC(), r.Account, r.Admin, r.Action, r.ClientIP, string(b))
+		args = append(args, r.Time.UTC(), r.Account, r.Admin, r.Namespace, r.Action, r.ClientIP, string(b))
 	}
 	_, err := d.sql.ExecContext(ctx, sb.String(), args...)
 	return err
@@ -47,6 +47,10 @@ func (d *DB) ReadAdmin(ctx context.Context, q audit.Query) ([]audit.Record, stri
 	var sb strings.Builder
 	sb.WriteString("SELECT id, record FROM audit_admin WHERE time >= ? AND time < ? AND id > ?")
 	args := []any{from, to.Add(24 * time.Hour), after}
+	if q.Namespace != "" {
+		sb.WriteString(" AND namespace = ?")
+		args = append(args, q.Namespace)
+	}
 	if q.Account != "" {
 		sb.WriteString(" AND (account = ? OR admin = ?)")
 		args = append(args, strings.ToLower(q.Account), strings.ToLower(q.Account))

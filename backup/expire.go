@@ -24,17 +24,25 @@ type ExpireResult struct {
 	Mailboxes int `json:"mailboxes"`
 }
 
-// Expire removes runs past their retention, packs no remaining run
-// references, export archives past their expiry and blobs no mailbox
-// references any more. Runs of a mailbox on hold are kept. It is the
-// periodic global task of the backup mode; each call is bounded.
-func (s *Service) Expire(ctx context.Context, limit int) (ExpireResult, error) {
+// Expire removes, in one namespace, runs past their retention, packs no
+// remaining run references, export archives past their expiry and blobs
+// no mailbox references any more. Runs of a mailbox on hold are kept. It
+// is the periodic task of the backup mode per namespace; each call is
+// bounded.
+func (s *Service) Expire(ctx context.Context, namespace string, limit int) (ExpireResult, error) {
 	if err := s.authorize(ctx); err != nil {
+		return ExpireResult{}, err
+	}
+	ns, err := identity.NormalizeNamespace(namespace)
+	if err != nil {
+		return ExpireResult{}, err
+	}
+	if ctx, err = s.enter(ctx, ns); err != nil {
 		return ExpireResult{}, err
 	}
 	now := s.Now().UTC()
 	var res ExpireResult
-	runs, err := s.cat.ExpiredRuns(ctx, now, limit)
+	runs, err := s.cat.ExpiredRuns(ctx, ns, now, limit)
 	if err != nil {
 		return res, err
 	}
@@ -45,7 +53,7 @@ func (s *Service) Expire(ctx context.Context, limit int) (ExpireResult, error) {
 		} else if err != nil && !errors.Is(err, identity.ErrNotFound) {
 			return res, err
 		}
-		if err := s.tg.Delete(ctx, r.ManifestKey); err != nil && !errors.Is(err, target.ErrLocked) {
+		if err := s.be(ctx).tg.Delete(ctx, r.ManifestKey); err != nil && !errors.Is(err, target.ErrLocked) {
 			return res, fmt.Errorf("delete %s: %w", r.ManifestKey, err)
 		} else if errors.Is(err, target.ErrLocked) {
 			continue // the lock outlives our retention by the write-to-expiry skew; next pass
@@ -66,13 +74,13 @@ func (s *Service) Expire(ctx context.Context, limit int) (ExpireResult, error) {
 			res.Mailboxes++
 		}
 	}
-	jobs, err := s.cat.ExpiredJobs(ctx, now, limit)
+	jobs, err := s.cat.ExpiredJobs(ctx, ns, now, limit)
 	if err != nil {
 		return res, err
 	}
 	for _, j := range jobs {
 		if j.ObjectKey != "" {
-			if err := s.tg.Delete(ctx, j.ObjectKey); err != nil {
+			if err := s.be(ctx).tg.Delete(ctx, j.ObjectKey); err != nil {
 				return res, err
 			}
 		}
@@ -81,12 +89,12 @@ func (s *Service) Expire(ctx context.Context, limit int) (ExpireResult, error) {
 		}
 		res.Exports++
 	}
-	blobs, err := s.cat.UnreferencedBlobs(ctx, now.Add(-s.cfg.StrayGrace), limit)
+	blobs, err := s.cat.UnreferencedBlobs(ctx, ns, now.Add(-s.cfg.StrayGrace), limit)
 	if err != nil {
 		return res, err
 	}
 	for _, b := range blobs {
-		if err := s.tg.Delete(ctx, s.blobKey(b.Name)); err != nil {
+		if err := s.be(ctx).tg.Delete(ctx, s.blobKey(b.Name)); err != nil {
 			if errors.Is(err, target.ErrLocked) {
 				continue
 			}
@@ -98,7 +106,7 @@ func (s *Service) Expire(ctx context.Context, limit int) (ExpireResult, error) {
 		res.Blobs++
 	}
 	if res.Runs+res.Packs+res.Blobs+res.Exports > 0 {
-		s.log.Info("backup expiry", slog.Int("runs", res.Runs), slog.Int("packs", res.Packs), slog.Int("blobs", res.Blobs), slog.Int("exports", res.Exports), slog.Int("mailboxes_gone", res.Mailboxes))
+		s.log.Info("backup expiry", slog.String("namespace", ns), slog.Int("runs", res.Runs), slog.Int("packs", res.Packs), slog.Int("blobs", res.Blobs), slog.Int("exports", res.Exports), slog.Int("mailboxes_gone", res.Mailboxes))
 	}
 	return res, nil
 }
@@ -119,7 +127,7 @@ func (s *Service) collectPacks(ctx context.Context, mb uuid.UUID) (int, bool, er
 		}
 	}
 	var victims []string
-	if err := s.tg.List(ctx, s.mailboxPrefix(mb), func(o target.Object) error {
+	if err := s.be(ctx).tg.List(ctx, s.mailboxPrefix(mb), func(o target.Object) error {
 		if !referenced[o.Key] && (len(runs) == 0 || strings.HasSuffix(o.Key, ".pack")) {
 			victims = append(victims, o.Key)
 		}
@@ -129,7 +137,7 @@ func (s *Service) collectPacks(ctx context.Context, mb uuid.UUID) (int, bool, er
 	}
 	n := 0
 	for _, k := range victims {
-		if err := s.tg.Delete(ctx, k); err != nil {
+		if err := s.be(ctx).tg.Delete(ctx, k); err != nil {
 			if errors.Is(err, target.ErrLocked) {
 				continue
 			}
@@ -150,6 +158,13 @@ func (s *Service) Maintain(ctx context.Context, mb uuid.UUID) (Report, error) {
 	if err := s.authorize(ctx); err != nil {
 		return Report{}, err
 	}
+	ns, err := s.namespaceOf(ctx, mb)
+	if err != nil {
+		return Report{}, err
+	}
+	if ctx, err = s.enter(ctx, ns); err != nil {
+		return Report{}, err
+	}
 	if _, _, err := s.collectPacks(ctx, mb); err != nil {
 		return Report{}, err
 	}
@@ -168,6 +183,13 @@ func (s *Service) Forget(ctx context.Context, mb uuid.UUID) error {
 	}
 	if mv, err := s.st.Identity.GetMailbox(ctx, mb); err == nil && mv.Value.Hold != nil {
 		return fmt.Errorf("%w: mailbox is on hold", ErrForbidden)
+	}
+	ns, err := s.namespaceOf(ctx, mb)
+	if err != nil {
+		return err
+	}
+	if ctx, err = s.enter(ctx, ns); err != nil {
+		return err
 	}
 	runs, err := s.cat.ListRuns(ctx, mb, 0)
 	if err != nil {

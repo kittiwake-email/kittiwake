@@ -21,16 +21,26 @@ import (
 // safe for concurrent use; updates take a mutator and are atomic.
 type Backend interface {
 	SetNow(func() time.Time)
+	// Namespaces. The default namespace always exists; it cannot be
+	// deleted. A namespace with domains, mailboxes or storage cannot be
+	// deleted either. Names are immutable.
+	CreateNamespace(ctx context.Context, ns Namespace) (Namespace, error)
+	GetNamespace(ctx context.Context, name string) (Versioned[Namespace], error)
+	UpdateNamespace(ctx context.Context, name string, fn func(*Namespace) error) (Namespace, error)
+	DeleteNamespace(ctx context.Context, name string) error
+	ListNamespaces(ctx context.Context, after string, max int) (names []string, more bool, err error)
 	CreateDomain(ctx context.Context, d Domain) (Domain, error)
 	GetDomain(ctx context.Context, name string) (Versioned[Domain], error)
 	UpdateDomain(ctx context.Context, name string, fn func(*Domain) error) (Domain, error)
 	DeleteDomain(ctx context.Context, name string) error
-	ListDomains(ctx context.Context, after string, max int) (names []string, more bool, err error)
+	// ListDomains lists domain names, of one namespace or ("") of all.
+	ListDomains(ctx context.Context, namespace, after string, max int) (names []string, more bool, err error)
 	CreateMailbox(ctx context.Context, m Mailbox) (Mailbox, error)
 	GetMailbox(ctx context.Context, id uuid.UUID) (Versioned[Mailbox], error)
 	UpdateMailbox(ctx context.Context, id uuid.UUID, fn func(*Mailbox) error) (Mailbox, error)
 	DeleteMailbox(ctx context.Context, id uuid.UUID) error
-	ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) error
+	// ListMailboxes walks mailbox ids, of one namespace or ("") of all.
+	ListMailboxes(ctx context.Context, namespace string, fn func(id uuid.UUID) error) error
 	ListMailboxAccounts(ctx context.Context, id uuid.UUID, after string, max int) (usernames []string, more bool, err error)
 	CreateAccount(ctx context.Context, a Account) (Account, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (Versioned[Account], error)
@@ -51,7 +61,9 @@ type Backend interface {
 	DeleteAlias(ctx context.Context, address string) error
 	ListDomainAliases(ctx context.Context, domain, after string, max int) (addresses []string, more bool, err error)
 	CreateToken(ctx context.Context, accountID uuid.UUID, roles []string, expiresAt time.Time, comment string) (Token, string, error)
-	CreateAdminToken(ctx context.Context, role string, expiresAt time.Time, comment string) (Token, string, error)
+	// CreateAdminToken mints an admin token; namespace "" binds it to the
+	// whole platform, a name to that namespace only.
+	CreateAdminToken(ctx context.Context, role, namespace string, expiresAt time.Time, comment string) (Token, string, error)
 	ListAdminTokens(ctx context.Context) ([]Token, error)
 	DeleteAdminToken(ctx context.Context, tokenID string) error
 	LookupToken(ctx context.Context, secret string) (Versioned[Token], error)
@@ -98,6 +110,30 @@ func NewWith(b Backend) *Store {
 func (s *Store) Backend() Backend { return s.b }
 
 // ---- writes: delegate, then drop the cached copy ----
+
+func (s *Store) CreateNamespace(ctx context.Context, ns Namespace) (Namespace, error) {
+	out, err := s.b.CreateNamespace(ctx, ns)
+	if err == nil {
+		s.cache.Delete(namespaceKey(out.Name))
+	}
+	return out, err
+}
+
+func (s *Store) UpdateNamespace(ctx context.Context, name string, fn func(*Namespace) error) (Namespace, error) {
+	out, err := s.b.UpdateNamespace(ctx, name, fn)
+	if err == nil {
+		s.cache.Delete(namespaceKey(out.Name))
+	}
+	return out, err
+}
+
+func (s *Store) DeleteNamespace(ctx context.Context, name string) error {
+	err := s.b.DeleteNamespace(ctx, name)
+	if n, nerr := NormalizeNamespace(name); nerr == nil {
+		s.cache.Delete(namespaceKey(n))
+	}
+	return err
+}
 
 func (s *Store) CreateDomain(ctx context.Context, d Domain) (Domain, error) {
 	out, err := s.b.CreateDomain(ctx, d)
@@ -201,17 +237,40 @@ func (s *Store) DeleteAlias(ctx context.Context, address string) error {
 
 // ---- reads and the rest: plain delegation ----
 
+func (s *Store) GetNamespace(ctx context.Context, name string) (Versioned[Namespace], error) {
+	return s.b.GetNamespace(ctx, name)
+}
+func (s *Store) ListNamespaces(ctx context.Context, after string, max int) (names []string, more bool, err error) {
+	return s.b.ListNamespaces(ctx, after, max)
+}
+
+// AllNamespaces returns every namespace name (the registry is small).
+func (s *Store) AllNamespaces(ctx context.Context) ([]string, error) {
+	var out []string
+	after := ""
+	for {
+		names, more, err := s.b.ListNamespaces(ctx, after, 500)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, names...)
+		if !more || len(names) == 0 {
+			return out, nil
+		}
+		after = names[len(names)-1]
+	}
+}
 func (s *Store) GetDomain(ctx context.Context, name string) (Versioned[Domain], error) {
 	return s.b.GetDomain(ctx, name)
 }
-func (s *Store) ListDomains(ctx context.Context, after string, max int) (names []string, more bool, err error) {
-	return s.b.ListDomains(ctx, after, max)
+func (s *Store) ListDomains(ctx context.Context, namespace, after string, max int) (names []string, more bool, err error) {
+	return s.b.ListDomains(ctx, namespace, after, max)
 }
 func (s *Store) GetMailbox(ctx context.Context, id uuid.UUID) (Versioned[Mailbox], error) {
 	return s.b.GetMailbox(WithPrimaryReads(ctx), id)
 }
-func (s *Store) ListMailboxes(ctx context.Context, fn func(id uuid.UUID) error) error {
-	return s.b.ListMailboxes(ctx, fn)
+func (s *Store) ListMailboxes(ctx context.Context, namespace string, fn func(id uuid.UUID) error) error {
+	return s.b.ListMailboxes(ctx, namespace, fn)
 }
 func (s *Store) ListMailboxAccounts(ctx context.Context, id uuid.UUID, after string, max int) (usernames []string, more bool, err error) {
 	return s.b.ListMailboxAccounts(ctx, id, after, max)
@@ -240,8 +299,8 @@ func (s *Store) ListDomainAliases(ctx context.Context, domain, after string, max
 func (s *Store) CreateToken(ctx context.Context, accountID uuid.UUID, roles []string, expiresAt time.Time, comment string) (Token, string, error) {
 	return s.b.CreateToken(ctx, accountID, roles, expiresAt, comment)
 }
-func (s *Store) CreateAdminToken(ctx context.Context, role string, expiresAt time.Time, comment string) (Token, string, error) {
-	return s.b.CreateAdminToken(ctx, role, expiresAt, comment)
+func (s *Store) CreateAdminToken(ctx context.Context, role, namespace string, expiresAt time.Time, comment string) (Token, string, error) {
+	return s.b.CreateAdminToken(ctx, role, namespace, expiresAt, comment)
 }
 func (s *Store) ListAdminTokens(ctx context.Context) ([]Token, error) {
 	return s.b.ListAdminTokens(ctx)

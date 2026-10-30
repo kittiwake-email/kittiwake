@@ -20,6 +20,12 @@ type Config struct {
 	// admin, socketmap, worker. Optional: a systemd instance passes its mode with --modes
 	// instead; the list is for running several modes in one process.
 	Modes []string `yaml:"modes"`
+	// Namespaces this process serves; empty means every namespace. A
+	// restricted process connects only to the storage of its namespaces,
+	// takes only their tasks and refuses logins and deliveries for
+	// mailboxes elsewhere (clearly: the client or MTA retries on a server
+	// that serves them). Every mode honours the list.
+	Namespaces []string `yaml:"namespaces"`
 
 	Ceph       Ceph       `yaml:"ceph"`
 	Listen     Listen     `yaml:"listen"`
@@ -291,19 +297,32 @@ type Audit struct {
 // keys they are sealed with, and the schedule policy. Only the `backup`
 // mode needs the target and the keys; every other mode only reads the
 // schedule limits (the admin API validates settings against them).
-type Backup struct {
-	// Target: "s3", "filesystem" or "" (backups off; the backup mode
-	// refuses to start).
+// BackupTarget is where backups go and what seals them: the default for
+// every namespace, or one namespace's own.
+type BackupTarget struct {
+	// Target: "s3", "filesystem" or "" (no target).
 	Target string `yaml:"target"`
 	S3     S3     `yaml:"s3"`
 	// Directory of the filesystem target (lab, small installations).
 	Directory string `yaml:"directory"`
-	// Prefix prepended to every key on the target.
-	Prefix string `yaml:"prefix"`
 	// Keys: the pre-shared keys (hex, 32 bytes each) by id; CurrentKey
 	// seals new objects, every listed key opens old ones (rotation).
 	Keys       []BackupKey `yaml:"keys"`
 	CurrentKey int         `yaml:"current_key"`
+}
+
+type Backup struct {
+	// The default target and keys (inline: backup.target, backup.s3,
+	// backup.directory, backup.keys, backup.current_key). Empty target:
+	// no default; the backup mode then needs at least one namespace
+	// target.
+	BackupTarget `yaml:",inline"`
+	// Namespaces maps a namespace to its own target and key ring, so a
+	// tenant's backups land in its own bucket under its own keys.
+	// Namespaces not listed use the default.
+	Namespaces map[string]BackupTarget `yaml:"namespaces"`
+	// Prefix prepended to every key on the target.
+	Prefix string `yaml:"prefix"`
 	// Interval between runs of a mailbox without its own setting;
 	// MinInterval / MaxInterval bound every per-domain and per-mailbox
 	// setting (the floor protects the platform; lower it with care).
@@ -328,6 +347,41 @@ type Backup struct {
 	// mailboxes the scheduler enqueues per tick.
 	Concurrency int `yaml:"concurrency"`
 	Batch       int `yaml:"batch"`
+}
+
+// validate checks a target; required demands one (namespace entries
+// always name a target, the default may be absent).
+func (t *BackupTarget) validate(path string, required bool) error {
+	switch t.Target {
+	case "", "s3", "filesystem":
+	default:
+		return fmt.Errorf("config: %s.target %q must be s3, filesystem or empty", path, t.Target)
+	}
+	if required && t.Target == "" {
+		return fmt.Errorf("config: %s.target is required (s3 or filesystem)", path)
+	}
+	if t.Target == "s3" && (t.S3.Endpoint == "" || t.S3.Bucket == "") {
+		return fmt.Errorf("config: %s.s3.endpoint and %s.s3.bucket are required", path, path)
+	}
+	if t.Target == "filesystem" && t.Directory == "" {
+		return fmt.Errorf("config: %s.directory is required for the filesystem target", path)
+	}
+	if t.Target != "" {
+		if len(t.Keys) == 0 {
+			return fmt.Errorf("config: %s.keys needs at least one key (32 random bytes, hex) and %s.current_key names the one that seals new backups", path, path)
+		}
+		seen := map[int]bool{}
+		for _, k := range t.Keys {
+			if k.ID < 0 || k.ID > 65535 || seen[k.ID] {
+				return fmt.Errorf("config: %s.keys: id %d invalid or repeated", path, k.ID)
+			}
+			seen[k.ID] = true
+		}
+		if !seen[t.CurrentKey] {
+			return fmt.Errorf("config: %s.current_key %d is not in %s.keys", path, t.CurrentKey, path)
+		}
+	}
+	return nil
 }
 
 // BackupKey is one ring entry.
@@ -359,6 +413,9 @@ type Log struct {
 type Secret string
 
 var envRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// namespaceRe is the shape of a namespace name (a DNS label).
+var namespaceRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // Resolve expands ${ENV} references and file: prefixes.
 func (s Secret) Resolve() (string, error) {
@@ -428,7 +485,7 @@ func Default() Config {
 		Node:     Node{Heartbeat: 10 * time.Second},
 		Audit:    Audit{Retention: 365 * 24 * time.Hour},
 		Backup: Backup{
-			Prefix: "kittiwake/", S3: S3{Region: "us-east-1", PathStyle: true},
+			Prefix: "kittiwake/", BackupTarget: BackupTarget{S3: S3{Region: "us-east-1", PathStyle: true}},
 			Interval: 24 * time.Hour, MinInterval: 30 * time.Minute, MaxInterval: 30 * 24 * time.Hour,
 			Retention: 90 * 24 * time.Hour, MaintainInterval: 7 * 24 * time.Hour, ExportExpiry: 7 * 24 * time.Hour,
 			Lock: true, PackSize: 1 << 30, BlobThreshold: 1 << 20, Concurrency: 4, Batch: 100,
@@ -479,6 +536,11 @@ func (c *Config) Validate() error {
 	for _, m := range c.Modes {
 		if !ValidModes[m] {
 			return fmt.Errorf("config: unknown mode %q", m)
+		}
+	}
+	for _, ns := range c.Namespaces {
+		if !namespaceRe.MatchString(strings.ToLower(strings.TrimSpace(ns))) {
+			return fmt.Errorf("config: namespaces: %q is not a valid namespace name (a DNS label)", ns)
 		}
 	}
 	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "submission": c.Listen.Submission, "admin": c.Listen.Admin, "socketmap": c.Listen.Socketmap, "management": c.Listen.Management} {
@@ -578,36 +640,39 @@ func (c *Config) HasMode(mode string) bool {
 	return false
 }
 
+// ServedNamespaces returns the normalized served-namespace list; nil
+// means all.
+func (c *Config) ServedNamespaces() []string {
+	if len(c.Namespaces) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, ns := range c.Namespaces {
+		ns = strings.ToLower(strings.TrimSpace(ns))
+		if ns != "" && !seen[ns] {
+			seen[ns] = true
+			out = append(out, ns)
+		}
+	}
+	return out
+}
+
 // validate checks the backup section; a process running the backup mode
 // needs a target and keys, every other process only sane limits.
 func (b *Backup) validate(backupMode bool) error {
-	switch b.Target {
-	case "", "s3", "filesystem":
-	default:
-		return fmt.Errorf("config: backup.target %q must be s3, filesystem or empty", b.Target)
+	if err := b.BackupTarget.validate("backup", false); err != nil {
+		return err
 	}
-	if backupMode && b.Target == "" {
-		return errors.New("config: the backup mode needs backup.target (s3 or filesystem)")
+	if backupMode && b.Target == "" && len(b.Namespaces) == 0 {
+		return errors.New("config: the backup mode needs backup.target (s3 or filesystem) or at least one backup.namespaces entry")
 	}
-	if b.Target == "s3" && (b.S3.Endpoint == "" || b.S3.Bucket == "") {
-		return errors.New("config: backup.s3.endpoint and backup.s3.bucket are required")
-	}
-	if b.Target == "filesystem" && b.Directory == "" {
-		return errors.New("config: backup.directory is required for the filesystem target")
-	}
-	if b.Target != "" {
-		if len(b.Keys) == 0 {
-			return errors.New("config: backup.keys needs at least one key (32 random bytes, hex) and backup.current_key names the one that seals new backups")
+	for ns, t := range b.Namespaces {
+		if !namespaceRe.MatchString(ns) {
+			return fmt.Errorf("config: backup.namespaces: %q is not a valid namespace name", ns)
 		}
-		seen := map[int]bool{}
-		for _, k := range b.Keys {
-			if k.ID < 0 || k.ID > 65535 || seen[k.ID] {
-				return fmt.Errorf("config: backup.keys: id %d invalid or repeated", k.ID)
-			}
-			seen[k.ID] = true
-		}
-		if !seen[b.CurrentKey] {
-			return fmt.Errorf("config: backup.current_key %d is not in backup.keys", b.CurrentKey)
+		if err := t.validate("backup.namespaces."+ns, true); err != nil {
+			return err
 		}
 	}
 	if b.MinInterval < time.Minute || b.MinInterval > b.Interval || b.Interval > b.MaxInterval {

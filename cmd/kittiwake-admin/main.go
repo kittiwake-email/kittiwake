@@ -57,6 +57,7 @@ flags:
 
 commands:
   status                              version and time of the admin API
+  namespace create|list|get|set|enable|disable|delete   tenant namespaces (platform admins)
   domain    create|list|get|enable|disable|delete
   mailbox   create|list|inspect|set|suspend|disable|activate|delete|recalc|purge|hold|release|holds
   backup    status|show|run|restore|restore-message|export|verify|forget|jobs|job
@@ -64,7 +65,7 @@ commands:
   alias     create|list|get|set|delete
   audit     query the audit log
   queue     stats|dead|retry
-  token     create|list|delete     admin tokens (full or --read-only)
+  token     create|list|delete     admin tokens (full or --read-only; --namespace binds a tenant admin)
   storage   add|list|get|set|enable|disable|remove   Ceph storage registry (placement of new mailboxes)
   node      list [--mode m]       running daemon nodes (registered with heartbeats)
   keys      rotate
@@ -128,6 +129,8 @@ func run(args []string) error {
 				fmt.Printf("schema:  %d (applied by %s on %s)\n", st.Schema.Version, st.Schema.AppliedBy, st.Schema.AppliedAt.Format(time.RFC3339))
 			}
 		})
+	case "namespace":
+		return app.namespace(sub)
 	case "domain":
 		return app.domain(sub)
 	case "mailbox":

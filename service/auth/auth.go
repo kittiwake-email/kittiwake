@@ -39,6 +39,13 @@ var (
 	ErrScope              = errors.New("auth: requested scope exceeds account roles")
 	ErrSessionRevoked     = errors.New("auth: session revoked")
 	ErrServiceDisabled    = errors.New("auth: service not enabled for this account")
+	// ErrNamespaceDisabled: the account's namespace is disabled; every
+	// account in it is locked out.
+	ErrNamespaceDisabled = errors.New("auth: namespace disabled")
+	// ErrNotServed: this process does not serve the account's namespace
+	// (its config restricts the namespaces); the client must use a server
+	// that does.
+	ErrNotServed = errors.New("auth: mailbox not served by this server")
 )
 
 // Config for the service.
@@ -60,6 +67,10 @@ type Service struct {
 	audit    *auditor.Auditor
 	cfg      Config
 	Now      func() time.Time
+	// Serves reports whether this process serves a namespace; nil means
+	// all of them. A login into an unserved namespace fails with
+	// ErrNotServed.
+	Serves func(namespace string) bool
 
 	keyMu     sync.Mutex
 	keys      session.KeySet
@@ -224,6 +235,25 @@ func totpParams(t *identity.TOTP) cryptoauth.TOTPParams {
 }
 
 // Login authenticates with username/password (+TOTP) and opens a session.
+// checkNamespace refuses accounts of a disabled namespace and of
+// namespaces this process does not serve.
+func (s *Service) checkNamespace(ctx context.Context, acct *identity.Account) error {
+	ns, err := s.ids.GetNamespaceCached(ctx, acct.Namespace)
+	if err != nil {
+		if errors.Is(err, identity.ErrNotFound) {
+			return ErrNamespaceDisabled
+		}
+		return err
+	}
+	if !ns.Enabled {
+		return ErrNamespaceDisabled
+	}
+	if s.Serves != nil && !s.Serves(ns.Name) {
+		return ErrNotServed
+	}
+	return nil
+}
+
 func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 	proto := req.Protocol
 	if proto == "" {
@@ -251,6 +281,9 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (Tokens, error) {
 	}
 	if !acct.Enabled {
 		return fail("account disabled", ErrAccountDisabled)
+	}
+	if err := s.checkNamespace(ctx, &acct); err != nil {
+		return fail(err.Error(), err)
 	}
 	if !serviceAllowed(&acct, proto) {
 		return fail("service "+identity.ServiceFor(proto)+" not enabled", ErrServiceDisabled)
@@ -441,6 +474,10 @@ func (s *Service) Refresh(ctx context.Context, refreshToken, clientIP, proto str
 		s.audit.Log(auditCtx, auditor.Event{Mailbox: acct.MailboxID, Action: "refresh", Detail: "account disabled", Result: audit.ResultDenied})
 		return Tokens{}, ErrAccountDisabled
 	}
+	if err := s.checkNamespace(ctx, &acct); err != nil {
+		s.audit.Log(auditCtx, auditor.Event{Mailbox: acct.MailboxID, Action: "refresh", Detail: err.Error(), Result: audit.ResultDenied})
+		return Tokens{}, err
+	}
 	if !serviceAllowed(&acct, proto) {
 		s.audit.Log(auditCtx, auditor.Event{Mailbox: acct.MailboxID, Action: "refresh", Detail: "service " + identity.ServiceFor(proto) + " not enabled", Result: audit.ResultDenied})
 		return Tokens{}, ErrServiceDisabled
@@ -615,7 +652,7 @@ func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor
 			s.ids.TouchToken(ctx, v)
 		}
 		return actor.Actor{
-			Username: "admin:" + t.Comment, Roles: append([]string(nil), t.Roles...),
+			Username: "admin:" + t.Comment, Roles: append([]string(nil), t.Roles...), Namespace: t.Namespace,
 			Credential: "admin-token", TokenID: t.ID, TokenNote: t.Comment, ExpiresAt: t.ExpiresAt,
 		}, nil
 	}
@@ -629,6 +666,9 @@ func (s *Service) verifyAPIToken(ctx context.Context, token string) (actor.Actor
 	acct := av.Value
 	if !acct.Enabled {
 		return actor.Actor{}, ErrAccountDisabled
+	}
+	if err := s.checkNamespace(ctx, &acct); err != nil {
+		return actor.Actor{}, err
 	}
 	if !acct.HasService(identity.ServiceJMAP) { // account tokens are only accepted on the JMAP listener
 		return actor.Actor{}, ErrServiceDisabled
@@ -694,6 +734,9 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 	if !acct.Enabled {
 		return fail("account disabled", ErrAccountDisabled)
 	}
+	if err := s.checkNamespace(ctx, &acct); err != nil {
+		return fail(err.Error(), err)
+	}
 	if !serviceAllowed(&acct, proto) {
 		return fail("service "+identity.ServiceFor(proto)+" not enabled", ErrServiceDisabled)
 	}
@@ -736,6 +779,9 @@ func (s *Service) VerifyOAuthBearer(ctx context.Context, username, token, proto,
 	}
 	if !acct.Enabled {
 		return actor.Actor{}, ErrAccountDisabled
+	}
+	if err := s.checkNamespace(ctx, &acct); err != nil {
+		return actor.Actor{}, err
 	}
 	if !serviceAllowed(&acct, proto) {
 		return actor.Actor{}, ErrServiceDisabled

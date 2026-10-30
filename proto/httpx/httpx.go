@@ -154,6 +154,10 @@ func Auth(a Authenticator, protocol string, trusted []net.IPNet, realm string) f
 					status, detail = http.StatusForbidden, "account disabled"
 				case errors.Is(err, authsvc.ErrServiceDisabled):
 					status, detail = http.StatusForbidden, "this service is not enabled for the account"
+				case errors.Is(err, authsvc.ErrNamespaceDisabled):
+					status, detail = http.StatusForbidden, "account disabled"
+				case errors.Is(err, authsvc.ErrNotServed):
+					status, detail = http.StatusServiceUnavailable, "mailbox is not served by this server"
 				case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken):
 				default:
 					status, detail = http.StatusInternalServerError, "authentication backend error"

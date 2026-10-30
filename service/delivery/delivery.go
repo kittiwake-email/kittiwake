@@ -156,6 +156,12 @@ func (s *Service) Resolve(ctx context.Context, address string) ([]Target, error)
 	if !d.Enabled {
 		return nil, ErrUnknownDomain
 	}
+	if ns, err := s.ids.GetNamespaceCached(ctx, d.Namespace); err != nil || !ns.Enabled {
+		if err != nil && !errors.Is(err, identity.ErrNotFound) {
+			return nil, err
+		}
+		return nil, ErrUnknownDomain // a disabled namespace disables every domain in it
+	}
 	seen := map[string]bool{}
 	return s.resolve(ctx, addr, domain, 0, seen)
 }
@@ -444,6 +450,12 @@ func (s *Service) Import(ctx context.Context, mb uuid.UUID, folderID string, raw
 	}
 	if err := actor.CheckAccount(ctx, s.ids, a, identity.RoleWrite, s.Now()); err != nil {
 		return Delivered{}, ErrForbidden
+	}
+	if a.IsAdmin() && a.Namespace != "" {
+		// A tenant admin imports only into its own namespace.
+		if m, err := s.getMailbox(ctx, mb); err != nil || !a.Administers(m.Namespace) {
+			return Delivered{}, ErrForbidden
+		}
 	}
 
 	return s.importMessage(ctx, mb, folderID, raw, flags, internalDate)

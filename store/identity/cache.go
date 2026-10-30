@@ -30,10 +30,29 @@ func (s *Store) cachePut(key string, v any, err error) {
 // InvalidateCache drops every cached lookup in this process.
 func (s *Store) InvalidateCache() { s.cache.Clear() }
 
+func namespaceKey(name string) string   { return "n:" + name }
 func domainKey(name string) string      { return "d:" + name }
 func mailboxKey(id uuid.UUID) string    { return "m:" + id.String() }
 func accountKey(username string) string { return "a:" + username }
 func aliasKey(address string) string    { return "l:" + address }
+
+// GetNamespaceCached returns the namespace as last seen within CacheTTL.
+func (s *Store) GetNamespaceCached(ctx context.Context, name string) (Namespace, error) {
+	if PrimaryReads(ctx) {
+		v, err := s.GetNamespace(ctx, name)
+		return v.Value, err
+	}
+	name, err := NormalizeNamespace(name)
+	if err != nil {
+		return Namespace{}, err
+	}
+	if v, err, ok := s.cacheGet(namespaceKey(name)); ok {
+		return v.(Namespace), err
+	}
+	v, err := s.GetNamespace(ctx, name)
+	s.cachePut(namespaceKey(name), v.Value, err)
+	return v.Value, err
+}
 
 // GetDomainCached returns the domain as last seen within CacheTTL.
 func (s *Store) GetDomainCached(ctx context.Context, name string) (Domain, error) {

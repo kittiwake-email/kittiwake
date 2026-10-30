@@ -29,8 +29,16 @@ type RunnerConfig struct {
 	// backup nodes drain in a few ticks, so the queue never holds more
 	// than the next moments of work).
 	Batch int
-	// ExpireInterval between global expiry passes.
+	// ExpireInterval between expiry passes (per namespace).
 	ExpireInterval time.Duration
+	// Namespaces this node serves; nil = every namespace. Scheduling
+	// (leases, reconcile, due tasks, expiry) runs per namespace.
+	Namespaces []string
+}
+
+// nsPayload is the payload of a namespace-wide periodic task.
+type nsPayload struct {
+	Namespace string `json:"namespace"`
 }
 
 // Runner is the `backup` mode: it drains the backup task queues and, when
@@ -228,7 +236,9 @@ func (r *Runner) handle(ctx context.Context, task queue.Task) error {
 		_, err := r.svc.Maintain(ctx, bt.Mailbox)
 		return err
 	case TaskExpire:
-		_, err := r.svc.Expire(ctx, 1000)
+		var np nsPayload
+		_ = json.Unmarshal(task.Payload, &np)
+		_, err := r.svc.Expire(ctx, np.Namespace, 1000)
 		return err
 	case TaskJob:
 		var jt JobTask
@@ -271,7 +281,7 @@ func (r *Runner) job(ctx context.Context, id string) error {
 		j.ObjectKey, j.Bytes, j.Messages = res.Key, res.Bytes, res.Messages
 		j.Expires = r.Now().UTC().Add(r.svc.cfg.ExportExpiry)
 		if runErr == nil {
-			j.URL = r.svc.DownloadURL(res.Key, r.svc.cfg.ExportExpiry)
+			j.URL = r.svc.DownloadURL(j.Namespace, res.Key, r.svc.cfg.ExportExpiry)
 		}
 	case JobVerify:
 		var rep Report
@@ -304,15 +314,34 @@ func (r *Runner) job(ctx context.Context, id string) error {
 	return cat.PutJob(ctx, j)
 }
 
-// Schedule, when this runner leads, reconciles new mailboxes into the
-// schedule, enqueues due backups and maintenance, and the periodic
-// expiry pass.
+// Schedule runs the scheduler for every namespace this node serves.
 func (r *Runner) Schedule(ctx context.Context) {
+	sctx := identity.WithPrimaryReads(actor.With(ctx, actor.System(audit.ProtoCLI)))
+	nss := r.cfg.Namespaces
+	if len(nss) == 0 {
+		all, err := r.svc.st.Identity.AllNamespaces(sctx)
+		if err != nil {
+			r.log.Warn("listing namespaces failed", slog.String("error", err.Error()))
+			return
+		}
+		nss = all
+	}
+	for _, ns := range nss {
+		if !r.svc.Configured(ns) {
+			continue // no target for this namespace on this node
+		}
+		r.scheduleNamespace(sctx, ns)
+	}
+}
+
+// scheduleNamespace, when this runner leads the namespace, reconciles
+// its new mailboxes into the schedule, enqueues due backups and
+// maintenance, and the periodic expiry pass.
+func (r *Runner) scheduleNamespace(sctx context.Context, ns string) {
 	cat := r.svc.Catalog()
-	if lead, err := cat.LeadBackups(ctx, r.ID, 2*r.cfg.PollInterval+time.Minute); err != nil || !lead {
+	if lead, err := cat.LeadBackups(sctx, ns, r.ID, 2*r.cfg.PollInterval+time.Minute); err != nil || !lead {
 		return
 	}
-	sctx := identity.WithPrimaryReads(actor.With(ctx, actor.System(audit.ProtoCLI)))
 	defaults := func(ctx context.Context, mb uuid.UUID) time.Duration {
 		mv, err := r.svc.st.Identity.GetMailbox(ctx, mb)
 		if err != nil {
@@ -321,19 +350,19 @@ func (r *Runner) Schedule(ctx context.Context) {
 		every, _ := r.svc.Policy(ctx, mv.Value)
 		return every
 	}
-	if err := cat.Reconcile(sctx, r.cfg.Batch, r.svc.cfg.DefaultInterval, defaults); err != nil {
-		r.log.Warn("backup reconcile failed", slog.String("error", err.Error()))
+	if err := cat.Reconcile(sctx, ns, r.cfg.Batch, r.svc.cfg.DefaultInterval, defaults); err != nil {
+		r.log.Warn("backup reconcile failed", slog.String("namespace", ns), slog.String("error", err.Error()))
 	}
-	n, err := cat.EnqueueDue(sctx, r.cfg.Batch, func(ctx context.Context, typ string, mb uuid.UUID) error {
+	n, err := cat.EnqueueDue(sctx, ns, r.cfg.Batch, func(ctx context.Context, typ string, mb uuid.UUID) error {
 		return r.enqueuePeriodic(ctx, typ, mb.String(), BackupTask{Mailbox: mb})
 	})
 	if err != nil {
-		r.log.Warn("backup scheduling failed", slog.String("error", err.Error()))
+		r.log.Warn("backup scheduling failed", slog.String("namespace", ns), slog.String("error", err.Error()))
 	} else if n > 0 {
-		r.log.Debug("scheduled backup tasks", slog.Int("tasks", n))
+		r.log.Debug("scheduled backup tasks", slog.String("namespace", ns), slog.Int("tasks", n))
 	}
-	if due, err := r.queue.Due(sctx, TaskExpire, r.cfg.ExpireInterval); err == nil && due {
-		_ = r.enqueuePeriodic(sctx, TaskExpire, "", struct{}{})
+	if due, err := r.queue.Due(sctx, ns, TaskExpire, r.cfg.ExpireInterval); err == nil && due {
+		_ = r.enqueuePeriodic(sctx, TaskExpire, ns, nsPayload{Namespace: ns})
 	}
 }
 

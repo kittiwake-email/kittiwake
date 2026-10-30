@@ -45,6 +45,10 @@ func (s *Service) Backup(ctx context.Context, mb uuid.UUID, opts RunOptions) (Ru
 		return Run{}, err
 	}
 	every, retention := s.Policy(ctx, mv.Value)
+	ctx, err = s.enter(ctx, mv.Value.Namespace)
+	if err != nil {
+		return Run{}, err
+	}
 	now := s.Now().UTC()
 	if every == 0 && !opts.Force {
 		_ = s.cat.Schedule(ctx, mb, 0, time.Time{})
@@ -82,13 +86,13 @@ func (s *Service) Backup(ctx context.Context, mb uuid.UUID, opts RunOptions) (Ru
 			// a fuzzy run (restore repairs the rest).
 			s.log.Debug("backup fuzzy; retrying", slog.String("mailbox", mb.String()))
 			pw.Abort()
-			_ = s.tg.Delete(ctx, s.manifestKey(mb, man.Run))
+			_ = s.be(ctx).tg.Delete(ctx, s.manifestKey(mb, man.Run))
 			continue
 		}
 		break
 	}
 	run := Run{
-		ID: man.Run, Mailbox: mb, Started: man.Started, Finished: man.Finished, ModSeq: man.ModSeq, Fuzzy: man.Fuzzy, Full: man.Full,
+		ID: man.Run, Mailbox: mb, Namespace: mv.Value.Namespace, Started: man.Started, Finished: man.Finished, ModSeq: man.ModSeq, Fuzzy: man.Fuzzy, Full: man.Full,
 		ManifestKey: s.manifestKey(mb, man.Run), Packs: man.Packs, Bytes: man.Bytes, Messages: man.Messages, NewMessages: man.NewMessages,
 		Expires: man.Finished.Add(retention),
 	}
@@ -116,6 +120,7 @@ func truncate(s string, n int) string {
 // copier copies one mailbox's data into packs and blobs, reusing the
 // references of messages the previous run already holds.
 type copier struct {
+	ns        string // the mailbox's namespace (recorded on new blobs)
 	s         *Service
 	ctx       context.Context
 	mb        uuid.UUID
@@ -235,7 +240,7 @@ func (c *copier) copyData(msg uuid.UUID, m *Message) (bool, error) {
 
 // blob stores a large attachment once per content under its keyed name.
 func (c *copier) blob(hash string, data []byte) (Ref, error) {
-	name := c.s.ring.Name(hash)
+	name := c.s.be(c.ctx).ring.Name(hash)
 	key := c.s.blobKey(name)
 	if b, ok := c.blobs[name]; ok {
 		c.blobRefs = append(c.blobRefs, name)
@@ -250,11 +255,11 @@ func (c *copier) blob(hash string, data []byte) (Ref, error) {
 		c.blobRefs = append(c.blobRefs, name)
 		return Ref{Key: key, Length: b.Sealed, Size: b.Size, SHA256: hash}, nil
 	}
-	ref, err := sealTo(c.ctx, c.s.tg, c.s.ring, key, data, c.retain)
+	ref, err := sealTo(c.ctx, c.s.be(c.ctx).tg, c.s.be(c.ctx).ring, key, data, c.retain)
 	if err != nil {
 		return Ref{}, err
 	}
-	b := Blob{Name: name, Size: ref.Size, Sealed: ref.Length, Created: c.s.Now().UTC()}
+	b := Blob{Name: name, Namespace: c.ns, Size: ref.Size, Sealed: ref.Length, Created: c.s.Now().UTC()}
 	c.blobs[name] = b
 	c.newBlobs = append(c.newBlobs, b)
 	c.blobRefs = append(c.blobRefs, name)
@@ -337,7 +342,7 @@ func (s *Service) runOnce(ctx context.Context, m identity.Mailbox, state State, 
 	}
 	runID := newRunID(now)
 	man := &Manifest{
-		Version: ManifestVersion, Mailbox: mb, Run: runID, Started: now, Host: s.Hostname, ModSeq: root.ModSeq, Full: full || prev == nil,
+		Version: ManifestVersion, Mailbox: mb, Namespace: m.Namespace, Run: runID, Started: now, Host: s.Hostname, ModSeq: root.ModSeq, Full: full || prev == nil,
 		StorageID: m.StorageID, State: m.State, Quota: m.Quota, Hold: m.Hold,
 		Root: RootInfo{Usage: root.Usage, Created: root.Created},
 	}
@@ -348,9 +353,9 @@ func (s *Service) runOnce(ctx context.Context, m identity.Mailbox, state State, 
 	if man.Accounts == nil {
 		man.Accounts = []string{}
 	}
-	retain := s.retainUntil(now, retention)
-	pw := newPackWriter(ctx, s.tg, s.ring, s.runPrefix(mb, runID), s.cfg.SpoolDir, s.cfg.PackSize, retain)
-	c := &copier{s: s, ctx: ctx, mb: mb, pw: pw, retain: retain, known: map[uuid.UUID]Message{}, blobs: map[string]Blob{}}
+	retain := s.retainUntil(ctx, now, retention)
+	pw := newPackWriter(ctx, s.be(ctx).tg, s.be(ctx).ring, s.runPrefix(mb, runID), s.cfg.SpoolDir, s.cfg.PackSize, retain)
+	c := &copier{s: s, ctx: ctx, mb: mb, ns: m.Namespace, pw: pw, retain: retain, known: map[uuid.UUID]Message{}, blobs: map[string]Blob{}}
 
 	// Which previous folder entries can be kept as they are, and which
 	// must be reloaded so their messages' references can be reused.
@@ -544,7 +549,7 @@ func (s *Service) runOnce(ctx context.Context, m identity.Mailbox, state State, 
 	if err != nil {
 		return nil, pw, err
 	}
-	ref, err := sealTo(ctx, s.tg, s.ring, s.manifestKey(mb, runID), data, retain)
+	ref, err := sealTo(ctx, s.be(ctx).tg, s.be(ctx).ring, s.manifestKey(mb, runID), data, retain)
 	if err != nil {
 		return nil, pw, err
 	}

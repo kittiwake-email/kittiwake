@@ -74,6 +74,23 @@ func IDFrom(ctx context.Context) (int64, bool) {
 	return v, ok
 }
 
+type nsKey struct{}
+
+// WithNamespace confines Each through ctx to the storage of one
+// namespace (the sweeps of a namespace's periodic tasks).
+func WithNamespace(ctx context.Context, namespace string) context.Context {
+	if namespace == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, nsKey{}, namespace)
+}
+
+// NamespaceFrom returns the namespace set with WithNamespace, or "".
+func NamespaceFrom(ctx context.Context) string {
+	v, _ := ctx.Value(nsKey{}).(string)
+	return v
+}
+
 // ---- Fixed: one storage ----
 
 // Fixed resolves every mailbox to one client (memory backend, tests).
@@ -122,10 +139,14 @@ type Connector func(c identity.Storage) (rados.Client, error)
 type Registry struct {
 	// PlacementReserve excludes raw cluster bytes reserved for headroom.
 	PlacementReserve float64
-	ids              *identity.Store
-	connect          Connector
-	log              *slog.Logger
-	Now              func() time.Time
+	// Serve lists the namespaces this process serves; nil means all.
+	// Storage of other namespaces is never connected: a mailbox there is
+	// unavailable from this process, with an error that says so.
+	Serve   []string
+	ids     *identity.Store
+	connect Connector
+	log     *slog.Logger
+	Now     func() time.Time
 	// ReloadMinInterval bounds on-demand reloads triggered by an unknown
 	// storage id (a mailbox placed on a storage added since the last reload).
 	ReloadMinInterval time.Duration
@@ -135,6 +156,7 @@ type Registry struct {
 
 	mu       sync.RWMutex
 	conns    map[int64]*conn
+	unserved map[int64]string // storage id -> namespace, for storage this process does not serve
 	lastLoad time.Time
 }
 
@@ -157,6 +179,7 @@ type Status struct {
 	CapacityError          string    `json:"capacity_error,omitempty"`
 	ID                     int64     `json:"id"`
 	Name                   string    `json:"name"`
+	Namespace              string    `json:"namespace"`
 	FSID                   uuid.UUID `json:"fsid"`
 	Placement              bool      `json:"placement"`
 	Connected              bool      `json:"connected"`
@@ -168,7 +191,7 @@ func NewRegistry(ids *identity.Store, connect Connector, log *slog.Logger) *Regi
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Registry{PlacementReserve: 0.15, ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, RetryInterval: time.Minute, conns: map[int64]*conn{}}
+	return &Registry{PlacementReserve: 0.15, ids: ids, connect: connect, log: log, Now: time.Now, ReloadMinInterval: 10 * time.Second, RetryInterval: time.Minute, conns: map[int64]*conn{}, unserved: map[int64]string{}}
 }
 
 // Reload reads the registry, connects to new storage entries (verifying the fsid
@@ -190,7 +213,12 @@ func (r *Registry) Reload(ctx context.Context) error {
 	seen := map[int64]bool{}
 	var todo []identity.Storage
 	var closing []rados.Client
+	r.unserved = map[int64]string{}
 	for _, rec := range recs {
+		if !identity.ServesNamespace(r.Serve, rec.Namespace) {
+			r.unserved[rec.ID] = rec.Namespace
+			continue
+		}
 		seen[rec.ID] = true
 		c, ok := r.conns[rec.ID]
 		switch {
@@ -358,6 +386,12 @@ func (r *Registry) get(ctx context.Context, id int64) (*conn, error) {
 		}
 	}
 	if !ok {
+		r.mu.RLock()
+		ns, unserved := r.unserved[id]
+		r.mu.RUnlock()
+		if unserved {
+			return nil, fmt.Errorf("%w: storage %d belongs to namespace %s, which this process does not serve", ErrUnavailable, id, ns)
+		}
 		return nil, fmt.Errorf("%w: storage %d is not in this process's registry", ErrUnavailable, id)
 	}
 	if c.client == nil {
@@ -403,10 +437,11 @@ func (r *Registry) PoolOf(ctx context.Context, storageID int64, role Role) (rado
 }
 
 func (r *Registry) Each(ctx context.Context, role Role, fn func(int64, rados.IOContext) error) error {
+	only := NamespaceFrom(ctx)
 	r.mu.RLock()
 	var ids []int64
 	for id, c := range r.conns {
-		if c.client != nil {
+		if c.client != nil && (only == "" || c.rec.Namespace == only) {
 			ids = append(ids, id)
 		}
 	}
@@ -428,10 +463,15 @@ func (r *Registry) Each(ctx context.Context, role Role, fn func(int64, rados.IOC
 // ErrNoPlacement: no connected storage accepts new mailboxes.
 var ErrNoPlacement = errors.New("storage: no storage accepts new mailboxes")
 
-// Pick chooses a connected storage weighted by measured headroom above the
-// placement reserve. Failed or stale capacity measurements exclude new placement.
-func (r *Registry) Pick(ctx context.Context) (int64, error) {
-	ids := r.placeable()
+// Pick chooses a connected storage of the namespace weighted by measured
+// headroom above the placement reserve. Failed or stale capacity
+// measurements exclude new placement.
+func (r *Registry) Pick(ctx context.Context, namespace string) (int64, error) {
+	ns, err := identity.NormalizeNamespace(namespace)
+	if err != nil {
+		return 0, err
+	}
+	ids := r.placeable(ns)
 	if len(ids) == 0 {
 		// A storage registered since the last reload: look again, bounded.
 		r.mu.RLock()
@@ -439,22 +479,22 @@ func (r *Registry) Pick(ctx context.Context) (int64, error) {
 		r.mu.RUnlock()
 		if r.Now().Sub(last) >= r.ReloadMinInterval {
 			if err := r.Reload(ctx); err == nil {
-				ids = r.placeable()
+				ids = r.placeable(ns)
 			}
 		}
 	}
 	if len(ids) == 0 {
-		return 0, ErrNoPlacement
+		return 0, fmt.Errorf("%w in namespace %s", ErrNoPlacement, ns)
 	}
 	return r.pickWeighted(ids)
 }
 
-func (r *Registry) placeable() []int64 {
+func (r *Registry) placeable(namespace string) []int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var ids []int64
 	for id, c := range r.conns {
-		if r.placementWeight(c) > 0 {
+		if c.rec.Namespace == namespace && r.placementWeight(c) > 0 {
 			ids = append(ids, id)
 		}
 	}
@@ -467,7 +507,7 @@ func (r *Registry) Statuses() []Status {
 	defer r.mu.RUnlock()
 	var out []Status
 	for id, c := range r.conns {
-		st := Status{ID: id, Name: c.rec.Name, FSID: c.rec.FSID, Placement: c.rec.Placement, Connected: c.client != nil, CapacityTotalBytes: c.capacity.TotalBytes, CapacityAvailableBytes: c.capacity.AvailableBytes, PlacementEligible: r.placementWeight(c) > 0}
+		st := Status{ID: id, Name: c.rec.Name, Namespace: c.rec.Namespace, FSID: c.rec.FSID, Placement: c.rec.Placement, Connected: c.client != nil, CapacityTotalBytes: c.capacity.TotalBytes, CapacityAvailableBytes: c.capacity.AvailableBytes, PlacementEligible: r.placementWeight(c) > 0}
 		if c.capacityErr != nil {
 			st.CapacityError = c.capacityErr.Error()
 		}

@@ -213,15 +213,57 @@ func (c *Client) CreateDomain(ctx context.Context, req DomainRequest) (Domain, e
 	return out, c.do(ctx, http.MethodPost, "/v1/admin/domains", nil, req, "", &out)
 }
 
-// ListDomains returns one page of domain names.
-func (c *Client) ListDomains(ctx context.Context, after string, limit int) (Page, error) {
+// ListDomains returns one page of domain names, of one namespace or ("")
+// of all (a tenant admin always gets its own).
+func (c *Client) ListDomains(ctx context.Context, namespace, after string, limit int) (Page, error) {
 	var out Page
-	return out, c.do(ctx, http.MethodGet, "/v1/admin/domains", pageQuery(after, limit), nil, "", &out)
+	q := pageQuery(after, limit)
+	if namespace != "" {
+		q.Set("namespace", namespace)
+	}
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/domains", q, nil, "", &out)
 }
 
-// ListDomainsAll follows pages and returns every domain name.
-func (c *Client) ListDomainsAll(ctx context.Context) ([]string, error) {
-	return c.collect(ctx, func(after string) (Page, error) { return c.ListDomains(ctx, after, 500) })
+// ListDomainsAll follows pages and returns every domain name of a
+// namespace ("" = all).
+func (c *Client) ListDomainsAll(ctx context.Context, namespace string) ([]string, error) {
+	return c.collect(ctx, func(after string) (Page, error) { return c.ListDomains(ctx, namespace, after, 500) })
+}
+
+// ---- namespaces ----
+
+// CreateNamespace creates a namespace (platform admins only).
+func (c *Client) CreateNamespace(ctx context.Context, req NamespaceRequest) (Namespace, error) {
+	var out Namespace
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/namespaces", nil, req, "", &out)
+}
+
+// ListNamespaces returns one page of namespace names.
+func (c *Client) ListNamespaces(ctx context.Context, after string, limit int) (Page, error) {
+	var out Page
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/namespaces", pageQuery(after, limit), nil, "", &out)
+}
+
+// ListNamespacesAll follows pages and returns every namespace name.
+func (c *Client) ListNamespacesAll(ctx context.Context) ([]string, error) {
+	return c.collect(ctx, func(after string) (Page, error) { return c.ListNamespaces(ctx, after, 500) })
+}
+
+// GetNamespace returns a namespace.
+func (c *Client) GetNamespace(ctx context.Context, name string) (Namespace, error) {
+	var out Namespace
+	return out, c.do(ctx, http.MethodGet, "/v1/admin/namespaces/"+pathEscape(name), nil, nil, "", &out)
+}
+
+// UpdateNamespace patches enabled/settings.
+func (c *Client) UpdateNamespace(ctx context.Context, name string, req NamespaceRequest) (Namespace, error) {
+	var out Namespace
+	return out, c.do(ctx, http.MethodPatch, "/v1/admin/namespaces/"+pathEscape(name), nil, req, "", &out)
+}
+
+// DeleteNamespace removes an empty namespace.
+func (c *Client) DeleteNamespace(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/admin/namespaces/"+pathEscape(name), nil, nil, "", nil)
 }
 
 // GetDomain returns a domain.
@@ -272,21 +314,30 @@ func (c *Client) CreateMailbox(ctx context.Context, req MailboxRequest) (Mailbox
 	return out, c.do(ctx, http.MethodPost, "/v1/admin/mailboxes", nil, req, "", &out)
 }
 
-// ListMailboxes lists every mailbox (walks the meta pool; operator tool).
-func (c *Client) ListMailboxes(ctx context.Context) ([]MailboxListItem, error) {
+// ListMailboxes lists every mailbox of a namespace ("" = all; walks the
+// meta pool; operator tool).
+func (c *Client) ListMailboxes(ctx context.Context, namespace string) ([]MailboxListItem, error) {
 	var out struct {
 		Items []MailboxListItem `json:"items"`
 	}
-	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes", nil, nil, "", &out)
+	q := url.Values{}
+	if namespace != "" {
+		q.Set("namespace", namespace)
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes", q, nil, "", &out)
 }
 
 // ListOrphanedMailboxes lists mailboxes with no account attached (after an
 // account or domain was removed; attach a new account to keep the data).
-func (c *Client) ListOrphanedMailboxes(ctx context.Context) ([]MailboxListItem, error) {
+func (c *Client) ListOrphanedMailboxes(ctx context.Context, namespace string) ([]MailboxListItem, error) {
 	var out struct {
 		Items []MailboxListItem `json:"items"`
 	}
-	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes", url.Values{"orphaned": {"true"}}, nil, "", &out)
+	q := url.Values{"orphaned": {"true"}}
+	if namespace != "" {
+		q.Set("namespace", namespace)
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/mailboxes", q, nil, "", &out)
 }
 
 // InspectMailbox returns usage, folders, accounts, hold and limits.
@@ -337,11 +388,15 @@ func (c *Client) SetMailboxState(ctx context.Context, id, state, reason string) 
 }
 
 // ListHolds lists mailboxes on hold.
-func (c *Client) ListHolds(ctx context.Context) ([]Mailbox, error) {
+func (c *Client) ListHolds(ctx context.Context, namespace string) ([]Mailbox, error) {
 	var out struct {
 		Items []Mailbox `json:"items"`
 	}
-	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/holds", nil, nil, "", &out)
+	q := url.Values{}
+	if namespace != "" {
+		q.Set("namespace", namespace)
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/holds", q, nil, "", &out)
 }
 
 // ---- backups ----

@@ -21,14 +21,18 @@ func (d *DB) SchedulePurge(ctx context.Context, mb uuid.UUID, at time.Time) erro
 // The registry row and queue insertion are changed in one transaction. A signal
 // arriving while a task is leased remains in the registry for a successor; it
 // must never be discarded as a duplicate of work already in flight.
-func (d *DB) EnqueueDuePurges(ctx context.Context, limit int) (n int, err error) {
+func (d *DB) EnqueueDuePurges(ctx context.Context, namespace string, limit int) (n int, err error) {
 	if limit <= 0 {
 		return 0, nil
 	}
 	now := d.Now().UTC()
 	err = d.backgroundTx(ctx, func(tx *sql.Tx) error {
 		n = 0
-		rows, err := tx.QueryContext(ctx, "SELECT id,uuid FROM mailboxes WHERE purge_after<=? ORDER BY purge_after,id LIMIT ? FOR UPDATE SKIP LOCKED", now, limit)
+		nsID, err := d.namespaceID(ctx, tx, namespace)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, "SELECT id,uuid FROM mailboxes WHERE namespace_id=? AND purge_after<=? ORDER BY purge_after,id LIMIT ? FOR UPDATE SKIP LOCKED", nsID, now, limit)
 		if err != nil {
 			return err
 		}
@@ -55,7 +59,7 @@ func (d *DB) EnqueueDuePurges(ctx context.Context, limit int) (n int, err error)
 		for _, r := range batch {
 			key := sha256.Sum256([]byte("purge-trash\x00" + r.mb.String()))
 			payload, _ := json.Marshal(map[string]uuid.UUID{"mailbox": r.mb})
-			_, err := tx.ExecContext(ctx, "INSERT INTO tasks (id,type,state,payload,run_after,attempts,created,periodic_key) VALUES (?,'purge-trash','pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), string(payload), now, now, key[:])
+			_, err := tx.ExecContext(ctx, "INSERT INTO tasks (id,type,namespace_id,state,payload,run_after,attempts,created,periodic_key) VALUES (?,'purge-trash',?,'pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), nsID, string(payload), now, now, key[:])
 			if err != nil {
 				return err
 			}
@@ -82,29 +86,33 @@ func (d *DB) EnqueueDuePurges(ctx context.Context, limit int) (n int, err error)
 // A bounded keyset scan repairs missing signals across the Ceph/SQL boundary.
 // The cursor and updates commit together. A scheduler restart resumes the scan;
 // concurrent mailbox creation cannot extend its fixed high watermark forever.
-func (d *DB) ReconcilePurgeSchedule(ctx context.Context, limit int, every time.Duration) error {
+func (d *DB) ReconcilePurgeSchedule(ctx context.Context, namespace string, limit int, every time.Duration) error {
 	if limit <= 0 {
 		return nil
 	}
 	now := d.Now().UTC()
 	return d.backgroundTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO maintenance_scans (name) VALUES ('purge')"); err != nil {
+		nsID, err := d.namespaceID(ctx, tx, namespace)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO maintenance_scans (name, namespace_id) VALUES ('purge', ?)", nsID); err != nil {
 			return err
 		}
 		var after, ceiling int64
 		var completed sql.NullTime
-		if err := tx.QueryRowContext(ctx, "SELECT after_id,ceiling_id,completed_at FROM maintenance_scans WHERE name='purge' FOR UPDATE").Scan(&after, &ceiling, &completed); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT after_id,ceiling_id,completed_at FROM maintenance_scans WHERE name='purge' AND namespace_id=? FOR UPDATE", nsID).Scan(&after, &ceiling, &completed); err != nil {
 			return err
 		}
 		if ceiling == 0 {
 			if completed.Valid && now.Sub(completed.Time) < every {
 				return nil
 			}
-			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM mailboxes").Scan(&ceiling); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM mailboxes WHERE namespace_id=?", nsID).Scan(&ceiling); err != nil {
 				return err
 			}
 		}
-		rows, err := tx.QueryContext(ctx, "SELECT id FROM mailboxes WHERE id>? AND id<=? ORDER BY id LIMIT ?", after, ceiling, limit)
+		rows, err := tx.QueryContext(ctx, "SELECT id FROM mailboxes WHERE namespace_id=? AND id>? AND id<=? ORDER BY id LIMIT ?", nsID, after, ceiling, limit)
 		if err != nil {
 			return err
 		}
@@ -124,15 +132,15 @@ func (d *DB) ReconcilePurgeSchedule(ctx context.Context, limit int, every time.D
 		}
 		if len(ids) > 0 {
 			last := ids[len(ids)-1]
-			if _, err := tx.ExecContext(ctx, "UPDATE mailboxes SET purge_after=? WHERE id>? AND id<=? AND purge_after IS NULL", now, after, last); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE mailboxes SET purge_after=? WHERE namespace_id=? AND id>? AND id<=? AND purge_after IS NULL", now, nsID, after, last); err != nil {
 				return err
 			}
 			after = last
 		}
 		if len(ids) < limit || after >= ceiling {
-			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=0,ceiling_id=0,completed_at=? WHERE name='purge'", now)
+			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=0,ceiling_id=0,completed_at=? WHERE name='purge' AND namespace_id=?", now, nsID)
 		} else {
-			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=?,ceiling_id=? WHERE name='purge'", after, ceiling)
+			_, err = tx.ExecContext(ctx, "UPDATE maintenance_scans SET after_id=?,ceiling_id=? WHERE name='purge' AND namespace_id=?", after, ceiling, nsID)
 		}
 		return err
 	})

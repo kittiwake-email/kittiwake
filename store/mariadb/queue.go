@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +31,47 @@ func scanTask(row interface{ Scan(...any) error }) (queue.Task, error) {
 	return t, nil
 }
 
+// ServeNamespaces restricts Claim to tasks of these namespaces (queue.Namespaced).
+func (d *DB) ServeNamespaces(namespaces []string) {
+	d.served = append([]string(nil), namespaces...)
+}
+
+// taskNamespaceID resolves the namespace of a task from its payload: an
+// explicit "namespace" field, else the namespace of its "mailbox", else
+// the default namespace.
+func (d *DB) taskNamespaceID(ctx context.Context, q querier, payload []byte) int64 {
+	var p struct {
+		Namespace string    `json:"namespace"`
+		Mailbox   uuid.UUID `json:"mailbox"`
+	}
+	_ = json.Unmarshal(payload, &p)
+	if p.Namespace != "" {
+		if id, err := d.namespaceID(ctx, q, p.Namespace); err == nil {
+			return id
+		}
+	}
+	if p.Mailbox != uuid.Nil {
+		var id int64
+		if err := q.QueryRowContext(ctx, "SELECT namespace_id FROM mailboxes WHERE uuid = ?", bin(p.Mailbox)).Scan(&id); err == nil {
+			return id
+		}
+	}
+	return 1
+}
+
+// servedFilter returns a SQL fragment (starting with " AND ") and its
+// arguments restricting tasks to the served namespaces; empty when all.
+func (d *DB) servedFilter() (string, []any) {
+	if len(d.served) == 0 {
+		return "", nil
+	}
+	args := make([]any, len(d.served))
+	for i, ns := range d.served {
+		args[i] = ns
+	}
+	return " AND namespace_id IN (SELECT id FROM namespaces WHERE name IN (?" + strings.Repeat(",?", len(d.served)-1) + "))", args
+}
+
 func (d *DB) Enqueue(ctx context.Context, typ string, payload any, runAfter time.Time) (string, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -40,8 +82,9 @@ func (d *DB) Enqueue(ctx context.Context, typ string, payload any, runAfter time
 		runAfter = now
 	}
 	id := uuid.NewString()
-	_, err = d.sql.ExecContext(ctx, "INSERT INTO tasks (id, type, state, payload, run_after, attempts, created) VALUES (?, ?, 'pending', ?, ?, 0, ?)",
-		id, typ, string(b), runAfter.UTC(), now)
+	nsID := d.taskNamespaceID(ctx, d.sql, b)
+	_, err = d.sql.ExecContext(ctx, "INSERT INTO tasks (id, type, namespace_id, state, payload, run_after, attempts, created) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)",
+		id, typ, nsID, string(b), runAfter.UTC(), now)
 	return id, err
 }
 
@@ -54,9 +97,11 @@ func (d *DB) Claim(ctx context.Context, typ, worker string, max int, lease time.
 		return nil, err
 	}
 	var tasks []queue.Task
+	filter, fargs := d.servedFilter()
 	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
 		tasks = nil
-		rows, err := tx.QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE type = ? AND state = 'pending' AND run_after <= ? ORDER BY run_after, id LIMIT ? FOR UPDATE SKIP LOCKED", typ, now, max)
+		args := append([]any{typ, now}, fargs...)
+		rows, err := tx.QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE type = ? AND state = 'pending' AND run_after <= ?"+filter+" ORDER BY run_after, id LIMIT ? FOR UPDATE SKIP LOCKED", append(args, max)...)
 		if err != nil {
 			return err
 		}
@@ -183,22 +228,32 @@ func (d *DB) Retry(ctx context.Context, typ, id string) error {
 
 // ---- scheduler ----
 
-func (d *DB) Lead(ctx context.Context, worker string, ttl time.Duration) (bool, error) {
+func (d *DB) Lead(ctx context.Context, namespace, worker string, ttl time.Duration) (bool, error) {
+	return d.lead(ctx, 1, namespace, worker, ttl)
+}
+
+// lead takes or renews lease row kind (1: worker scheduler, 2: backup
+// scheduler) of a namespace.
+func (d *DB) lead(ctx context.Context, kind int, namespace, worker string, ttl time.Duration) (bool, error) {
 	now := d.Now().UTC()
 	var lead bool
 	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
+		nsID, err := d.namespaceID(ctx, tx, namespace)
+		if err != nil {
+			return err
+		}
 		var holder string
 		var until time.Time
-		err := tx.QueryRowContext(ctx, "SELECT holder, until FROM scheduler_lease WHERE id = 1 FOR UPDATE").Scan(&holder, &until)
+		err = tx.QueryRowContext(ctx, "SELECT holder, until FROM scheduler_lease WHERE id = ? AND namespace_id = ? FOR UPDATE", kind, nsID).Scan(&holder, &until)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			_, err = tx.ExecContext(ctx, "INSERT INTO scheduler_lease (id, holder, until) VALUES (1, ?, ?)", worker, now.Add(ttl))
+			_, err = tx.ExecContext(ctx, "INSERT INTO scheduler_lease (id, namespace_id, holder, until) VALUES (?, ?, ?, ?)", kind, nsID, worker, now.Add(ttl))
 			lead = err == nil
 			return err
 		case err != nil:
 			return err
 		case holder == worker || !until.After(now):
-			_, err = tx.ExecContext(ctx, "UPDATE scheduler_lease SET holder = ?, until = ? WHERE id = 1", worker, now.Add(ttl))
+			_, err = tx.ExecContext(ctx, "UPDATE scheduler_lease SET holder = ?, until = ? WHERE id = ? AND namespace_id = ?", worker, now.Add(ttl), kind, nsID)
 			lead = err == nil
 			return err
 		}
@@ -208,12 +263,16 @@ func (d *DB) Lead(ctx context.Context, worker string, ttl time.Duration) (bool, 
 	return lead, err
 }
 
-func (d *DB) Due(ctx context.Context, name string, every time.Duration) (bool, error) {
+func (d *DB) Due(ctx context.Context, namespace, name string, every time.Duration) (bool, error) {
 	now := d.Now().UTC()
 	var due bool
 	err := d.backgroundTx(ctx, func(tx *sql.Tx) error {
+		nsID, err := d.namespaceID(ctx, tx, namespace)
+		if err != nil {
+			return err
+		}
 		var last time.Time
-		err := tx.QueryRowContext(ctx, "SELECT last_run FROM scheduler WHERE name = ? FOR UPDATE", name).Scan(&last)
+		err = tx.QueryRowContext(ctx, "SELECT last_run FROM scheduler WHERE name = ? AND namespace_id = ? FOR UPDATE", name, nsID).Scan(&last)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -221,7 +280,7 @@ func (d *DB) Due(ctx context.Context, name string, every time.Duration) (bool, e
 			due = false
 			return nil
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO scheduler (name, last_run) VALUES (?, ?) ON DUPLICATE KEY UPDATE last_run = VALUES(last_run)", name, now)
+		_, err = tx.ExecContext(ctx, "INSERT INTO scheduler (name, namespace_id, last_run) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_run = VALUES(last_run)", name, nsID, now)
 		due = err == nil
 		return err
 	})
@@ -241,6 +300,7 @@ func (d *DB) EnqueuePeriodic(ctx context.Context, typ, scope string, payload any
 	}
 	key := sha256.Sum256([]byte(typ + "\x00" + scope))
 	now := d.Now().UTC()
-	_, err = d.sql.ExecContext(ctx, "INSERT INTO tasks (id,type,state,payload,run_after,attempts,created,periodic_key) VALUES (?,?,'pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), typ, string(b), now, now, key[:])
+	nsID := d.taskNamespaceID(ctx, d.sql, b)
+	_, err = d.sql.ExecContext(ctx, "INSERT INTO tasks (id,type,namespace_id,state,payload,run_after,attempts,created,periodic_key) VALUES (?,?,?,'pending',?,?,0,?,?) ON DUPLICATE KEY UPDATE id=id", uuid.NewString(), typ, nsID, string(b), now, now, key[:])
 	return err
 }

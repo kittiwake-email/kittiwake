@@ -120,14 +120,15 @@ type RootInfo struct {
 
 // Manifest describes one backup run of a mailbox.
 type Manifest struct {
-	Version  int       `json:"version"`
-	Mailbox  uuid.UUID `json:"mailbox"`
-	Run      string    `json:"run"`
-	Previous string    `json:"previous,omitempty"`
-	Started  time.Time `json:"started"`
-	Finished time.Time `json:"finished"`
-	Host     string    `json:"host"`
-	ModSeq   uint64    `json:"modseq"`
+	Version   int       `json:"version"`
+	Mailbox   uuid.UUID `json:"mailbox"`
+	Namespace string    `json:"namespace,omitempty"`
+	Run       string    `json:"run"`
+	Previous  string    `json:"previous,omitempty"`
+	Started   time.Time `json:"started"`
+	Finished  time.Time `json:"finished"`
+	Host      string    `json:"host"`
+	ModSeq    uint64    `json:"modseq"`
 	// Fuzzy: the mailbox changed while the run copied it (the root modseq
 	// moved between the first and last read).
 	Fuzzy bool `json:"fuzzy,omitempty"`
@@ -156,6 +157,7 @@ type Manifest struct {
 type Run struct {
 	ID          string    `json:"id"`
 	Mailbox     uuid.UUID `json:"mailbox"`
+	Namespace   string    `json:"namespace,omitempty"` // the mailbox's; names the target the run is on
 	Started     time.Time `json:"started"`
 	Finished    time.Time `json:"finished"`
 	ModSeq      uint64    `json:"modseq"`
@@ -173,6 +175,9 @@ type Run struct {
 // State is the backup state of a mailbox as the catalog keeps it.
 type State struct {
 	Mailbox uuid.UUID `json:"mailbox"`
+	// Namespace of the mailbox (memory catalog bookkeeping; the database
+	// keeps it on the mailbox row).
+	Namespace string `json:"namespace,omitempty"`
 	// Every is the effective interval; 0 = disabled; unset = not yet scheduled.
 	Every       time.Duration `json:"every"`
 	Scheduled   bool          `json:"scheduled"`
@@ -190,10 +195,11 @@ type State struct {
 
 // Blob is a deduplicated large attachment on the target.
 type Blob struct {
-	Name    string    `json:"name"` // keyed name (crypto.Ring.Name)
-	Size    int64     `json:"size"`
-	Sealed  int64     `json:"sealed"`
-	Created time.Time `json:"created"`
+	Name      string    `json:"name"` // keyed name (crypto.Ring.Name)
+	Namespace string    `json:"namespace,omitempty"`
+	Size      int64     `json:"size"`
+	Sealed    int64     `json:"sealed"`
+	Created   time.Time `json:"created"`
 }
 
 // Job kinds and states. Every job runs on a backup node (the only
@@ -213,10 +219,11 @@ const (
 
 // Job is a restore or export request and its outcome.
 type Job struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"`
-	Mailbox uuid.UUID `json:"mailbox"`
-	RunID   string    `json:"run_id,omitempty"`
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Mailbox   uuid.UUID `json:"mailbox"`
+	Namespace string    `json:"namespace,omitempty"`
+	RunID     string    `json:"run_id,omitempty"`
 	// Target: the restored mailbox (restore) or the mailbox restored into
 	// (restore-message; empty = the source mailbox).
 	Target    uuid.UUID `json:"target,omitempty"`
@@ -257,6 +264,7 @@ type Summary struct {
 type jobJSON struct {
 	ID        string          `json:"id"`
 	Kind      string          `json:"kind"`
+	Namespace string          `json:"namespace,omitempty"`
 	Mailbox   uuid.UUID       `json:"mailbox"`
 	RunID     string          `json:"run_id,omitempty"`
 	Target    string          `json:"target,omitempty"`
@@ -291,7 +299,7 @@ func optTime(t time.Time) *time.Time {
 // MarshalJSON leaves unset ids and times out instead of printing zero values.
 func (j Job) MarshalJSON() ([]byte, error) {
 	return json.Marshal(jobJSON{
-		ID: j.ID, Kind: j.Kind, Mailbox: j.Mailbox, RunID: j.RunID, Target: optUUID(j.Target), MessageID: optUUID(j.MessageID),
+		ID: j.ID, Kind: j.Kind, Namespace: j.Namespace, Mailbox: j.Mailbox, RunID: j.RunID, Target: optUUID(j.Target), MessageID: optUUID(j.MessageID),
 		ObjectKey: j.ObjectKey, URL: j.URL, Bytes: j.Bytes, Messages: j.Messages, Detail: j.Detail, State: j.State, Error: j.Error,
 		Requested: j.Requested, Created: j.Created, Finished: optTime(j.Finished), Expires: optTime(j.Expires),
 	})
@@ -303,7 +311,7 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &in); err != nil {
 		return err
 	}
-	*j = Job{ID: in.ID, Kind: in.Kind, Mailbox: in.Mailbox, RunID: in.RunID, ObjectKey: in.ObjectKey, URL: in.URL, Bytes: in.Bytes, Messages: in.Messages,
+	*j = Job{ID: in.ID, Kind: in.Kind, Namespace: in.Namespace, Mailbox: in.Mailbox, RunID: in.RunID, ObjectKey: in.ObjectKey, URL: in.URL, Bytes: in.Bytes, Messages: in.Messages,
 		Detail: in.Detail, State: in.State, Error: in.Error, Requested: in.Requested, Created: in.Created}
 	if in.Target != "" {
 		id, err := uuid.Parse(in.Target)

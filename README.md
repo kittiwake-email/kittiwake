@@ -90,8 +90,9 @@ both run the same conformance suites. Nothing else is stateful: no Redis, no mem
 
 Every process registers each mode it runs in a `nodes` table in the database: mode, the
 address it is reached on (the `node.advertise` host, by default the machine's first global
-address with IPv6 preferred, joined with the mode's listener port), hostname, version, start
-time; it refreshes the row every `node.heartbeat` (10 s) and removes it on orderly shutdown.
+address with IPv6 preferred, joined with the mode's listener port), hostname, version, the
+namespaces it serves (empty: all), start time; it refreshes the row every `node.heartbeat`
+(10 s) and removes it on orderly shutdown.
 A node whose heartbeat is three intervals old counts as dead and is purged after a day.
 This is the service discovery of the platform: daemons that need another internal service
 (JMAP, IMAP and MCP looking for `search` nodes) read the live list from the database, cache
@@ -147,6 +148,63 @@ in other datacenters within a few milliseconds of each other.
   RADOS write; the write path is three. Reads on the hot path are cached or session-local.
 - **Not yet:** moving a mailbox between storage entries (a worker task: suspend soft, copy,
   flip, delete), per-domain default storage.
+
+## Namespaces
+
+A **namespace** is the unit of tenant isolation, above domains. It exists for two reasons:
+a single Ceph cluster cannot grow forever, and some tenants may not, for legal reasons,
+share an environment with others. A namespace owns:
+
+- **Storage.** Every storage entry belongs to exactly one namespace. A namespace with its
+  own pools and CephX key on a shared cluster is already better spread than one big pool
+  set; a namespace on its own cluster is fully separate. Several storage entries may share
+  a cluster (the same fsid), never a pool. New mailboxes are placed among the storage
+  entries of their namespace only.
+- **Domains, and through them mailboxes and accounts.** A domain is assigned to a namespace
+  when it is created (`default` unless told otherwise) and never moves. A mailbox is created
+  in a namespace and placed on its storage; an account may only be attached to a mailbox in
+  its domain's namespace, so an orphaned mailbox is re-attached only within its namespace
+  and an alias delivers only to mailboxes of its domain's namespace. Mail data never crosses
+  a namespace.
+- **Settings.** The same keys as domain settings (`backup.interval`, `backup.retention`),
+  consulted after the domain and before the configured defaults.
+
+The `default` namespace always exists and cannot be removed; a namespace can be removed
+when it holds no domains, mailboxes or storage. Disabling a namespace disables every domain
+in it: delivery is rejected and logins fail. Names are DNS labels and immutable.
+
+**Daemons serve every namespace unless told otherwise.** The configuration key `namespaces`
+lists the namespaces a process serves; empty means all. A restricted process connects only
+to the storage of its namespaces (other tenants' credentials never load into it), registers
+the list in the node registry (`kittiwake-admin node list` shows it), dequeues only tasks of
+its namespaces, and refuses the rest clearly: IMAP, POP3 and JMAP logins into a mailbox it
+does not serve fail with "mailbox is not served by this server", LMTP answers 4xx so the MTA
+retries elsewhere. This is how IMAP, POP3, JMAP, workers and backup nodes scale out per
+namespace. Postfix's socketmap needs only the database and answers for every namespace.
+Proxies in front that route a client to the servers of its namespace, so that the whole
+platform looks like one cluster from outside, are a later addition.
+
+**Schedulers are per namespace.** Workers and backup nodes elect a leader per namespace
+among the nodes that serve it; periodic tasks (purges, garbage collection, sweeps, backup
+scheduling and expiry) are enqueued per namespace and walk only that namespace's storage,
+so a slow cluster in one namespace never delays another. Every task row carries its
+namespace: from its mailbox, or named explicitly for namespace-wide work.
+
+**Admin tokens have a scope.** A token bound to no namespace is the platform admin. A token
+bound to one namespace is a **tenant admin**: it sees and changes only that namespace's
+domains, mailboxes, accounts, aliases, backups, restores and audit trail, every create lands
+in its namespace whatever the request says, listings are filtered to it, and a record of
+another namespace reads as not found. Platform-level operations stay with the platform
+admin: namespaces, storage registration (a tenant admin reads its own storage entries
+without keys), admin tokens, nodes, queues, key rotation and identity export. The admin API
+and `kittiwake-admin` take `--namespace` on creates and listings; tenant tokens are minted
+with `kittiwake-admin token create --namespace <name>`.
+
+**Backups per namespace.** `backup.namespaces.<name>` in the backup node's configuration
+gives a namespace its own target and key ring (a tenant's bucket under the tenant's keys);
+namespaces without one use the default target. Runs, blobs and jobs record their
+namespace, so expiry works per namespace and a removed mailbox's backups still find their
+target. Blobs are deduplicated within a namespace, never across.
 
 ## One binary, multiple modes
 
@@ -792,8 +850,10 @@ delivery or client I/O path.
 holds the backup target's credentials and the encryption keys. It drains the backup task
 queues (`backup`, `backup-job`, `backup-maintain`, `backup-expire`) from the MariaDB task
 queue with the same lease, retry and dead-letter semantics as the worker, and the backup
-nodes elect a scheduler among themselves (a lease row separate from the worker scheduler's).
-Every other mode only files tasks and reads the catalog. Scale by adding backup nodes.
+nodes elect a scheduler per namespace among themselves (lease rows separate from the
+worker scheduler's). Every other mode only files tasks and reads the catalog. Scale by
+adding backup nodes, per namespace when a tenant needs its own (see "Namespaces" for
+per-namespace targets and keys).
 
 **What a backup is.** A logical copy, not a copy of RADOS objects, so it survives index
 format changes: message documents, kept original bytes (`.raw`) and attachment payloads
@@ -1026,6 +1086,7 @@ with a comment, an expiration date and one role:
 
 Admin tokens live in the meta pool next to account tokens but belong to no account and no
 domain; they are managed through the admin API (`/v1/admin/tokens`) or `kittiwake-admin token`.
+A token may be bound to one namespace, which makes it a tenant admin (see "Namespaces").
 The first one is minted with `kittiwake admin bootstrap`, which talks to RADOS directly and
 refuses once admin tokens exist; `kittiwake admin token` mints further ones (including
 read-only) for recovery. The admin API accepts bearer tokens only; there are no admin
@@ -1249,6 +1310,7 @@ The daemon takes a single YAML file as configuration:
   modes. JMAP and the admin API are separate listeners and separate code paths. Optionally
   the modes to run in one process, otherwise each systemd instance passes its mode with
   `--modes` and takes everything else, including its management port, from the YAML
+- `namespaces`: the namespaces this process serves (empty: all); every mode honours it
 - Metadata database DSN (MariaDB), optional read replica DSN and read stickiness
 - Ceph: `config_file` and `options` applied to every storage connection (the Ceph
   clusters themselves are registered in the database as storage); pool names only for the memory backend
@@ -1266,9 +1328,9 @@ The daemon takes a single YAML file as configuration:
   disabled ones 5xx)
 - Inline attachment size threshold
 - Maximum message size
-- Backups: target (S3 or directory), keys, default interval and its bounds, retention,
-  verification interval, export expiry, Object Lock, pack size, blob threshold, spool
-  directory, concurrency; post-hold purge grace period
+- Backups: target (S3 or directory), keys, per-namespace targets and keys, default interval
+  and its bounds, retention, verification interval, export expiry, Object Lock, pack size,
+  blob threshold, spool directory, concurrency; post-hold purge grace period
 - Management listener (metrics, health)
 - Logging and metrics settings
 - Redis information (only if it ever becomes needed)
@@ -1340,6 +1402,9 @@ than the schema it talks to (a daemon refuses to start on a schema version it do
   suites; `kittiwake admin bootstrap`, identity export/import
 - Multiple Ceph clusters: registry with fsid verification, per-mailbox placement, periodic
   reload, per-storage stores and sweeps, `kittiwake-admin storage` and `/v1/admin/storage`
+- Namespaces: tenant isolation owning storage, domains and mailboxes; per-process served
+  set; per-namespace schedulers, task partitioning and backup targets; tenant admin tokens;
+  `kittiwake-admin namespace` and `/v1/admin/namespaces`
 - Admin service, REST admin API (domains, mailboxes, accounts, aliases, tokens, sessions,
   hold/release, audit queries, queue inspection, key rotation, export/import) with an
   OpenAPI spec that is tested against the registered routes

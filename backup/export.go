@@ -82,6 +82,10 @@ func (s *Service) Export(ctx context.Context, mb uuid.UUID, runID, requestedBy s
 	if err != nil {
 		return ExportResult{}, err
 	}
+	ctx, err = s.enter(ctx, run.Namespace)
+	if err != nil {
+		return ExportResult{}, err
+	}
 	man, err := s.loadManifest(ctx, run.ManifestKey)
 	if err != nil {
 		return ExportResult{}, err
@@ -141,7 +145,7 @@ func (s *Service) Export(ctx context.Context, mb uuid.UUID, runID, requestedBy s
 	// Audit log: every day the backup holds, as one JSON-lines file.
 	var auditBuf bytes.Buffer
 	for _, d := range man.Audit {
-		b, err := readRef(ctx, s.tg, s.ring, d.Ref)
+		b, err := readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, d.Ref)
 		if err != nil {
 			em.Errors = append(em.Errors, fmt.Sprintf("audit %s: %v", d.Day, err))
 			continue
@@ -176,7 +180,7 @@ func (s *Service) Export(ctx context.Context, mb uuid.UUID, runID, requestedBy s
 		return res, err
 	}
 	key := s.exportKey(mb, runID, now)
-	if err := s.tg.Put(ctx, key, spool, size, target.PutOptions{ContentType: "application/gzip"}); err != nil {
+	if err := s.be(ctx).tg.Put(ctx, key, spool, size, target.PutOptions{ContentType: "application/gzip"}); err != nil {
 		return res, err
 	}
 	res.Key, res.Bytes, res.Errors = key, size, em.Errors
@@ -189,9 +193,9 @@ func (s *Service) Export(ctx context.Context, mb uuid.UUID, runID, requestedBy s
 // rendered from its document and attachments, all read from the backup.
 func (s *Service) render(ctx context.Context, m Message) ([]byte, error) {
 	if m.Raw != nil {
-		return readRef(ctx, s.tg, s.ring, *m.Raw)
+		return readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, *m.Raw)
 	}
-	docBytes, err := readRef(ctx, s.tg, s.ring, m.Doc)
+	docBytes, err := readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, m.Doc)
 	if err != nil {
 		return nil, err
 	}
@@ -208,19 +212,23 @@ func (s *Service) render(ctx context.Context, m Message) ([]byte, error) {
 		if !ok {
 			return nil, fmt.Errorf("attachment %s not in backup", hash)
 		}
-		return readRef(ctx, s.tg, s.ring, ref)
+		return readRef(ctx, s.be(ctx).tg, s.be(ctx).ring, ref)
 	})
 }
 
-// OpenExport streams a stored export archive.
-func (s *Service) OpenExport(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+// OpenExport streams a stored export archive from the namespace's target.
+func (s *Service) OpenExport(ctx context.Context, namespace, key string) (io.ReadCloser, int64, error) {
 	if err := s.authorize(ctx); err != nil {
 		return nil, 0, err
 	}
-	o, err := s.tg.Head(ctx, key)
+	ctx, err := s.enter(ctx, namespace)
 	if err != nil {
 		return nil, 0, err
 	}
-	rc, err := s.tg.Get(ctx, key, 0, -1)
+	o, err := s.be(ctx).tg.Head(ctx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	rc, err := s.be(ctx).tg.Get(ctx, key, 0, -1)
 	return rc, o.Size, err
 }

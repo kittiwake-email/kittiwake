@@ -28,6 +28,9 @@ type Actor struct {
 	// Admin is the admin username when an admin acts on someone else's
 	// mailbox (support access); empty otherwise.
 	Admin string
+	// Namespace confines an admin token to one namespace (a tenant admin);
+	// empty for platform admins and for every non-admin actor.
+	Namespace string
 }
 
 // HasRole reports whether the actor carries the role.
@@ -52,6 +55,19 @@ func (a Actor) IsAdmin() bool { return a.HasRole(RoleAdmin) }
 // IsAdminReader reports whether the actor may perform read-only
 // administration (full admins included).
 func (a Actor) IsAdminReader() bool { return a.HasRole(RoleAdmin) || a.HasRole(RoleAdminRead) }
+
+// Administers reports whether an admin actor's scope covers the namespace:
+// platform admins cover every namespace, tenant admins only their own.
+// Non-admin actors never administer anything.
+func (a Actor) Administers(namespace string) bool {
+	return a.IsAdmin() && (a.Namespace == "" || a.Namespace == namespace)
+}
+
+// Reads reports whether a (read-only or full) admin actor's scope covers
+// the namespace.
+func (a Actor) Reads(namespace string) bool {
+	return a.IsAdminReader() && (a.Namespace == "" || a.Namespace == namespace)
+}
 
 // IsSystem reports the CLI/worker system actor.
 func (a Actor) IsSystem() bool {

@@ -537,7 +537,7 @@ func TestOrphanSweepPreservesDataOnRetentionReadFailure(t *testing.T) {
 	f.now = f.now.Add(2 * time.Hour)
 	io, _ := f.c.Pool("index")
 	f.w.idx = index.New(retentionReadFailure{io})
-	if err := f.w.orphanSweep(ctx); err == nil {
+	if err := f.w.orphanSweep(ctx, ""); err == nil {
 		t.Fatal("retention failure ignored")
 	}
 	if _, err := f.st.Messages.GetDoc(ctx, f.mb.ID, id); err != nil {

@@ -60,6 +60,8 @@ type DB struct {
 	// (schema_version.applied_by), so the database says which release
 	// created or last upgraded its schema.
 	ProductVersion string
+	// served restricts Claim to these namespaces (queue.Namespaced); nil = all.
+	served []string
 }
 
 // Open connects to the primary DSN (go-sql-driver/mysql format, e.g.

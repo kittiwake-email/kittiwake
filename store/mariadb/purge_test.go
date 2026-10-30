@@ -22,13 +22,13 @@ func TestDuePurgeSignalsSurviveLeasedWork(t *testing.T) {
 	if err := db.SchedulePurge(ctx, mb.ID, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := db.EnqueueDuePurges(ctx, 10); err != nil || n != 0 {
+	if n, err := db.EnqueueDuePurges(ctx, "", 10); err != nil || n != 0 {
 		t.Fatalf("future: %d %v", n, err)
 	}
 	if err := db.SchedulePurge(ctx, mb.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := db.EnqueueDuePurges(ctx, 10); err != nil || n != 1 {
+	if n, err := db.EnqueueDuePurges(ctx, "", 10); err != nil || n != 1 {
 		t.Fatalf("due: %d %v", n, err)
 	}
 	tasks, err := db.Claim(ctx, "purge-trash", "worker", 1, time.Hour)
@@ -38,7 +38,7 @@ func TestDuePurgeSignalsSurviveLeasedWork(t *testing.T) {
 	if err := db.SchedulePurge(ctx, mb.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.EnqueueDuePurges(ctx, 10); err != nil {
+	if _, err := db.EnqueueDuePurges(ctx, "", 10); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := db.Stats(ctx, "purge-trash")
@@ -49,7 +49,7 @@ func TestDuePurgeSignalsSurviveLeasedWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Minute)
-	if n, err := db.EnqueueDuePurges(ctx, 10); err != nil || n != 1 {
+	if n, err := db.EnqueueDuePurges(ctx, "", 10); err != nil || n != 1 {
 		t.Fatalf("successor lost: %d %v", n, err)
 	}
 }
@@ -73,7 +73,7 @@ func TestPurgeDiscoveryPersistsBoundedProgress(t *testing.T) {
 		return n
 	}
 	for _, want := range []int{2, 4, 5} {
-		if err := db.ReconcilePurgeSchedule(ctx, 2, 7*24*time.Hour); err != nil {
+		if err := db.ReconcilePurgeSchedule(ctx, "", 2, 7*24*time.Hour); err != nil {
 			t.Fatal(err)
 		}
 		if got := count(); got != want {
@@ -83,7 +83,7 @@ func TestPurgeDiscoveryPersistsBoundedProgress(t *testing.T) {
 	if _, err := db.SQL().ExecContext(ctx, "UPDATE mailboxes SET purge_after=NULL"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReconcilePurgeSchedule(ctx, 2, 7*24*time.Hour); err != nil {
+	if err := db.ReconcilePurgeSchedule(ctx, "", 2, 7*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(); got != 0 {

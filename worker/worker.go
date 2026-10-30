@@ -75,6 +75,14 @@ type Config struct {
 	// paths undo their own failures and the sweep only catches crashes.
 	OrphanSweepInterval time.Duration
 	ScanBatch           int
+	// Namespaces this worker serves; nil = every namespace. The scheduler
+	// leads, and periodic tasks are enqueued, per namespace.
+	Namespaces []string
+}
+
+// nsPayload is the payload of a namespace-wide periodic task.
+type nsPayload struct {
+	Namespace string `json:"namespace"`
 }
 
 // Worker drains the task queues.
@@ -306,21 +314,31 @@ func (w *Worker) handle(ctx context.Context, task queue.Task) error {
 		return err
 	case TaskSearchIndex:
 		return nil // no search backend configured
+	}
+	// Namespace-wide periodic tasks: confined to the namespace's storage.
+	var np nsPayload
+	_ = json.Unmarshal(task.Payload, &np)
+	ns, err := identity.NormalizeNamespace(np.Namespace)
+	if err != nil {
+		return fmt.Errorf("bad payload: %v", err)
+	}
+	ctx = storage.WithNamespace(ctx, ns)
+	switch task.Type {
 	case TaskAttachmentGC:
 		return w.attachmentGC(ctx)
 	case TaskPurgeAudit:
-		return w.purgeAudit(ctx)
+		return w.purgeAudit(ctx, ns)
 	case TaskUploadSweep:
 		n, err := w.msgs.SweepUploads(ctx)
 		if n > 0 {
-			w.log.Info("upload sweep", slog.Int("expired", n))
+			w.log.Info("upload sweep", slog.String("namespace", ns), slog.Int("expired", n))
 		}
 		return err
 	case TaskOrphanSweep:
 		if n, err := w.ids.PurgeNodes(ctx, w.Now().Add(-24*time.Hour)); err == nil && n > 0 {
 			w.log.Info("purged dead node registrations", slog.Int("rows", n))
 		}
-		return w.orphanSweep(ctx)
+		return w.orphanSweep(ctx, ns)
 	}
 	return fmt.Errorf("unknown task type %q", task.Type)
 }
@@ -564,7 +582,7 @@ func (w *Worker) collectAttachment(ctx context.Context, cid int64, hash string) 
 // entry refers to (and lone .raw objects), once they are older than
 // OrphanAge. A mailbox that had an orphan gets its quota recalculated: the
 // orphan is the trace of a torn write that may have left the counters off.
-func (w *Worker) orphanSweep(ctx context.Context) error {
+func (w *Worker) orphanSweep(ctx context.Context, namespace string) error {
 	cutoff := w.Now().Add(-w.cfg.OrphanAge)
 	inRetention := func(cid int64, mb, msg uuid.UUID) (bool, error) {
 		return w.idx.IsRetained(storage.WithID(ctx, cid), mb, msg)
@@ -629,7 +647,7 @@ func (w *Worker) orphanSweep(ctx context.Context) error {
 // purgeAudit drops audit objects older than the retention: the admin log
 // and every live mailbox's daily objects (removed mailboxes lose theirs
 // with the mailbox).
-func (w *Worker) purgeAudit(ctx context.Context) error {
+func (w *Worker) purgeAudit(ctx context.Context, namespace string) error {
 	if maintenance, ok := w.ids.Backend().(interface{ PurgeExpiredSessions(context.Context) error }); ok {
 		if err := maintenance.PurgeExpiredSessions(ctx); err != nil {
 			return err
@@ -641,7 +659,7 @@ func (w *Worker) purgeAudit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+	err = w.ids.ListMailboxes(ctx, namespace, func(id uuid.UUID) error {
 		// Mailboxes on hold keep everything.
 		v, err := w.ids.GetMailbox(ctx, id)
 		if errors.Is(err, identity.ErrNotFound) {
@@ -670,42 +688,66 @@ func (w *Worker) purgeAudit(ctx context.Context) error {
 // tasks whose interval has elapsed. Last-run times live in the queue
 // store so a new leader continues where the old one stopped.
 func (w *Worker) schedule(ctx context.Context) {
-	if lead, err := w.queue.Lead(ctx, w.ID, 2*w.cfg.PollInterval+time.Minute); err != nil || !lead {
+	for _, ns := range w.namespaces(ctx) {
+		w.scheduleNamespace(ctx, ns)
+	}
+}
+
+// namespaces returns the namespaces this worker schedules for: the
+// configured list, else every namespace in the registry.
+func (w *Worker) namespaces(ctx context.Context) []string {
+	if len(w.cfg.Namespaces) > 0 {
+		return w.cfg.Namespaces
+	}
+	all, err := w.ids.AllNamespaces(ctx)
+	if err != nil {
+		w.log.Warn("listing namespaces failed", slog.String("error", err.Error()))
+		return []string{identity.DefaultNamespace}
+	}
+	return all
+}
+
+// scheduleNamespace, when this worker holds the namespace's scheduler
+// lease, enqueues the namespace's periodic tasks whose interval has
+// elapsed. Last-run times live in the queue store so a new leader
+// continues where the old one stopped.
+func (w *Worker) scheduleNamespace(ctx context.Context, ns string) {
+	if lead, err := w.queue.Lead(ctx, ns, w.ID, 2*w.cfg.PollInterval+time.Minute); err != nil || !lead {
 		return // somebody else leads
 	}
 	due := func(name string, every time.Duration) bool {
-		ok, err := w.queue.Due(ctx, name, every)
+		ok, err := w.queue.Due(ctx, ns, name, every)
 		return err == nil && ok
 	}
 	if scheduler, ok := w.queue.(queue.PurgeScheduler); ok {
-		if err := scheduler.ReconcilePurgeSchedule(ctx, w.cfg.ScanBatch, w.cfg.OrphanSweepInterval); err != nil {
-			w.log.Warn("purge discovery failed", slog.String("error", err.Error()))
+		if err := scheduler.ReconcilePurgeSchedule(ctx, ns, w.cfg.ScanBatch, w.cfg.OrphanSweepInterval); err != nil {
+			w.log.Warn("purge discovery failed", slog.String("namespace", ns), slog.String("error", err.Error()))
 		}
-		if _, err := scheduler.EnqueueDuePurges(ctx, w.cfg.ScanBatch); err != nil {
-			w.log.Warn("due purge scheduling failed", slog.String("error", err.Error()))
+		if _, err := scheduler.EnqueueDuePurges(ctx, ns, w.cfg.ScanBatch); err != nil {
+			w.log.Warn("due purge scheduling failed", slog.String("namespace", ns), slog.String("error", err.Error()))
 		}
 	} else if due("purge", w.cfg.PurgeInterval) {
 		n := 0
-		_ = w.ids.ListMailboxes(ctx, func(id uuid.UUID) error {
+		_ = w.ids.ListMailboxes(ctx, ns, func(id uuid.UUID) error {
 			if err := w.enqueuePeriodic(ctx, TaskPurgeTrash, id.String(), mailboxPayload{Mailbox: id}); err == nil {
 				n++
 			}
 			return nil
 		})
-		w.log.Info("scheduled trash purges", slog.Int("mailboxes", n))
+		w.log.Info("scheduled trash purges", slog.String("namespace", ns), slog.Int("mailboxes", n))
 	}
 	for _, typ := range []string{TaskAttachmentGC, TaskPurgeAudit} {
 		if due(typ, w.cfg.GCInterval) {
-			_ = w.enqueuePeriodic(ctx, typ, "", struct{}{})
-			w.log.Info("scheduled", slog.String("task", typ))
+			_ = w.enqueuePeriodic(ctx, typ, ns, nsPayload{Namespace: ns})
+			w.log.Info("scheduled", slog.String("task", typ), slog.String("namespace", ns))
 		}
 	}
 	if due(TaskOrphanSweep, w.cfg.OrphanSweepInterval) {
-		_ = w.enqueuePeriodic(ctx, TaskOrphanSweep, "", struct{}{})
-		w.log.Info("scheduled", slog.String("task", TaskOrphanSweep))
+		_ = w.enqueuePeriodic(ctx, TaskOrphanSweep, ns, nsPayload{Namespace: ns})
+		w.log.Info("scheduled", slog.String("task", TaskOrphanSweep), slog.String("namespace", ns))
 	}
 	if due(TaskUploadSweep, w.cfg.PurgeInterval) {
-		_ = w.enqueuePeriodic(ctx, TaskUploadSweep, "", struct{}{})
+		_ = w.enqueuePeriodic(ctx, TaskUploadSweep, ns, nsPayload{Namespace: ns})
 	}
 }
 

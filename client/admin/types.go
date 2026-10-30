@@ -32,6 +32,27 @@ type Page struct {
 
 // Domain is a mail domain.
 type Domain struct {
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Enabled   bool              `json:"enabled"`
+	Settings  map[string]string `json:"settings,omitempty"`
+	Created   time.Time         `json:"created"`
+	Updated   time.Time         `json:"updated"`
+}
+
+// DomainRequest creates or patches a domain. Nil fields are left unchanged.
+// Namespace applies on create only (default: the token's own, else
+// "default").
+type DomainRequest struct {
+	Name      string            `json:"name,omitempty"`
+	Namespace string            `json:"namespace,omitempty"`
+	Enabled   *bool             `json:"enabled,omitempty"`
+	Settings  map[string]string `json:"settings,omitempty"`
+}
+
+// Namespace is the unit of tenant isolation: it owns storage, domains and
+// mailboxes. "default" always exists.
+type Namespace struct {
 	Name     string            `json:"name"`
 	Enabled  bool              `json:"enabled"`
 	Settings map[string]string `json:"settings,omitempty"`
@@ -39,8 +60,8 @@ type Domain struct {
 	Updated  time.Time         `json:"updated"`
 }
 
-// DomainRequest creates or patches a domain. Nil fields are left unchanged.
-type DomainRequest struct {
+// NamespaceRequest creates or patches a namespace. Names are immutable.
+type NamespaceRequest struct {
 	Name     string            `json:"name,omitempty"`
 	Enabled  *bool             `json:"enabled,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
@@ -68,6 +89,7 @@ type Hold struct {
 // Mailbox is the identity record of a mailbox.
 type Mailbox struct {
 	ID          string         `json:"id"`
+	Namespace   string         `json:"namespace"`
 	StorageID   int64          `json:"storage_id"`
 	State       string         `json:"state"` // active | suspended | disabled
 	StateReason string         `json:"state_reason,omitempty"`
@@ -87,9 +109,11 @@ type MailboxRequest struct {
 	State       *string      `json:"state,omitempty"`
 	StateReason string       `json:"state_reason,omitempty"`
 	Quota       *QuotaLimits `json:"quota,omitempty"`
-	// StorageID pins the Ceph storage on create (default: random among
-	// storage entries open for placement).
-	StorageID int64 `json:"storage_id,omitempty"`
+	// Namespace on create (default: the token's own, else "default");
+	// StorageID pins the Ceph storage on create (default: weighted among
+	// the namespace's storage entries open for placement).
+	Namespace string `json:"namespace,omitempty"`
+	StorageID int64  `json:"storage_id,omitempty"`
 	// Backup settings (interval, retention, disabled).
 	Backup *BackupSettingsRequest `json:"backup,omitempty"`
 }
@@ -106,6 +130,7 @@ type Storage struct {
 	ID        int64     `json:"id"`
 	FSID      string    `json:"fsid"`
 	Name      string    `json:"name"`
+	Namespace string    `json:"namespace"`
 	MonHost   string    `json:"mon_host"`
 	User      string    `json:"user"`
 	Pools     Pools     `json:"pools"`
@@ -118,6 +143,7 @@ type Storage struct {
 // unchanged on PATCH.
 type StorageRequest struct {
 	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"` // create only
 	MonHost   string `json:"mon_host,omitempty"`
 	User      string `json:"user,omitempty"`
 	Key       string `json:"key,omitempty"`
@@ -163,6 +189,7 @@ type MailboxInfo struct {
 // MailboxListItem is one entry of GET /v1/admin/mailboxes.
 type MailboxListItem struct {
 	ID          string      `json:"id"`
+	Namespace   string      `json:"namespace"`
 	StorageID   int64       `json:"storage_id"`
 	State       string      `json:"state"`
 	StateReason string      `json:"state_reason,omitempty"`
@@ -204,6 +231,7 @@ type Account struct {
 	Username    string     `json:"username"`
 	Name        string     `json:"name"`
 	Domain      string     `json:"domain"`
+	Namespace   string     `json:"namespace"`
 	MailboxID   string     `json:"mailbox_id"`
 	Roles       []string   `json:"roles"`
 	Services    []string   `json:"services"`
@@ -260,6 +288,7 @@ type Session struct {
 type Token struct {
 	ID        string    `json:"id"`
 	AccountID string    `json:"account_id"`
+	Namespace string    `json:"namespace,omitempty"` // admin tokens: bound namespace, empty = platform
 	Roles     []string  `json:"roles"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Comment   string    `json:"comment"`
@@ -277,6 +306,7 @@ type TokenRequest struct {
 // AdminTokenRequest mints an admin token. ReadOnly selects role admin-ro.
 type AdminTokenRequest struct {
 	ReadOnly  bool      `json:"read_only,omitempty"`
+	Namespace string    `json:"namespace,omitempty"` // bind to one namespace (a tenant admin)
 	ExpiresAt time.Time `json:"expires_at"`
 	Comment   string    `json:"comment"`
 }
@@ -297,6 +327,7 @@ type Destination struct {
 type Alias struct {
 	Address      string        `json:"address"`
 	Domain       string        `json:"domain"`
+	Namespace    string        `json:"namespace"`
 	Destinations []Destination `json:"destinations"`
 	Enabled      bool          `json:"enabled"`
 	Created      time.Time     `json:"created"`
@@ -492,12 +523,13 @@ type RecalculateResult struct {
 
 // Node is a registered daemon mode on some host.
 type Node struct {
-	ID       int64     `json:"id"`
-	Mode     string    `json:"mode"`
-	Address  string    `json:"address"`
-	Host     string    `json:"host"`
-	Version  string    `json:"version"`
-	Started  time.Time `json:"started"`
-	LastSeen time.Time `json:"last_seen"`
-	Alive    bool      `json:"alive"`
+	ID         int64     `json:"id"`
+	Mode       string    `json:"mode"`
+	Address    string    `json:"address"`
+	Host       string    `json:"host"`
+	Version    string    `json:"version"`
+	Namespaces []string  `json:"namespaces"` // served namespaces; empty = all
+	Started    time.Time `json:"started"`
+	LastSeen   time.Time `json:"last_seen"`
+	Alive      bool      `json:"alive"`
 }

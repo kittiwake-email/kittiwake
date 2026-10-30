@@ -101,6 +101,7 @@ func cmdToken(ctx context.Context, adm *admin.Service, args []string) error {
 	expires := fs.String("expires", "", "expiry date (YYYY-MM-DD) or RFC3339; default 24h from now")
 	comment := fs.String("comment", "", "purpose of the token (required)")
 	readOnly := fs.Bool("read-only", false, "mint a read-only (admin-ro) token")
+	namespace := fs.String("namespace", "", "bind the token to one namespace (a tenant admin); default: the whole platform")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -116,7 +117,7 @@ func cmdToken(ctx context.Context, adm *admin.Service, args []string) error {
 			}
 		}
 	}
-	t, secret, err := adm.CreateAdminToken(ctx, *readOnly, exp, *comment)
+	t, secret, err := adm.CreateAdminToken(ctx, *readOnly, *namespace, exp, *comment)
 	if err != nil {
 		return err
 	}
@@ -124,8 +125,12 @@ func cmdToken(ctx context.Context, adm *admin.Service, args []string) error {
 }
 
 func printToken(t identity.Token, secret string) error {
-	return emit(map[string]any{"token_id": t.ID, "roles": t.Roles, "expires_at": t.ExpiresAt, "comment": t.Comment, "token_secret": secret}, func() {
-		fmt.Printf("token id:     %s (%s, expires %s)\n", t.ID, strings.Join(t.Roles, ","), t.ExpiresAt.Format(time.RFC3339))
+	return emit(map[string]any{"token_id": t.ID, "roles": t.Roles, "namespace": t.Namespace, "expires_at": t.ExpiresAt, "comment": t.Comment, "token_secret": secret}, func() {
+		scope := "platform"
+		if t.Namespace != "" {
+			scope = "namespace " + t.Namespace
+		}
+		fmt.Printf("token id:     %s (%s, %s, expires %s)\n", t.ID, strings.Join(t.Roles, ","), scope, t.ExpiresAt.Format(time.RFC3339))
 		fmt.Printf("token secret: %s\n", secret)
 		fmt.Println("The secret is shown once. Use it as: kittiwake-admin --token <secret> ...")
 	})
