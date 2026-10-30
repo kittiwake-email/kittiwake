@@ -52,6 +52,24 @@ log: {level: debug, format: text}
 	if _, err := Parse([]byte("unknown_key: 1\n")); err == nil {
 		t.Fatal("expected unknown field error")
 	}
+	if _, err := Parse([]byte("modes: [proxy, imap]\ndatabase: {dsn: x}\n")); err == nil || !strings.Contains(err.Error(), "proxy mode runs in a process of its own") {
+		t.Fatalf("proxy with another mode: %v", err)
+	}
+	if _, err := Parse([]byte("modes: [proxy]\nceph: {backend: memory}\n")); err == nil || !strings.Contains(err.Error(), "database.dsn") {
+		t.Fatalf("proxy without a database: %v", err)
+	}
+	if _, err := Parse([]byte("proxy: {ingress_tls: maybe}\n")); err == nil || !strings.Contains(err.Error(), "ingress_tls") {
+		t.Fatalf("ingress_tls: %v", err)
+	}
+	if _, err := Parse([]byte("proxy: {ingress_ports: {smtp: 25}}\n")); err == nil || !strings.Contains(err.Error(), "ingress_ports") {
+		t.Fatalf("ingress_ports: %v", err)
+	}
+	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {proxy_dsn: ro}\n")); err != nil || cfg.Database.ProxyDSN != "ro" {
+		t.Fatalf("proxy_dsn alone: %v", err)
+	}
+	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {dsn: x}\nproxy: {ingress_ports: {imap: 1993}}\n")); err != nil || cfg.Proxy.IngressPorts["imap"] != 1993 || cfg.Proxy.IngressPorts["pop3"] != 995 || cfg.Proxy.IngressTLS != "strict" || cfg.Listen.ByMode("proxy").Management != "[::1]:9100" {
+		t.Fatalf("proxy defaults: %+v %v", cfg.Proxy, err)
+	}
 	if _, err := Parse([]byte("log: {level: loud}\n")); err == nil {
 		t.Fatal("expected level error")
 	}

@@ -195,6 +195,8 @@ func runServe(args []string) error {
 				cfg.Listen.Worker.Management = ""
 			case "backup":
 				cfg.Listen.Backup.Management = ""
+			case "proxy":
+				cfg.Listen.Proxy.Management = ""
 			}
 		}
 	}
@@ -202,6 +204,9 @@ func runServe(args []string) error {
 		return fmt.Errorf("no modes: pass --modes <mode,...> (as the systemd instances do) or set modes in the config")
 	}
 	log := app.NewLogger(cfg.Log)
+	if cfg.HasMode("proxy") {
+		return runProxy(cfg, log)
+	}
 	client, err := app.Connect(cfg.Ceph)
 	if err != nil {
 		return err

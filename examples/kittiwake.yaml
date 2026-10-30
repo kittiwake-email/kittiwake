@@ -23,6 +23,8 @@ database:
   # this process reads from the primary for read_stickiness so it sees its
   # own changes despite replication lag.
   # read_dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@unix(/run/mysqld/mysqld.sock)/kittiwake"
+  # proxy_dsn: the proxy mode's read-only user (README "Proxies" lists its grants)
+  # proxy_dsn: "kittiwake_proxy:${KITTIWAKE_PROXY_DB_PASSWORD}@tcp(db.example:3306)/kittiwake"
   read_stickiness: 2s
   max_open_connections: 32
   max_idle_connections: 8
@@ -75,9 +77,28 @@ listen:
   worker:     {management: "[::1]:9097"}                                                    # no listener of its own
   backup:     {management: "[::1]:9099"}                                                    # no listener of its own
   management: {address: "[::1]:9090"}                                                       # one-process form
+  # The proxy mode's own listeners (it runs in a process of its own and may share a box
+  # with backends): the TLS terminator in front sends PROXY v2 to these.
+  proxy:
+    imap:       {address: "[::]:143",  proxy_protocol: optional}
+    pop3:       {address: "[::]:110",  proxy_protocol: optional}
+    jmap:       {address: "[::]:8080", proxy_protocol: optional}
+    submission: {address: "[::]:587",  proxy_protocol: optional}
+    management: "[::1]:9100"
 
 proxy:
-  trusted_addresses: []        # proxies whose X-Forwarded-For is trusted (HTTP fallback)
+  # trusted_addresses: the TLS terminator and the proxy mode in front of the HTTP
+  # listeners; behind the proxy mode set listen.jmap.proxy_protocol to optional
+  # (pooled HTTP connections carry the client in X-Forwarded-For, not PROXY).
+  trusted_addresses: []        # proxies whose X-Forwarded-For is trusted (HTTP): the TLS terminator, the proxy mode
+  # The proxy mode (README "Proxies"): how it reaches a namespace's ingress when the
+  # namespace sets no policy of its own, and the port per protocol on every ingress.
+  ingress_tls: strict          # strict (verified certificate) | insecure (TLS, any certificate) | off (plain TCP)
+  ingress_ports: {imap: 993, pop3: 995, jmap: 443, submission: 465, lmtp: 24}   # lmtp: the socketmap transport map
+  connect_timeout: 10s         # one backend connection attempt
+  pre_auth_timeout: 1m         # how long a client may take to log in
+  node_ttl: 5s                 # how long the node registry listing is reused
+  down_for: 15s                # how long a backend that refused a connection is skipped
 
 smtp:
   relay_host: "[::1]:25"       # outbound submissions go here (Postfix)

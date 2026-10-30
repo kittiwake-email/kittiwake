@@ -120,6 +120,12 @@ func testAccountsAndMailboxes(t *testing.T, f Factory) {
 	if err != nil || got.Value.ID != a.ID {
 		t.Fatalf("by username: %v %v", got, err)
 	}
+	if dom, err := s.AccountDomain(ctx, a.ID); err != nil || dom != "example.org" {
+		t.Fatalf("account domain: %q %v", dom, err)
+	}
+	if _, err := s.AccountDomain(ctx, uuid.New()); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("account domain of unknown: %v", err)
+	}
 	// Listings.
 	us, _, _ := s.ListDomainAccounts(ctx, "example.org", "", "", 10)
 	if len(us) != 1 || us[0] != "wido@example.org" {
@@ -633,6 +639,34 @@ func testNamespaces(t *testing.T, f Factory) {
 	}
 	if err := s.DeleteNamespace(ctx, "default"); !errors.Is(err, identity.ErrInUse) {
 		t.Fatalf("delete default: %v", err)
+	}
+	// Ingress: validated, normalized, cleared by an empty host.
+	for _, bad := range []*identity.Ingress{{Host: "mail.example:993"}, {Host: "https://mail.example"}, {Host: ".bad"}, {Host: "ok.example", TLS: "maybe"}} {
+		if _, err := s.UpdateNamespace(ctx, "acme", func(n *identity.Namespace) error { n.Ingress = bad; return nil }); !errors.Is(err, identity.ErrInvalid) {
+			t.Fatalf("ingress %+v: expected invalid, got %v", bad, err)
+		}
+	}
+	upd, err = s.UpdateNamespace(ctx, "acme", func(n *identity.Namespace) error {
+		n.Ingress = &identity.Ingress{Host: " Acme-Ingress.Example ", TLS: "Insecure"}
+		return nil
+	})
+	if err != nil || upd.Ingress == nil || upd.Ingress.Host != "acme-ingress.example" || upd.Ingress.TLS != identity.IngressTLSInsecure {
+		t.Fatalf("ingress: %+v %v", upd.Ingress, err)
+	}
+	if g, _ := s.GetNamespace(ctx, "acme"); g.Value.Ingress == nil || g.Value.Ingress.Host != "acme-ingress.example" {
+		t.Fatalf("ingress not persisted: %+v", g.Value)
+	}
+	upd, err = s.UpdateNamespace(ctx, "acme", func(n *identity.Namespace) error { n.Ingress = &identity.Ingress{}; return nil })
+	if err != nil || upd.Ingress != nil {
+		t.Fatalf("ingress cleared: %+v %v", upd.Ingress, err)
+	}
+	if g, _ := s.GetNamespace(ctx, "acme"); g.Value.Ingress != nil {
+		t.Fatalf("ingress still set: %+v", g.Value)
+	}
+	if n, err := s.CreateNamespace(ctx, identity.Namespace{Name: "with-ingress", Enabled: true, Ingress: &identity.Ingress{Host: "in.example"}}); err != nil || n.Ingress == nil || n.Ingress.TLS != "" {
+		t.Fatalf("create with ingress: %+v %v", n, err)
+	} else if err := s.DeleteNamespace(ctx, "with-ingress"); err != nil {
+		t.Fatal(err)
 	}
 
 	// Ownership: domains, mailboxes and storage carry their namespace;

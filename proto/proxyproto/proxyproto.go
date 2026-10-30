@@ -250,6 +250,45 @@ func TLSOf(c net.Conn) bool {
 // ProxyAddr returns the address of the proxy itself (the socket peer).
 func (pc *Conn) ProxyAddr() net.Addr { return pc.Conn.RemoteAddr() }
 
+// HeaderV2 builds a PROXY protocol v2 header announcing a TCP connection
+// from src to dst, with the SSL TLV (PP2_CLIENT_SSL) when tls is set so
+// the receiver knows the client spoke TLS to the proxy. Addresses of
+// mixed families, or non-TCP addresses, yield a LOCAL header (the
+// receiver keeps the socket addresses). Kittiwake's proxy mode sends it
+// to backends and ingress points so audit records carry the client.
+func HeaderV2(src, dst net.Addr, tls bool) []byte {
+	hdr := append([]byte{}, v2Sig...)
+	s, sok := src.(*net.TCPAddr)
+	d, dok := dst.(*net.TCPAddr)
+	var body []byte
+	fam := byte(0x00)
+	switch {
+	case sok && dok && s.IP.To4() != nil && d.IP.To4() != nil:
+		fam = 0x11
+		body = append(body, s.IP.To4()...)
+		body = append(body, d.IP.To4()...)
+		body = binary.BigEndian.AppendUint16(body, uint16(s.Port))
+		body = binary.BigEndian.AppendUint16(body, uint16(d.Port))
+	case sok && dok && s.IP.To16() != nil && d.IP.To16() != nil:
+		fam = 0x21
+		body = append(body, s.IP.To16()...)
+		body = append(body, d.IP.To16()...)
+		body = binary.BigEndian.AppendUint16(body, uint16(s.Port))
+		body = binary.BigEndian.AppendUint16(body, uint16(d.Port))
+	}
+	if fam == 0 {
+		hdr = append(hdr, 0x20, 0x00)
+		return binary.BigEndian.AppendUint16(hdr, 0)
+	}
+	if tls {
+		// PP2_TYPE_SSL: client flags (PP2_CLIENT_SSL), verify result, no sub-TLVs.
+		body = append(body, 0x20, 0x00, 0x05, 0x01, 0, 0, 0, 0)
+	}
+	hdr = append(hdr, 0x21, fam)
+	hdr = binary.BigEndian.AppendUint16(hdr, uint16(len(body)))
+	return append(hdr, body...)
+}
+
 // IPOf extracts the IP string from a net.Addr (without port/zone).
 func IPOf(a net.Addr) string {
 	switch v := a.(type) {

@@ -21,6 +21,14 @@ virtual_alias_maps = socketmap:inet:[::1]:2525:aliases
 virtual_transport = lmtp:inet:[::1]:24
 lmtp_destination_recipient_limit = 1    # one recipient per LMTP transaction
 
+# Namespaces in other datacenters (README "Proxies"): the transport map answers
+# "lmtp:[<ingress host>]:<port>" for recipients of a namespace that has an ingress
+# and NOTFOUND for everyone else, who then take virtual_transport. The ingress
+# HAProxy spreads LMTP over that namespace's lmtp nodes (with PROXY protocol).
+# For TLS on that hop, terminate it at the ingress and set lmtp_tls_wrappermode
+# on a dedicated transport.
+#transport_maps = socketmap:inet:[::1]:2525:transport
+
 # Spam routing: Kittiwake files messages carrying this header/value into Junk
 # (mail.spam_header / mail.spam_value in kittiwake.yaml). rspamd and
 # SpamAssassin can add it.

@@ -6,6 +6,8 @@ package identity
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,8 +45,55 @@ type Namespace struct {
 	Name     string            `json:"name"`
 	Enabled  bool              `json:"enabled"`
 	Settings map[string]string `json:"settings,omitempty"`
-	Created  time.Time         `json:"created"`
-	Updated  time.Time         `json:"updated"`
+	// Ingress is where proxies reach this namespace's servers when they
+	// are not reachable directly: one hostname (an HAProxy terminating
+	// TLS in the namespace's datacenter) and a TLS policy. Nil: proxies
+	// pick the namespace's nodes from the node registry.
+	Ingress *Ingress  `json:"ingress,omitempty"`
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+}
+
+// Ingress TLS policies: how a proxy connects to an ingress hostname.
+const (
+	// IngressTLSStrict: TLS, certificate verified against the system roots
+	// and the hostname.
+	IngressTLSStrict = "strict"
+	// IngressTLSInsecure: TLS, any certificate accepted (a lab, a private
+	// CA not yet rolled out).
+	IngressTLSInsecure = "insecure"
+	// IngressTLSOff: plain TCP (a private network that is trusted).
+	IngressTLSOff = "off"
+)
+
+// Ingress is a namespace's entry point for proxies. TLS is one of the
+// IngressTLS policies, or empty for the proxy's configured default.
+type Ingress struct {
+	Host string `json:"host"`
+	TLS  string `json:"tls,omitempty"`
+}
+
+// NormalizeIngress lowercases and validates an ingress: the host is a
+// DNS name without port or scheme, the policy one of the known ones or
+// empty. A nil ingress or one with an empty host means none.
+func NormalizeIngress(in *Ingress) (*Ingress, error) {
+	if in == nil {
+		return nil, nil
+	}
+	host := strings.TrimSpace(strings.ToLower(in.Host))
+	if host == "" {
+		return nil, nil
+	}
+	if len(host) > 253 || strings.ContainsAny(host, " :/\\@\t\r\n\x00") || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+		return nil, fmt.Errorf("%w: ingress host %q", ErrInvalid, in.Host)
+	}
+	tls := strings.TrimSpace(strings.ToLower(in.TLS))
+	switch tls {
+	case "", IngressTLSStrict, IngressTLSInsecure, IngressTLSOff:
+	default:
+		return nil, fmt.Errorf("%w: ingress tls %q must be strict, insecure or off", ErrInvalid, in.TLS)
+	}
+	return &Ingress{Host: host, TLS: tls}, nil
 }
 
 // Account roles.

@@ -45,6 +45,10 @@ type Backend interface {
 	CreateAccount(ctx context.Context, a Account) (Account, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (Versioned[Account], error)
 	GetAccountByUsername(ctx context.Context, username string) (Versioned[Account], error)
+	// AccountDomain returns the domain of an account by id: the one
+	// account read a proxy needs to route a token, answerable from the
+	// account and domain rows alone (no passwords).
+	AccountDomain(ctx context.Context, id uuid.UUID) (string, error)
 	UpdateAccount(ctx context.Context, id uuid.UUID, fn func(*Account) error) (Account, error)
 	RelinkAccount(ctx context.Context, id, mailboxID uuid.UUID) (Account, error)
 	DeleteAccount(ctx context.Context, id uuid.UUID) error
@@ -277,6 +281,9 @@ func (s *Store) ListMailboxAccounts(ctx context.Context, id uuid.UUID, after str
 }
 func (s *Store) GetAccount(ctx context.Context, id uuid.UUID) (Versioned[Account], error) {
 	return s.b.GetAccount(ctx, id)
+}
+func (s *Store) AccountDomain(ctx context.Context, id uuid.UUID) (string, error) {
+	return s.b.AccountDomain(ctx, id)
 }
 func (s *Store) GetAccountByUsername(ctx context.Context, username string) (Versioned[Account], error) {
 	return s.b.GetAccountByUsername(ctx, username)

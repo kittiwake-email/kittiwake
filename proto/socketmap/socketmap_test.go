@@ -32,6 +32,8 @@ func newServer(t *testing.T) (*Server, identity.Mailbox) {
 	ctx := context.Background()
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "example.org", Enabled: true})
 	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "off.example", Enabled: false})
+	_, _ = ids.CreateNamespace(ctx, identity.Namespace{Name: "remote", Enabled: true, Ingress: &identity.Ingress{Host: "mail.remote.example"}})
+	_, _ = ids.CreateDomain(ctx, identity.Domain{Name: "remote.example", Namespace: "remote", Enabled: true})
 	mb, _ := ids.CreateMailbox(ctx, identity.Mailbox{})
 	_, _ = ids.CreateAccount(ctx, identity.Account{Username: "wido@example.org", MailboxID: mb.ID, Roles: []string{"read"}, Enabled: true})
 	_, _ = ids.CreateAlias(ctx, identity.Alias{Address: "info@example.org", Enabled: true, Destinations: []identity.Destination{{MailboxID: mb.ID}, {Address: "ext@other.example"}}})
@@ -53,6 +55,10 @@ func TestLookups(t *testing.T) {
 		{"aliases", "info@example.org"}:   "OK info@example.org,ext@other.example",
 		{"aliases", "fwd@example.org"}:    "OK wido@example.org",
 		{"aliases", "wido@example.org"}:   "NOTFOUND ",
+		{"transport", "a@remote.example"}: "OK lmtp:[mail.remote.example]:24",
+		{"transport", "remote.example"}:   "OK lmtp:[mail.remote.example]:24",
+		{"transport", "wido@example.org"}: "NOTFOUND ",
+		{"transport", "x@nope.example"}:   "NOTFOUND ",
 		{"bogus", "x"}:                    "PERM unknown map bogus",
 	}
 	for in, want := range cases {

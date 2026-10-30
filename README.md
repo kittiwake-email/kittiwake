@@ -97,7 +97,8 @@ A node whose heartbeat is three intervals old counts as dead and is purged after
 This is the service discovery of the platform: daemons that need another internal service
 (JMAP, IMAP and MCP looking for `search` nodes) read the live list from the database, cache
 it, and pick a node by consistent hashing of the mailbox id so a mailbox keeps hitting the
-node that holds its hot index. For operators, `kittiwake-admin node list` and
+node that holds its hot index; proxies pick the nodes of a namespace from it the same way
+(by login name) and are themselves not registered, since they never write. For operators, `kittiwake-admin node list` and
 `GET /v1/admin/nodes` show what runs where in which version. Override `node.advertise` when
 the detected address is not the one other nodes can reach (dual-stack hosts, NAT, a name
 that resolves differently per site).
@@ -181,8 +182,8 @@ its namespaces, and refuses the rest clearly: IMAP, POP3 and JMAP logins into a 
 does not serve fail with "mailbox is not served by this server", LMTP answers 4xx so the MTA
 retries elsewhere. This is how IMAP, POP3, JMAP, workers and backup nodes scale out per
 namespace. Postfix's socketmap needs only the database and answers for every namespace.
-Proxies in front that route a client to the servers of its namespace, so that the whole
-platform looks like one cluster from outside, are a later addition.
+Proxies in front route a client to the servers of its namespace, so that the whole platform
+looks like one cluster from outside; see "Proxies".
 
 **Schedulers are per namespace.** Workers and backup nodes elect a leader per namespace
 among the nodes that serve it; periodic tasks (purges, garbage collection, sweeps, backup
@@ -206,6 +207,59 @@ namespaces without one use the default target. Runs, blobs and jobs record their
 namespace, so expiry works per namespace and a removed mailbox's backups still find their
 target. Blobs are deduplicated within a namespace, never across.
 
+## Proxies
+
+Namespaces let every tenant's servers sit in their own datacenter; the **`proxy` mode** is
+what lets clients ignore that. A proxy process fronts IMAP, POP3, SMTP submission and JMAP:
+it reads the login name, finds the namespace of its domain and hands the connection to a
+server of that namespace. Proxies run everywhere (anycast, GeoDNS), the mailboxes stay where
+they are, and from outside there is one hostname.
+
+- **Routing by domain.** Every domain belongs to exactly one namespace, so the domain of the
+  login name is all the proxy needs; it never reads accounts. On HTTP a session token names
+  its user in the signed claims, an API token is one indexed read of the tokens table, a
+  refresh token carries its account id, and the account's domain comes from the account and
+  domain rows alone.
+- **Credentials pass through.** The proxy verifies nothing: it replays the client's LOGIN,
+  AUTHENTICATE, USER/PASS or AUTH against the backend (LITERAL+ and SASL-IR, so the replay
+  needs no round trips) and relays the answer, continuation requests included
+  (OAUTHBEARER error flows). The backend checks the password, counts the failure and writes
+  the audit record with the real client address, which the proxy forwards with PROXY
+  protocol v2 (with the TLS flag, so submission still offers AUTH only to TLS clients). A
+  wrong password through the proxy reads exactly as a wrong password at the backend; an
+  unknown domain or a disabled namespace is refused the same way; a namespace without a
+  live server gets `NO [UNAVAILABLE]`, `-ERR [SYS/TEMP]`, `454` or `503`. After a
+  successful login the proxy splices the two connections byte for byte.
+- **Two ways to a namespace.** Without an ingress, the proxy picks a live node that serves
+  the namespace from the node registry (by mode: `imap`, `pop3`, `jmap`, `submission`),
+  sticky by rendezvous hash of the login name so a user keeps hitting the node that holds its
+  hot index, and skips a node that refuses connections for `proxy.down_for`. A namespace
+  whose servers are not reachable directly carries an **ingress**: one hostname (an HAProxy
+  in that datacenter terminating TLS, accepting the PROXY header from the proxies only) and a
+  TLS policy, `strict` (certificate verified against the system roots and the hostname),
+  `insecure` (TLS, any certificate) or `off` (plain TCP); `proxy.ingress_tls` is the default
+  for namespaces that set none, and `proxy.ingress_ports` the port per protocol on every
+  ingress. `kittiwake-admin namespace set <name> --ingress <host> [--ingress-tls strict]`
+  sets it, `--no-ingress` removes it. HTTP goes to the ingress or node the same way, with the
+  client address in `X-Forwarded-For` (a pooled HTTP connection serves many clients, so PROXY
+  protocol cannot carry it); the backends trust the proxy's address for it
+  (`proxy.trusted_addresses`) and their JMAP listener accepts connections without a PROXY
+  header (`proxy_protocol: optional`, free for a client-speaks-first protocol).
+- **Read-only, and little of it.** A proxy holds no mail state, never touches Ceph and never
+  writes to the database: it does not register in the node registry (anycast or DNS finds
+  it) and it needs `SELECT` on `namespaces`, `domains`, `nodes`, `tokens`, `schema_version`
+  and the `id`, `uuid`, `username` and `domain_id` columns of `accounts`, nothing else. Give
+  the proxy its own database user with exactly those grants (`database.proxy_dsn`, so a
+  proxy sharing a box with backends never holds the read-write credentials): a compromised
+  proxy site then yields no password hashes, no Ceph keys and no backup keys. It runs alone in its process,
+  with its own listeners (`listen.proxy`) so it can share a box with backends, and exposes
+  `kittiwake_proxy_sessions_total{protocol,outcome}` on its management port.
+- **LMTP is not proxied.** Postfix routes per recipient already: the socketmap offers a
+  `transport` map that answers `lmtp:[<ingress>]:<port>` for recipients of a namespace with
+  an ingress and `NOTFOUND` for the rest, so `transport_maps` sends a tenant's mail to its
+  datacenter and everything else to `virtual_transport`. Workers and backup nodes serve
+  their namespaces where they run and need no proxy.
+
 ## One binary, multiple modes
 
 The platform ships as a single Go binary, `kittiwake`, that can run in one of several modes.
@@ -224,6 +278,8 @@ Each mode is a separately scalable component:
   recalculation, mailbox removal, reconciliation, …)
 - `backup` – mailbox backups to the backup target, restores, exports, verification (the only
   mode holding the target credentials and the backup keys)
+- `proxy` – IMAP, POP3, submission and JMAP front end that routes every login to the servers
+  of its namespace; no mail state, read-only database access (see "Proxies")
 - `dav` – CalDAV/CardDAV (future)
 
 Modes can be combined in one process for small setups and split across many processes for
@@ -1319,7 +1375,8 @@ The daemon takes a single YAML file as configuration:
 - SMTP submission: Sent copy (default off), AUTH only behind a TLS proxy (default on)
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
-- Trusted proxy addresses (PROXY protocol, X-Forwarded-For)
+- Trusted proxy addresses (PROXY protocol, X-Forwarded-For); the proxy mode's listeners,
+  default ingress TLS policy, ingress ports and timeouts
 - Session settings: access token lifetime, refresh token lifetime, key rotation interval
 - Cache TTLs: verified credentials, identity objects, mailbox root (see "Caches")
 - IMAP compatibility namespace (prefix and delimiter of an old layout)
@@ -1431,6 +1488,8 @@ than the schema it talks to (a daemon refuses to start on a schema version it do
   GC, catalog in MariaDB, admin API and CLI
 - Workers: trash/expunge retention purge, attachment GC, mailbox removal, quota
   recalculation, audit purge, orphan sweep; lock-elected scheduler
+- Proxy mode: IMAP, POP3, submission and JMAP routed by login domain to the namespace's
+  nodes or ingress, credentials passed through, read-only database use
 - Structured logging, Prometheus metrics, health endpoints, PROXY protocol on all listeners
 - Unit tests for every package on the in-memory RADOS; no Ceph needed to run them
 

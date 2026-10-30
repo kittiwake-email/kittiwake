@@ -221,7 +221,11 @@ func (s *Service) UpdateNamespace(ctx context.Context, name string, fn func(*ide
 	if err != nil {
 		return identity.Namespace{}, s.fail(ctx, uuid.Nil, "namespace-update", name, err)
 	}
-	s.ok(auditor.WithNamespace(ctx, out.Name), uuid.Nil, "namespace-update", out.Name, fmt.Sprintf("enabled=%v", out.Enabled))
+	detail := fmt.Sprintf("enabled=%v", out.Enabled)
+	if out.Ingress != nil {
+		detail += fmt.Sprintf(" ingress=%s tls=%s", out.Ingress.Host, out.Ingress.TLS)
+	}
+	s.ok(auditor.WithNamespace(ctx, out.Name), uuid.Nil, "namespace-update", out.Name, detail)
 	return out, nil
 }
 

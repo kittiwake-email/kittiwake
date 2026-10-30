@@ -1291,12 +1291,21 @@ components:
         name: { type: string, description: "DNS label: letters, digits, hyphens; immutable" }
         enabled: { type: boolean, description: "Disabled: delivery is rejected and logins fail for every domain in it" }
         settings: { type: object, additionalProperties: { type: string }, description: "Same keys as domain settings; consulted after the domain" }
+        ingress: { $ref: "#/components/schemas/Ingress", description: "Replaces the ingress when present; an empty host removes it" }
+    Ingress:
+      type: object
+      description: "Where proxies reach the namespace's servers: one hostname (an HAProxy terminating TLS in the namespace's datacenter) and the TLS policy of that hop. Without an ingress, proxies pick the namespace's nodes from the node registry."
+      required: [host]
+      properties:
+        host: { type: string, description: "DNS name, no port or scheme; standard ports per protocol from the proxy's configuration" }
+        tls: { type: string, enum: [strict, insecure, off], description: "Empty: the proxy's configured default" }
     Namespace:
       type: object
       properties:
         name: { type: string }
         enabled: { type: boolean }
         settings: { type: object, additionalProperties: { type: string } }
+        ingress: { $ref: "#/components/schemas/Ingress" }
         created: { type: string, format: date-time }
         updated: { type: string, format: date-time }
     DomainRequest:

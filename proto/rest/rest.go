@@ -804,6 +804,9 @@ type namespaceRequest struct {
 	Name     string            `json:"name,omitempty"`
 	Enabled  *bool             `json:"enabled,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
+	// Ingress replaces the namespace's ingress when present; an empty
+	// host removes it (proxies then use the node registry).
+	Ingress *identity.Ingress `json:"ingress,omitempty"`
 }
 
 func (s *Server) namespaceCreate(w http.ResponseWriter, r *http.Request) {
@@ -812,7 +815,7 @@ func (s *Server) namespaceCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	ns := identity.Namespace{Name: req.Name, Enabled: true, Settings: req.Settings}
+	ns := identity.Namespace{Name: req.Name, Enabled: true, Settings: req.Settings, Ingress: req.Ingress}
 	if req.Enabled != nil {
 		ns.Enabled = *req.Enabled
 	}
@@ -858,6 +861,9 @@ func (s *Server) namespacePatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Settings != nil {
 			ns.Settings = req.Settings
+		}
+		if req.Ingress != nil {
+			ns.Ingress = req.Ingress
 		}
 		return nil
 	})

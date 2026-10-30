@@ -70,7 +70,8 @@ auth/         crypto primitives: password schemes, TOTP, Ed25519 JWT, refresh to
 store/        identity, index, message, attach, audit, session, queue (object layouts live here)
 service/      actor (ctx principal), auditor, auth, delivery, mailbox, submit, admin
               (business logic + authorisation + audit; protocol adapters call ONLY these)
-proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3, submission
+proto/        proxyproto, httpx (auth middleware), lmtp, socketmap, jmap, rest, imap, pop3, submission,
+              proxy (the proxy mode: routes logins by domain to a namespace's nodes or ingress)
 app/          wiring config→client→stores→services→listeners; metrics/ Prometheus registry
 cmd/kittiwake  serve | check-config | admin (bootstrap, token only) | version
 cmd/kittiwake-admin  operator CLI over client/admin (typed Go client for the admin API)
@@ -100,6 +101,15 @@ derives it from the payload's `namespace` or `mailbox` field); schedulers lead p
 under `storage.WithNamespace(ctx, ns)`; backup operations bind the namespace's target with
 `Service.enter`.
 
+Proxies (README "Proxies"): `proto/proxy` fronts IMAP, POP3, submission and JMAP, routes by
+the domain of the login name (`Server.Route`; tokens via `RouteAccount` and
+`identity.AccountDomain`, the only account read), replays the untouched credential against
+a node from the registry or the namespace's `Ingress` (`dialer`, PROXY v2 first, then TLS
+per policy) and splices. The proxy process (`cmd/kittiwake/proxy.go`) never writes to the
+database and runs alone (`config.Validate`); keep every read it makes answerable from
+`namespaces`, `domains`, `nodes`, `tokens` and the non-secret `accounts` columns, and keep
+its refusals in the backends' vocabulary. Its tests run real backends on the memory backend.
+
 ## What this is
 
 Kittiwake: a massively scalable mail platform intended to replace Dovecot (the name is the
@@ -120,7 +130,7 @@ These are settled. Do not design around them.
   below. The service interfaces are the project's public Go API.
 
 - **One Go binary (`kittiwake`), multiple modes:** `lmtp`, `imap`, `pop3`, `submission` (SMTP, RFC 6409), `jmap` (JMAP +
-  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `socketmap`, `worker` (+ `dav` later), plus an
+  OAuth + /v1/me), `admin` (/v1/admin only, own listener), `socketmap`, `worker`, `backup`, `proxy` (+ `dav` later), plus an
   `admin` subcommand that talks to the metadata database directly (bootstrap, export/import). Modes combine in one process or split across many.
 - **Mail data in Ceph RADOS, metadata in MariaDB, no Redis.** Stateless daemons via librados
   (cgo; target latest stable Ceph). Per cluster three pools: `messages`, `attachments`,

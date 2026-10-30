@@ -17,8 +17,10 @@ import (
 // Config is the whole configuration file.
 type Config struct {
 	// Modes to run in this process: lmtp, imap, pop3, jmap, submission,
-	// admin, socketmap, worker. Optional: a systemd instance passes its mode with --modes
-	// instead; the list is for running several modes in one process.
+	// admin, socketmap, worker, backup, proxy. Optional: a systemd instance
+	// passes its mode with --modes instead; the list is for running several
+	// modes in one process. The proxy mode runs alone: it holds no mail
+	// state and needs only a read-only database connection.
 	Modes []string `yaml:"modes"`
 	// Namespaces this process serves; empty means every namespace. A
 	// restricted process connects only to the storage of its namespaces,
@@ -85,9 +87,22 @@ type Listen struct {
 	Socketmap  Listener `yaml:"socketmap"` // MTA recipient/domain/alias lookups (Postfix socketmap protocol)
 	Worker     Listener `yaml:"worker"`    // no listener of its own; only its management address
 	Backup     Listener `yaml:"backup"`    // no listener of its own; only its management address
+	// Proxy: the listeners of the proxy mode, one per fronted protocol,
+	// and its management address. They are separate from the modes'
+	// own listeners so a proxy may share a box with backends.
+	Proxy ProxyListen `yaml:"proxy"`
 	// Management is the metrics/health listener of a process that runs
 	// several modes, or of a mode whose entry has no management address.
 	Management Listener `yaml:"management"`
+}
+
+// ProxyListen holds the proxy mode's listeners.
+type ProxyListen struct {
+	IMAP       Listener `yaml:"imap"`
+	POP3       Listener `yaml:"pop3"`
+	JMAP       Listener `yaml:"jmap"`
+	Submission Listener `yaml:"submission"`
+	Management string   `yaml:"management"`
 }
 
 // Listener is one network listener.
@@ -124,6 +139,8 @@ func (l Listen) ByMode(mode string) Listener {
 		return l.Worker
 	case "backup":
 		return l.Backup
+	case "proxy":
+		return Listener{Management: l.Proxy.Management}
 	}
 	return Listener{}
 }
@@ -140,9 +157,27 @@ func (l Listen) ManagementAddress(modes []string) string {
 	return l.Management.Address
 }
 
-// Proxy lists trusted proxies for X-Forwarded-For fallback on HTTP.
+// Proxy: what every daemon trusts in front of it, and the settings of the
+// proxy mode itself (README "Proxies").
 type Proxy struct {
+	// TrustedAddresses may set X-Forwarded-For on HTTP: the TLS terminator
+	// in front, and the proxy mode when it is in front of this daemon.
 	TrustedAddresses []string `yaml:"trusted_addresses"`
+	// IngressTLS is the policy for a namespace ingress that sets none:
+	// strict (certificate verified against the system roots and the
+	// hostname), insecure (TLS, any certificate) or off (plain TCP).
+	IngressTLS string `yaml:"ingress_tls"`
+	// IngressPorts: the port per protocol on an ingress host (imap, pop3,
+	// jmap, submission; lmtp for the socketmap transport map).
+	IngressPorts map[string]int `yaml:"ingress_ports"`
+	// ConnectTimeout bounds one backend connection attempt; PreAuthTimeout
+	// how long a client may take to log in; NodeTTL how long the node
+	// registry listing is reused; DownFor how long a backend that refused
+	// a connection is skipped.
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	PreAuthTimeout time.Duration `yaml:"pre_auth_timeout"`
+	NodeTTL        time.Duration `yaml:"node_ttl"`
+	DownFor        time.Duration `yaml:"down_for"`
 }
 
 // SMTP is the outbound relay.
@@ -253,6 +288,11 @@ type Database struct {
 	// ReadDSN is an optional replica (typically a local MariaDB replicating
 	// from the primary) for SELECT-only operations. Empty = primary only.
 	ReadDSN Secret `yaml:"read_dsn"`
+	// ProxyDSN is what the proxy mode connects with instead of dsn: the
+	// read-only user with the grants README "Proxies" lists, so a proxy
+	// process on a box that also runs backends never holds the
+	// read-write credentials. Empty = dsn.
+	ProxyDSN Secret `yaml:"proxy_dsn"`
 	// ReadStickiness: after a write, how long this process keeps reading
 	// from the primary so it sees its own changes despite replication lag.
 	ReadStickiness time.Duration `yaml:"read_stickiness"`
@@ -460,7 +500,17 @@ func Default() Config {
 			Socketmap:  Listener{Address: "[::1]:2525", ProxyProtocol: "off", Management: "[::1]:9096"},
 			Worker:     Listener{Management: "[::1]:9097"},
 			Backup:     Listener{Management: "[::1]:9099"},
+			Proxy: ProxyListen{
+				IMAP: Listener{Address: "[::]:143", ProxyProtocol: "optional"}, POP3: Listener{Address: "[::]:110", ProxyProtocol: "optional"},
+				JMAP: Listener{Address: "[::]:8080", ProxyProtocol: "optional"}, Submission: Listener{Address: "[::]:587", ProxyProtocol: "optional"},
+				Management: "[::1]:9100",
+			},
 			Management: Listener{Address: "[::1]:9090", ProxyProtocol: "off"},
+		},
+		Proxy: Proxy{
+			IngressTLS:     "strict",
+			IngressPorts:   map[string]int{"imap": 993, "pop3": 995, "jmap": 443, "submission": 465, "lmtp": 24},
+			ConnectTimeout: 10 * time.Second, PreAuthTimeout: time.Minute, NodeTTL: 5 * time.Second, DownFor: 15 * time.Second,
 		},
 		SMTP:       SMTP{RelayHost: "[::1]:25", TLS: "opportunistic"},
 		Submission: Submission{RequireTLSProxy: true},
@@ -518,10 +568,10 @@ func Parse(b []byte) (Config, error) {
 }
 
 // ValidModes is the set of accepted mode names.
-var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "submission": true, "admin": true, "socketmap": true, "worker": true, "backup": true}
+var ValidModes = map[string]bool{"lmtp": true, "imap": true, "pop3": true, "jmap": true, "submission": true, "admin": true, "socketmap": true, "worker": true, "backup": true, "proxy": true}
 
 // AllModes lists every mode name.
-var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "submission", "admin", "socketmap", "worker", "backup"}
+var AllModes = []string{"lmtp", "imap", "pop3", "jmap", "submission", "admin", "socketmap", "worker", "backup", "proxy"}
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
@@ -538,12 +588,39 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: unknown mode %q", m)
 		}
 	}
+	if c.HasMode("proxy") {
+		if len(c.Modes) > 1 {
+			return errors.New("config: the proxy mode runs in a process of its own (it holds no mail state and connects to the database read-only)")
+		}
+		if c.Database.DSN == "" && c.Database.ProxyDSN == "" {
+			return errors.New("config: the proxy mode needs database.proxy_dsn or database.dsn (a read-only user suffices)")
+		}
+	}
+	switch c.Proxy.IngressTLS {
+	case "strict", "insecure", "off":
+	default:
+		return fmt.Errorf("config: proxy.ingress_tls must be strict, insecure or off, got %q", c.Proxy.IngressTLS)
+	}
+	for name, port := range c.Proxy.IngressPorts {
+		switch name {
+		case "imap", "pop3", "jmap", "submission", "lmtp":
+		default:
+			return fmt.Errorf("config: proxy.ingress_ports: unknown protocol %q", name)
+		}
+		if port <= 0 || port > 65535 {
+			return fmt.Errorf("config: proxy.ingress_ports.%s %d is not a port", name, port)
+		}
+	}
+	if c.Proxy.ConnectTimeout <= 0 || c.Proxy.PreAuthTimeout <= 0 || c.Proxy.NodeTTL <= 0 || c.Proxy.DownFor <= 0 {
+		return errors.New("config: proxy.connect_timeout, pre_auth_timeout, node_ttl and down_for must be positive")
+	}
 	for _, ns := range c.Namespaces {
 		if !namespaceRe.MatchString(strings.ToLower(strings.TrimSpace(ns))) {
 			return fmt.Errorf("config: namespaces: %q is not a valid namespace name (a DNS label)", ns)
 		}
 	}
-	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "submission": c.Listen.Submission, "admin": c.Listen.Admin, "socketmap": c.Listen.Socketmap, "management": c.Listen.Management} {
+	for name, l := range map[string]Listener{"lmtp": c.Listen.LMTP, "imap": c.Listen.IMAP, "pop3": c.Listen.POP3, "jmap": c.Listen.JMAP, "submission": c.Listen.Submission, "admin": c.Listen.Admin, "socketmap": c.Listen.Socketmap, "management": c.Listen.Management,
+		"proxy.imap": c.Listen.Proxy.IMAP, "proxy.pop3": c.Listen.Proxy.POP3, "proxy.jmap": c.Listen.Proxy.JMAP, "proxy.submission": c.Listen.Proxy.Submission} {
 		switch l.ProxyProtocol {
 		case "", "off", "optional", "required":
 		default:
@@ -565,7 +642,7 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: ceph.backend %q must be librados or memory", c.Ceph.Backend)
 	}
-	if c.Ceph.Backend == "librados" && c.Database.DSN == "" {
+	if c.Ceph.Backend == "librados" && c.Database.DSN == "" && !c.HasMode("proxy") {
 		return errors.New("config: database.dsn is required with the librados backend (metadata lives in MariaDB)")
 	}
 	if c.Database.ReadDSN != "" && c.Database.DSN == "" {

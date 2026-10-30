@@ -15,13 +15,22 @@ import (
 // ---- namespace ----
 
 func (a *cli) namespace(args []string) error {
-	const u = "namespace create <name> [--disabled] | list | get <name> | set <name> --setting key=value... | enable <name> | disable <name> | delete <name>"
+	const u = "namespace create <name> [--disabled] [--ingress host [--ingress-tls strict|insecure|off]] | list | get <name> | set <name> [--setting key=value...] [--ingress host [--ingress-tls policy] | --no-ingress] | enable <name> | disable <name> | delete <name>"
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Fprintln(os.Stderr, "usage: kittiwake-admin "+u)
 		return nil
 	}
 	printNamespace := func(ns admin.Namespace) {
 		fmt.Printf("name:     %s\nenabled:  %v\ncreated:  %s\n", ns.Name, ns.Enabled, fmtTime(ns.Created))
+		if ns.Ingress != nil {
+			tls := ns.Ingress.TLS
+			if tls == "" {
+				tls = "(proxy default)"
+			}
+			fmt.Printf("ingress:  %s (tls %s)\n", ns.Ingress.Host, tls)
+		} else {
+			fmt.Printf("ingress:  none (proxies use the node registry)\n")
+		}
 		for k, v := range ns.Settings {
 			fmt.Printf("setting:  %s=%s\n", k, v)
 		}
@@ -34,12 +43,19 @@ func (a *cli) namespace(args []string) error {
 		}
 		fs := newFlagSet("namespace create")
 		disabled := fs.Bool("disabled", false, "create disabled")
+		ingress := fs.String("ingress", "", "ingress hostname proxies connect to for this namespace (default: none, proxies use the node registry)")
+		ingressTLS := fs.String("ingress-tls", "", "TLS policy for the ingress hop: strict, insecure or off (default: the proxy's configured default)")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
 		req := admin.NamespaceRequest{Name: pos[0]}
 		if *disabled {
 			req.Enabled = boolPtr(false)
+		}
+		if *ingress != "" {
+			req.Ingress = &admin.Ingress{Host: *ingress, TLS: *ingressTLS}
+		} else if *ingressTLS != "" {
+			return errors.New("--ingress-tls needs --ingress")
 		}
 		ns, err := a.c.CreateNamespace(a.ctx, req)
 		if err != nil {
@@ -91,19 +107,37 @@ func (a *cli) namespace(args []string) error {
 		fs := newFlagSet("namespace set")
 		var settings stringList
 		fs.Var(&settings, "setting", "key=value (repeatable; replaces all settings)")
+		ingress := fs.String("ingress", "", "ingress hostname proxies connect to for this namespace")
+		ingressTLS := fs.String("ingress-tls", "", "TLS policy for the ingress hop: strict, insecure or off (default: the proxy's configured default)")
+		noIngress := fs.Bool("no-ingress", false, "remove the ingress (proxies use the node registry)")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		if len(settings) == 0 {
-			return errors.New("at least one --setting key=value is required")
+		if len(settings) == 0 && *ingress == "" && !*noIngress {
+			return errors.New("nothing to set: --setting key=value, --ingress host or --no-ingress")
 		}
-		req := admin.NamespaceRequest{Settings: map[string]string{}}
+		if *noIngress && *ingress != "" {
+			return errors.New("--ingress and --no-ingress exclude each other")
+		}
+		if *ingressTLS != "" && *ingress == "" {
+			return errors.New("--ingress-tls needs --ingress")
+		}
+		req := admin.NamespaceRequest{}
+		if len(settings) > 0 {
+			req.Settings = map[string]string{}
+		}
 		for _, kv := range settings {
 			k, v, ok := strings.Cut(kv, "=")
 			if !ok || k == "" {
 				return fmt.Errorf("--setting %q: want key=value", kv)
 			}
 			req.Settings[k] = v
+		}
+		if *ingress != "" {
+			req.Ingress = &admin.Ingress{Host: *ingress, TLS: *ingressTLS}
+		}
+		if *noIngress {
+			req.Ingress = &admin.Ingress{}
 		}
 		ns, err := a.c.UpdateNamespace(a.ctx, pos[0], req)
 		if err != nil {

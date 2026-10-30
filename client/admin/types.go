@@ -56,15 +56,27 @@ type Namespace struct {
 	Name     string            `json:"name"`
 	Enabled  bool              `json:"enabled"`
 	Settings map[string]string `json:"settings,omitempty"`
-	Created  time.Time         `json:"created"`
-	Updated  time.Time         `json:"updated"`
+	// Ingress is the hostname proxies connect to for this namespace, with
+	// its TLS policy (strict, insecure, off; empty = the proxy's default).
+	// Nil: proxies pick the namespace's nodes from the node registry.
+	Ingress *Ingress  `json:"ingress,omitempty"`
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+}
+
+// Ingress is a namespace's entry point for proxies.
+type Ingress struct {
+	Host string `json:"host"`
+	TLS  string `json:"tls,omitempty"`
 }
 
 // NamespaceRequest creates or patches a namespace. Names are immutable.
+// Ingress, when present, replaces the ingress; an empty host removes it.
 type NamespaceRequest struct {
 	Name     string            `json:"name,omitempty"`
 	Enabled  *bool             `json:"enabled,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
+	Ingress  *Ingress          `json:"ingress,omitempty"`
 }
 
 // QuotaLimits are per-mailbox limits; zero means the configured default.

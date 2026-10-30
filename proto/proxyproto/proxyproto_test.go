@@ -130,3 +130,30 @@ func TestV2SSLTLV(t *testing.T) {
 		t.Fatal("plain conn reported TLS")
 	}
 }
+
+func TestHeaderV2RoundTrip(t *testing.T) {
+	src := &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40001}
+	dst := &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 993}
+	c, err := pipeConn(t, HeaderV2(src, dst, true), Required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if IPOf(c.RemoteAddr()) != "2001:db8::1" || c.RemoteAddr().(*net.TCPAddr).Port != 40001 || IPOf(c.LocalAddr()) != "2001:db8::2" || !c.TLS() {
+		t.Fatalf("v6 round trip: %v %v tls=%v", c.RemoteAddr(), c.LocalAddr(), c.TLS())
+	}
+	if readData(t, c) != "DATA" {
+		t.Fatal("payload not preserved")
+	}
+	c, err = pipeConn(t, HeaderV2(&net.TCPAddr{IP: net.ParseIP("10.1.2.3"), Port: 5}, &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 143}, false), Required)
+	if err != nil || IPOf(c.RemoteAddr()) != "10.1.2.3" || c.TLS() {
+		t.Fatalf("v4 round trip: %v %v", c.RemoteAddr(), err)
+	}
+	// Mixed or non-TCP addresses: a LOCAL header, socket addresses kept.
+	c, err = pipeConn(t, HeaderV2(&net.UnixAddr{Name: "/x", Net: "unix"}, dst, false), Required)
+	if err != nil || c.RemoteAddr() == nil {
+		t.Fatalf("local header: %v", err)
+	}
+	if readData(t, c) != "DATA" {
+		t.Fatal("payload after local header not preserved")
+	}
+}

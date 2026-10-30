@@ -23,19 +23,31 @@ type querier interface {
 
 // ---- namespaces ----
 
-const namespaceCols = "id, name, enabled, settings, created, updated"
+const namespaceCols = "id, name, enabled, settings, ingress_host, ingress_tls, created, updated"
 
 func scanNamespace(row interface{ Scan(...any) error }) (int64, identity.Namespace, error) {
 	var id int64
 	var ns identity.Namespace
 	var settings sql.NullString
-	if err := row.Scan(&id, &ns.Name, &ns.Enabled, &settings, &ns.Created, &ns.Updated); err != nil {
+	var ingressHost, ingressTLS string
+	if err := row.Scan(&id, &ns.Name, &ns.Enabled, &settings, &ingressHost, &ingressTLS, &ns.Created, &ns.Updated); err != nil {
 		return 0, identity.Namespace{}, mapErr(err)
 	}
 	if settings.Valid && settings.String != "" {
 		_ = json.Unmarshal([]byte(settings.String), &ns.Settings)
 	}
+	if ingressHost != "" {
+		ns.Ingress = &identity.Ingress{Host: ingressHost, TLS: ingressTLS}
+	}
 	return id, ns, nil
+}
+
+// ingressCols flattens an ingress for the row (” = none).
+func ingressCols(in *identity.Ingress) (host, tls string) {
+	if in == nil {
+		return "", ""
+	}
+	return in.Host, in.TLS
 }
 
 // namespaceID resolves a namespace name ("" = default) to its row id.
@@ -58,10 +70,14 @@ func (d *DB) CreateNamespace(ctx context.Context, ns identity.Namespace) (identi
 		return identity.Namespace{}, err
 	}
 	ns.Name = name
+	if ns.Ingress, err = identity.NormalizeIngress(ns.Ingress); err != nil {
+		return identity.Namespace{}, err
+	}
 	now := d.Now().UTC()
 	ns.Created, ns.Updated = now, now
-	_, err = d.exec(ctx, "INSERT INTO namespaces (name, enabled, settings, created, updated) VALUES (?, ?, ?, ?, ?)",
-		ns.Name, ns.Enabled, settingsJSON(ns.Settings), now, now)
+	ih, it := ingressCols(ns.Ingress)
+	_, err = d.exec(ctx, "INSERT INTO namespaces (name, enabled, settings, ingress_host, ingress_tls, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		ns.Name, ns.Enabled, settingsJSON(ns.Settings), ih, it, now, now)
 	if err != nil {
 		return identity.Namespace{}, mapErr(err)
 	}
@@ -94,8 +110,12 @@ func (d *DB) UpdateNamespace(ctx context.Context, name string, fn func(*identity
 		if ns.Name != name {
 			return fmt.Errorf("%w: namespace names are immutable", identity.ErrInvalid)
 		}
+		if ns.Ingress, err = identity.NormalizeIngress(ns.Ingress); err != nil {
+			return err
+		}
 		ns.Updated = d.Now().UTC()
-		if _, err := tx.ExecContext(ctx, "UPDATE namespaces SET enabled = ?, settings = ?, updated = ? WHERE id = ?", ns.Enabled, settingsJSON(ns.Settings), ns.Updated, id); err != nil {
+		ih, it := ingressCols(ns.Ingress)
+		if _, err := tx.ExecContext(ctx, "UPDATE namespaces SET enabled = ?, settings = ?, ingress_host = ?, ingress_tls = ?, updated = ? WHERE id = ?", ns.Enabled, settingsJSON(ns.Settings), ih, it, ns.Updated, id); err != nil {
 			return err
 		}
 		out = ns
@@ -705,6 +725,17 @@ func (d *DB) CreateAccount(ctx context.Context, a identity.Account) (identity.Ac
 func (d *DB) GetAccount(ctx context.Context, id uuid.UUID) (identity.Versioned[identity.Account], error) {
 	_, a, err := d.scanAccount(ctx, d.r(ctx), d.r(ctx).QueryRowContext(ctx, "SELECT "+accountCols+accountFrom+"WHERE a.uuid = ?", bin(id)))
 	return identity.Versioned[identity.Account]{Value: a}, err
+}
+
+// AccountDomain reads the account's domain from the account and domain
+// rows alone: a proxy's database user may be limited to these columns.
+func (d *DB) AccountDomain(ctx context.Context, id uuid.UUID) (string, error) {
+	var domain string
+	err := d.r(ctx).QueryRowContext(ctx, "SELECT d.name FROM accounts a JOIN domains d ON d.id = a.domain_id WHERE a.uuid = ?", bin(id)).Scan(&domain)
+	if err != nil {
+		return "", mapErr(err)
+	}
+	return domain, nil
 }
 
 func (d *DB) GetAccountByUsername(ctx context.Context, username string) (identity.Versioned[identity.Account], error) {

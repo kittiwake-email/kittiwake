@@ -38,6 +38,16 @@ type Config struct {
 	CompatDelim  string
 }
 
+// Capabilities is what the server advertises before and after login.
+// The proxy mode greets clients with the same list so a client sees one
+// server whichever end it talks to.
+var Capabilities = []string{
+	string(imap.CapIMAP4rev1), string(imap.CapIdle), string(imap.CapUIDPlus), string(imap.CapMove), string(imap.CapSpecialUse),
+	string(imap.CapNamespace), string(imap.CapUnselect), string(imap.CapEnable), string(imap.CapSASLIR), string(imap.CapLiteralPlus),
+	string(imap.CapListExtended), string(imap.CapChildren),
+	string(imap.AuthCap(saslPlain)), string(imap.AuthCap(saslOAuthBearer)), string(imap.AuthCap(saslXOAuth2)),
+}
+
 // Server is the IMAP server.
 type Server struct {
 	cfg  Config
@@ -63,11 +73,9 @@ func New(cfg Config, authSvc *authsvc.Service, mb *mailbox.Service, del *deliver
 		log = slog.Default()
 	}
 	s := &Server{cfg: cfg, auth: authSvc, mb: mb, del: del, log: log}
-	caps := imap.CapSet{
-		imap.CapIMAP4rev1: {}, imap.CapIdle: {}, imap.CapUIDPlus: {}, imap.CapMove: {}, imap.CapSpecialUse: {},
-		imap.CapNamespace: {}, imap.CapUnselect: {}, imap.CapEnable: {}, imap.CapSASLIR: {}, imap.CapLiteralPlus: {},
-		imap.CapListExtended: {}, imap.CapChildren: {},
-		imap.AuthCap(saslPlain): {}, imap.AuthCap(saslOAuthBearer): {}, imap.AuthCap(saslXOAuth2): {},
+	caps := imap.CapSet{}
+	for _, c := range Capabilities {
+		caps[imap.Cap(c)] = struct{}{}
 	}
 	s.srv = imapserver.New(&imapserver.Options{
 		NewSession:   s.newSession,

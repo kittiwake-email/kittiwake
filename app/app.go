@@ -476,30 +476,14 @@ func (a *App) Run(ctx context.Context) error {
 	a.addCloser(func(context.Context) error { a.Stores.Audit.Close(); return nil })
 
 	// Management listener is always on.
-	mgmt := http.NewServeMux()
-	mgmt.Handle("/metrics", metrics.Handler())
-	mgmt.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
-	mgmt.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		if _, _, err := a.Stores.Identity.ListDomains(ctx, "", "", 1); err != nil {
-			http.Error(w, "metadata: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte("ready\n"))
-	})
-	// Storage registry: state of every connection, and periodic reloads so
-	// storage entries added or closed for placement are picked up without restart.
-	mgmt.HandleFunc("/storage", func(w http.ResponseWriter, _ *http.Request) {
-		var out []storage.Status
+	mgmt := ManagementHandler(func(ctx context.Context) error {
+		_, _, err := a.Stores.Identity.ListDomains(ctx, "", "", 1)
+		return err
+	}, func() []storage.Status {
 		if a.Storage != nil {
-			out = a.Storage.Statuses()
+			return a.Storage.Statuses()
 		}
-		if out == nil {
-			out = []storage.Status{}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
+		return nil
 	})
 	if a.Storage != nil {
 		go a.Storage.Run(ctx, 30*time.Second)
@@ -523,6 +507,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.Cfg.HasMode("socketmap") {
 		srv := socketmap.New(a.Stores.Identity, a.Services.Delivery, a.Log)
+		if p := a.Cfg.Proxy.IngressPorts["lmtp"]; p > 0 {
+			srv.LMTPPort = p
+		}
 		ln, err := listen(a.Cfg.Listen.Socketmap)
 		if err != nil {
 			return fmt.Errorf("postfix listen: %w", err)
@@ -615,13 +602,45 @@ func (a *App) serveHTTP(name string, l config.Listener, h http.Handler, start fu
 	if err != nil {
 		return fmt.Errorf("%s listen: %w", name, err)
 	}
-	srv := &http.Server{
-		Handler: h, ConnContext: httpx.ConnContext,
-		ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 5 * time.Minute,
-	}
+	srv := HTTPServer(h, httpx.ConnContext)
 	a.addCloser(srv.Shutdown)
 	start(name, func() error { return srv.Serve(ln) })
 	return nil
+}
+
+// HTTPServer returns an HTTP server with the platform's timeouts.
+func HTTPServer(h http.Handler, connCtx func(context.Context, net.Conn) context.Context) *http.Server {
+	return &http.Server{
+		Handler: h, ConnContext: connCtx,
+		ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 5 * time.Minute,
+	}
+}
+
+// ManagementHandler serves /metrics, /healthz, /readyz (ready consults
+// the metadata store) and /storage (the registry's connection states;
+// an empty list for processes without storage).
+func ManagementHandler(ready func(context.Context) error, statuses func() []storage.Status) http.Handler {
+	mgmt := http.NewServeMux()
+	mgmt.Handle("/metrics", metrics.Handler())
+	mgmt.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	mgmt.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := ready(ctx); err != nil {
+			http.Error(w, "metadata: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ready\n"))
+	})
+	mgmt.HandleFunc("/storage", func(w http.ResponseWriter, _ *http.Request) {
+		out := statuses()
+		if out == nil {
+			out = []storage.Status{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	return mgmt
 }
 
 func hostname() string {

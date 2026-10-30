@@ -1,6 +1,7 @@
 // Package socketmap serves Postfix lookups over the Sendmail-style socketmap
 // protocol (netstrings: "<name> <key>" → "OK <value>", "NOTFOUND ",
-// "TEMP <reason>", "PERM <reason>"). Maps: domains, mailboxes, aliases.
+// "TEMP <reason>", "PERM <reason>"). Maps: domains, mailboxes, aliases,
+// transport (the LMTP ingress of a recipient's namespace).
 // See README.md "Postfix integration".
 package socketmap
 
@@ -30,6 +31,8 @@ type Server struct {
 	Timeout time.Duration
 	// MaxRequest bounds the netstring size.
 	MaxRequest int
+	// LMTPPort is the port of the LMTP ingress in transport answers.
+	LMTPPort int
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
@@ -41,7 +44,7 @@ func New(ids *identity.Store, del *delivery.Service, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{ids: ids, del: del, log: log, Timeout: 10 * time.Second, MaxRequest: 4096, conns: map[net.Conn]struct{}{}}
+	return &Server{ids: ids, del: del, log: log, Timeout: 10 * time.Second, MaxRequest: 4096, LMTPPort: 24, conns: map[net.Conn]struct{}{}}
 }
 
 // Serve accepts connections until the listener is closed.
@@ -179,6 +182,35 @@ func (s *Server) Lookup(ctx context.Context, name, key string) string {
 			out = append([]string{addr}, out...)
 		}
 		return "OK " + strings.Join(out, ",")
+	case "transport":
+		// For transport_maps: recipients of a namespace with an ingress are
+		// delivered to it (LMTP on the ingress port, which an HAProxy there
+		// spreads over the namespace's lmtp nodes); everyone else falls
+		// through to virtual_transport (NOTFOUND).
+		_, domain, err := identity.NormalizeAddress(key)
+		if err != nil {
+			if domain, err = identity.NormalizeDomain(key); err != nil {
+				return "NOTFOUND "
+			}
+		}
+		d, err := s.ids.GetDomainCached(ctx, domain)
+		if err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				return "NOTFOUND "
+			}
+			return "TEMP " + err.Error()
+		}
+		ns, err := s.ids.GetNamespaceCached(ctx, d.Namespace)
+		if err != nil {
+			if errors.Is(err, identity.ErrNotFound) {
+				return "NOTFOUND "
+			}
+			return "TEMP " + err.Error()
+		}
+		if ns.Ingress == nil {
+			return "NOTFOUND "
+		}
+		return "OK lmtp:[" + ns.Ingress.Host + "]:" + strconv.Itoa(s.LMTPPort)
 	}
 	return "PERM unknown map " + name
 }

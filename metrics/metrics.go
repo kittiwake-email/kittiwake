@@ -33,6 +33,12 @@ var (
 	RadosOps = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kittiwake", Subsystem: "rados", Name: "ops_total", Help: "RADOS operations by op and result.",
 	}, []string{"op", "result"})
+	// ProxySessions counts logins handled by the proxy mode by protocol
+	// and outcome (routed, unknown-domain, disabled, no-backend, refused,
+	// error).
+	ProxySessions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kittiwake", Subsystem: "proxy", Name: "sessions_total", Help: "Proxy logins by protocol and outcome.",
+	}, []string{"protocol", "outcome"})
 	// Tasks counts worker task outcomes by type.
 	Tasks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kittiwake", Subsystem: "worker", Name: "tasks_total", Help: "Worker tasks by type and result.",
@@ -45,7 +51,7 @@ var Registry = prometheus.NewRegistry()
 func init() {
 	Registry.MustRegister(
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		Deliveries, DeliveryBytes, Auth, Connections, HTTPRequests, RadosOps, Tasks,
+		Deliveries, DeliveryBytes, Auth, Connections, HTTPRequests, RadosOps, ProxySessions, Tasks,
 	)
 }
 

@@ -258,6 +258,9 @@ func (s *Rados) CreateNamespace(ctx context.Context, ns Namespace) (Namespace, e
 		return Namespace{}, fmt.Errorf("%w: namespace %s", ErrExists, name)
 	}
 	ns.Name = name
+	if ns.Ingress, err = NormalizeIngress(ns.Ingress); err != nil {
+		return Namespace{}, err
+	}
 	now := s.Now().UTC()
 	ns.Created, ns.Updated = now, now
 	if _, err := createJSON(ctx, s.namespaces, name, ns); err != nil {
@@ -300,6 +303,9 @@ func (s *Rados) UpdateNamespace(ctx context.Context, name string, fn func(*Names
 		}
 		if ns.Name != name {
 			return Namespace{}, fmt.Errorf("%w: namespace names are immutable", ErrInvalid)
+		}
+		if ns.Ingress, err = NormalizeIngress(ns.Ingress); err != nil {
+			return Namespace{}, err
 		}
 		ns.Updated = s.Now().UTC()
 		if _, err := updateJSON(ctx, s.namespaces, name, cur.Version, ns); err != nil {
@@ -707,6 +713,15 @@ func (s *Rados) GetAccount(ctx context.Context, id uuid.UUID) (Versioned[Account
 }
 
 // GetAccountByUsername resolves a username to its account.
+// AccountDomain returns the domain of an account.
+func (s *Rados) AccountDomain(ctx context.Context, id uuid.UUID) (string, error) {
+	v, err := s.GetAccount(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return v.Value.Domain, nil
+}
+
 func (s *Rados) GetAccountByUsername(ctx context.Context, username string) (Versioned[Account], error) {
 	username, _, err := NormalizeAddress(username)
 	if err != nil {
