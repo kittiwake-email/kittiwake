@@ -6,7 +6,7 @@ COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shel
 VERSION := $(RELEASE)+$(COMMIT)
 LDFLAGS  = -X kittiwake/app.Commit=$(COMMIT) -X main.Version=$(VERSION)
 
-.PHONY: build version test test-race test-sql vet fmt lint clean run-dev
+.PHONY: build version test test-race test-sql vet fmt lint clean run-dev docker
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o bin/kittiwake ./cmd/kittiwake
@@ -73,3 +73,25 @@ deploy-units:
 	scp contrib/systemd/kittiwake@.service contrib/systemd/kittiwake.target $(DEPLOY_SCP):/etc/systemd/system/
 	scp examples/lab.yaml $(DEPLOY_SCP):/etc/kittiwake/kittiwake.yaml.example
 	ssh $(DEPLOY_SSH) 'test -f /etc/kittiwake/kittiwake.yaml || cp /etc/kittiwake/kittiwake.yaml.example /etc/kittiwake/kittiwake.yaml; systemctl daemon-reload'
+
+# Container images (README "Containers"). `make docker` builds the image that
+# runs any mode (KITTIWAKE_MODES at run time, every port exposed);
+# `make docker-<mode>` pins the mode and exposes only its ports. Both embed
+# the version. DOCKER=sudo docker when the socket needs it.
+DOCKER       ?= docker
+DOCKER_IMAGE ?= kittiwake
+DOCKER_PORTS_lmtp       = 24 9090
+DOCKER_PORTS_imap       = 143 9090
+DOCKER_PORTS_pop3       = 110 9090
+DOCKER_PORTS_jmap       = 8080 9090
+DOCKER_PORTS_submission = 587 9090
+DOCKER_PORTS_admin      = 8081 9090
+DOCKER_PORTS_socketmap  = 2525 9090
+DOCKER_PORTS_worker     = 9090
+DOCKER_PORTS_backup     = 9090
+DOCKER_PORTS_proxy      = 143 110 8080 587 9090
+docker:
+	$(DOCKER) build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(DOCKER_IMAGE):$(RELEASE) -t $(DOCKER_IMAGE):latest .
+docker-%:
+	@test -n "$(DOCKER_PORTS_$*)" || (echo "unknown mode $*"; exit 1)
+	$(DOCKER) build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg MODE=$* --build-arg PORTS="$(DOCKER_PORTS_$*)" -t $(DOCKER_IMAGE):$* .

@@ -1,0 +1,9 @@
+.git
+bin
+website
+*.test
+*.out
+*.md
+!README.md
+REVIEW-FINDINGS.txt
+SCALING-WORK.txt

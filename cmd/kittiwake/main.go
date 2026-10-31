@@ -8,7 +8,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,10 +42,16 @@ func main() {
 		err = runMigrate(os.Args[2:])
 	case "admin":
 		err = runAdmin(os.Args[2:])
+	case "health":
+		err = runHealth(os.Args[2:])
 	case "version", "--version", "-v":
 		err = runVersion(os.Args[2:])
 	case "help", "-h", "--help":
-		usage()
+		if len(os.Args) > 2 && os.Args[2] == "env" {
+			usageEnv()
+		} else {
+			usage()
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 		usage()
@@ -61,12 +71,61 @@ commands:
   check-config  parse and validate the config file
   migrate       create or upgrade the metadata database schema (database.dsn)
   admin         administrative operations against RADOS (see: kittiwake admin help)
+  health        exit 0 when this process's management endpoint reports ready (container health check)
   version       print the version (also: -v, --version)
+  help env      list the KITTIWAKE_* environment variables that override the config file
 
 flags:
   -c, --config <file>   config file (serve, check-config, admin; default $KITTIWAKE_CONFIG
                         or /etc/kittiwake/kittiwake.yaml)
   -o, --output <fmt>    plain (default) or json (check-config, admin, version)`)
+}
+
+func usageEnv() {
+	fmt.Fprintln(os.Stderr, "Environment variables overriding the config file (set and non-empty; README \"Containers\"):")
+	for _, e := range config.EnvVars {
+		fmt.Fprintf(os.Stderr, "  %-40s %s\n", e.Name, e.Doc)
+	}
+}
+
+// runHealth asks the management endpoint of the process this config and
+// environment describe (the mode's management address, or
+// listen.management) whether it is ready: the container health check.
+func runHealth(args []string) error {
+	fs := newFlagSet("health")
+	cfgPath := configFlag(fs)
+	timeout := fs.Duration("timeout", 3*time.Second, "request timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	addr := cfg.Listen.ManagementAddress(cfg.Modes)
+	if addr == "" {
+		return errors.New("no management address configured")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("management address %q: %w", addr, err)
+	}
+	switch host {
+	case "", "::", "0.0.0.0":
+		host = "::1"
+	}
+	client := &http.Client{Timeout: *timeout}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/readyz")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("not ready: %s %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	fmt.Println(strings.TrimSpace(string(body)))
+	return nil
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -141,9 +200,13 @@ func runCheckConfig(args []string) error {
 	if len(cfg.Modes) > 0 {
 		form = fmt.Sprintf("one process running %v", cfg.Modes)
 	}
-	return emit(map[string]any{"ok": true, "modes": cfg.Modes, "form": form, "backend": cfg.Ceph.Backend, "pools": cfg.Ceph.Pools},
+	env := config.EnvOverrides()
+	return emit(map[string]any{"ok": true, "modes": cfg.Modes, "form": form, "backend": cfg.Ceph.Backend, "pools": cfg.Ceph.Pools, "env_overrides": env},
 		func() {
 			fmt.Printf("config ok: %s; backend=%s pools=%+v\n", form, cfg.Ceph.Backend, cfg.Ceph.Pools)
+			if len(env) > 0 {
+				fmt.Printf("environment overrides in effect: %s\n", strings.Join(env, ", "))
+			}
 		})
 }
 

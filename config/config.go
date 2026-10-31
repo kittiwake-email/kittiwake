@@ -557,22 +557,33 @@ func Default() Config {
 	}
 }
 
-// Load reads and validates the YAML file at path.
+// Load reads the YAML file at path, applies the KITTIWAKE_* environment
+// overrides (env.go) and validates.
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
 	}
-	return Parse(b)
+	return ParseEnv(b, os.LookupEnv)
 }
 
-// Parse parses YAML bytes on top of the defaults and validates.
+// Parse parses YAML bytes on top of the defaults and validates; the
+// environment is not consulted.
 func Parse(b []byte) (Config, error) {
+	return ParseEnv(b, func(string) (string, bool) { return "", false })
+}
+
+// ParseEnv parses YAML bytes on top of the defaults, applies the
+// overrides lookup returns and validates.
+func ParseEnv(b []byte, lookup func(string) (string, bool)) (Config, error) {
 	cfg := Default()
 	dec := yaml.NewDecoder(strings.NewReader(string(b)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("config: %w", err)
+	}
+	if err := cfg.ApplyEnv(lookup); err != nil {
+		return Config{}, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

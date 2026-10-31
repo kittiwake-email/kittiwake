@@ -1,0 +1,27 @@
+# Configuration baked into the container image (README "Containers").
+# One container runs one mode (KITTIWAKE_MODES), has its own address, and
+# listens on the standard ports; the management endpoint (metrics, health,
+# /storage) is [::]:9090 in every mode. Everything deployment-specific
+# (database, relay, keys, ...) comes from the KITTIWAKE_* environment
+# (`kittiwake help env` lists it) or from a file mounted over this one.
+ceph:
+  backend: librados
+listen:
+  lmtp:       {address: "[::]:24",   proxy_protocol: optional, management: "[::]:9090"}
+  imap:       {address: "[::]:143",  proxy_protocol: optional, management: "[::]:9090"}
+  pop3:       {address: "[::]:110",  proxy_protocol: optional, management: "[::]:9090"}
+  jmap:       {address: "[::]:8080", proxy_protocol: optional, management: "[::]:9090"}
+  submission: {address: "[::]:587",  proxy_protocol: optional, management: "[::]:9090"}
+  admin:      {address: "[::]:8081", proxy_protocol: off,      management: "[::]:9090"}
+  socketmap:  {address: "[::]:2525", proxy_protocol: off,      management: "[::]:9090"}
+  worker:     {management: "[::]:9090"}
+  backup:     {management: "[::]:9090"}
+  management: {address: "[::]:9090"}
+  proxy:
+    imap:       {address: "[::]:143",  proxy_protocol: optional}
+    pop3:       {address: "[::]:110",  proxy_protocol: optional}
+    jmap:       {address: "[::]:8080", proxy_protocol: optional}
+    submission: {address: "[::]:587",  proxy_protocol: optional}
+    management: "[::]:9090"
+backup:
+  spool_dir: /var/lib/kittiwake/spool

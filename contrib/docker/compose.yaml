@@ -1,0 +1,102 @@
+# Kittiwake on Docker Compose: one container per mode on an IPv6-routed
+# network, so every container has a real address and listens on its
+# standard ports (README "Containers"). Copy env.example to .env, fill it
+# in, then:
+#
+#   make docker                            # in the product root: builds kittiwake:latest
+#   docker compose up -d                   # in this directory
+#   docker compose run --rm admin kittiwake admin bootstrap     # the first admin token
+#   docker compose exec admin kittiwake-admin storage add ...   # register the Ceph cluster
+#
+# The Ceph clusters are registered in the database (kittiwake-admin storage
+# add), so no container needs a keyring; a ceph.conf for librados defaults
+# can be mounted in (see x-kittiwake). TLS termination (HAProxy or the like)
+# is not part of this file: put it in front of imap, pop3, submission and
+# jmap (or in front of proxy) with PROXY protocol v2, as README "TLS" says.
+# MariaDB runs here for convenience; a real deployment points
+# KITTIWAKE_DB_DSN at its own.
+
+x-kittiwake: &kittiwake
+  image: ${KITTIWAKE_IMAGE:-kittiwake}:${KITTIWAKE_TAG:-latest}
+  build:
+    context: ../..
+    args:
+      VERSION: ${KITTIWAKE_VERSION:-26.0+compose}
+  env_file: .env
+  restart: unless-stopped
+  networks: [mail]
+  depends_on:
+    migrate: {condition: service_completed_successfully}
+  # volumes:
+  #   - ./ceph.conf:/etc/ceph/ceph.conf:ro      # then KITTIWAKE_CEPH_CONFIG_FILE=/etc/ceph/ceph.conf in .env
+
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-root}
+      MARIADB_DATABASE: kittiwake
+      MARIADB_USER: kittiwake
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:-kittiwake}
+    volumes: [db:/var/lib/mysql]
+    networks: [mail]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Creates or upgrades the schema, then exits; every daemon waits for it.
+  migrate:
+    <<: *kittiwake
+    command: migrate
+    restart: "no"
+    depends_on:
+      db: {condition: service_healthy}
+
+  # Ports are published on [::] only: on a routed network that opens Docker's
+  # firewall for the container's own address, with no NAT and no host port
+  # taken, so a service scales (docker compose up -d --scale imap=3) and every
+  # replica keeps its standard port. 9090 is the management endpoint.
+  lmtp:       {<<: *kittiwake, environment: {KITTIWAKE_MODES: lmtp}, ports: ["[::]:24:24", "[::]:9090:9090"]}
+  imap:       {<<: *kittiwake, environment: {KITTIWAKE_MODES: imap}, ports: ["[::]:143:143", "[::]:9090:9090"]}
+  pop3:       {<<: *kittiwake, environment: {KITTIWAKE_MODES: pop3}, ports: ["[::]:110:110", "[::]:9090:9090"]}
+  jmap:       {<<: *kittiwake, environment: {KITTIWAKE_MODES: jmap}, ports: ["[::]:8080:8080", "[::]:9090:9090"]}
+  submission: {<<: *kittiwake, environment: {KITTIWAKE_MODES: submission}, ports: ["[::]:587:587", "[::]:9090:9090"]}
+  admin:      {<<: *kittiwake, environment: {KITTIWAKE_MODES: admin}, ports: ["[::]:8081:8081", "[::]:9090:9090"]}
+  socketmap:  {<<: *kittiwake, environment: {KITTIWAKE_MODES: socketmap}, ports: ["[::]:2525:2525", "[::]:9090:9090"]}
+  worker:     {<<: *kittiwake, environment: {KITTIWAKE_MODES: worker}, ports: ["[::]:9090:9090"]}
+  # Backups need a target and a key first (KITTIWAKE_BACKUP_* in .env), so
+  # the backup mode runs under a profile: docker compose --profile backup up -d
+  backup:
+    <<: *kittiwake
+    environment: {KITTIWAKE_MODES: backup}
+    volumes: [spool:/var/lib/kittiwake]
+    ports: ["[::]:9090:9090"]
+    profiles: [backup]
+  # The proxy (README "Proxies") fronts the four client protocols and needs
+  # only a read-only database user (KITTIWAKE_DB_PROXY_DSN) and its site key
+  # (KITTIWAKE_PROXY_HANDOFF_KEY, registered with kittiwake-admin proxy-key).
+  # Scale it out and point anycast or DNS at the replicas.
+  proxy:
+    <<: *kittiwake
+    environment: {KITTIWAKE_MODES: proxy}
+    ports: ["[::]:143:143", "[::]:110:110", "[::]:8080:8080", "[::]:587:587", "[::]:9090:9090"]
+    profiles: [proxy]
+
+networks:
+  mail:
+    enable_ipv6: true
+    driver_opts:
+      # The prefix is routed to this host: containers are reached at their own
+      # addresses, nothing is NATed or port-mapped.
+      com.docker.network.bridge.gateway_mode_ipv6: routed
+    ipam:
+      config:
+        - subnet: ${KITTIWAKE_IPV6_SUBNET}      # a /64 routed to this host
+        - subnet: ${KITTIWAKE_IPV4_SUBNET:-10.90.0.0/24}
+
+volumes:
+  db:
+  spool:

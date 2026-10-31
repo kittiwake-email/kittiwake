@@ -38,6 +38,8 @@ make integration      # RADOS conformance suite on a real cluster (lab box, see 
 make e2e              # daemon on librados + LMTP/JMAP/IMAP/POP3/admin/backup+export (lab box)
 make deploy           # build here, push binary to the lab box, restart its systemd instances
                       # (kittiwake@<mode>, one process per mode; see contrib/systemd and ../kittiwake-labs)
+make docker           # container image kittiwake:<release> (any mode; DOCKER="sudo docker" when needed)
+make docker-imap      # image pinned to one mode with only its ports exposed (every mode has a target)
 bin/kittiwake check-config -c examples/kittiwake.yaml
 bin/kittiwake migrate -c <cfg>                          # create/upgrade the MariaDB schema (store/mariadb/migrations)
 bin/kittiwake admin -c <cfg> bootstrap                 # first admin token; `admin token --read-only` for more
@@ -78,6 +80,9 @@ cmd/kittiwake-admin  operator CLI over client/admin (typed Go client for the adm
 client/admin  pure HTTP client for the admin API; importable by third parties
 examples/     kittiwake.yaml (full, documented), dev.yaml (memory backend)
 contrib/postfix  main.cf snippet
+contrib/docker   the image's config file, compose.yaml (one service per mode, IPv6 network), env.example
+Dockerfile    multi-stage image (Ubuntu + librados from download.ceph.com, Go from go.dev); ARG MODE/PORTS pin one mode
+config/env.go KITTIWAKE_* environment overrides applied by config.Load (table EnvVars; `kittiwake help env`)
 website/      the single-page https://kittiwake.email site (static index.html, no build step)
 api/openapi.yaml REST spec, embedded (api.OpenAPI) and served at /openapi.yaml on the admin
               listener; route↔spec consistency is tested — add new routes to both

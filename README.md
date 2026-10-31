@@ -365,7 +365,30 @@ uuid, so a message can be followed from the MTA logs through the platform. Each 
 
 ## Containers
 
-The daemon can run inside containers, but this is not mandatory.
+The daemon runs as well in containers as under systemd; nothing in it assumes either. The
+`Dockerfile` builds one image that runs any mode: `make docker` produces `kittiwake:<release>`
+with every port exposed, `make docker-<mode>` an image pinned to one mode with only that
+mode's ports (`kittiwake:imap` exposes 143 and 9090). The image carries `kittiwake`,
+`kittiwake-admin`, librados from the same Ceph release the lab runs, a non-root user and the
+config file `contrib/docker/kittiwake.yaml`: every listener on its standard port on `[::]`,
+the management endpoint (metrics, `/healthz`, `/readyz`, `/storage`) on 9090 in every mode.
+The intended network is an IPv6 prefix routed to the host (a Docker network with
+`gateway_mode_ipv6: routed`), so each container has a real address and nothing is NATed;
+ports are still published, on `[::]` only, because that is what opens Docker's firewall for
+a container, and on a routed network it takes no host port, so one container runs one mode
+and a mode scales by running more replicas on their standard port.
+
+Everything deployment-specific comes from the environment: a set, non-empty `KITTIWAKE_*`
+variable overrides the same setting of the config file (`kittiwake help env` lists them:
+`KITTIWAKE_MODES`, `KITTIWAKE_NAMESPACES`, `KITTIWAKE_DB_DSN`, `KITTIWAKE_DB_PROXY_DSN`,
+`KITTIWAKE_CEPH_CONFIG_FILE`, `KITTIWAKE_NODE_ADVERTISE`, `KITTIWAKE_PROXY_PROTOCOL`,
+`KITTIWAKE_PROXY_TRUSTED_ADDRESSES`, `KITTIWAKE_PROXY_HANDOFF_KEY`, `KITTIWAKE_SMTP_RELAY_HOST`,
+`KITTIWAKE_SESSION_ISSUER`, the backup target and key, log level and format, among others).
+The Ceph clusters are registered in the database, so a container needs no keyring; an
+optional `ceph.conf` can be mounted in. The health check runs `kittiwake health`, which asks
+the process's own management endpoint for `/readyz`. `contrib/docker/compose.yaml` is a
+complete example: MariaDB, a one-shot `migrate`, one service per mode on an IPv6 network, the
+proxy under a profile, and `env.example` for the `.env` it reads.
 
 ## Protocols
 
@@ -1416,7 +1439,9 @@ The daemon takes a single YAML file as configuration:
 - Redis information (only if it ever becomes needed)
 
 Secrets (database DSN, Ceph key, SMTP relay password) can be given inline, as a path to a
-file, or via `${ENV_VAR}` substitution.
+file, or via `${ENV_VAR}` substitution. The deployment-specific settings can also be
+overridden wholesale by `KITTIWAKE_*` environment variables (`kittiwake help env`), which is
+how the container image is configured (see "Containers").
 
 ## Development backend
 
