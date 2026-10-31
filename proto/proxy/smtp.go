@@ -10,12 +10,15 @@ import (
 
 // ServeSubmission fronts SMTP submission: EHLO and the odd pre-auth
 // command are answered here, AUTH reads the login name and is replayed
-// against a submission server of the namespace. TLS is the terminator's
-// in front; its PROXY v2 header says whether the client used it, and AUTH
-// is offered only then (RequireTLSProxy), as the backend does.
+// against a submission server of the namespace (or verified here and
+// handed over). TLS is the terminator's in front; its PROXY v2 header
+// says whether the client used it, and AUTH is offered only then
+// (RequireTLSProxy), as the backend does.
 func (s *Server) ServeSubmission(l net.Listener) error {
 	return s.serveTCP(l, ProtoSubmission, s.handleSMTP)
 }
+
+const smtpUnavailable = "454 4.7.0 No server available for this account, try again later"
 
 func (s *Server) handleSMTP(c net.Conn) {
 	cl := newLineConn(c)
@@ -25,6 +28,23 @@ func (s *Server) handleSMTP(c net.Conn) {
 		return
 	}
 	authOK := !s.cfg.RequireTLSProxy || info.tls
+	// prompt sends a SASL server challenge and reads the response; ok is
+	// false when the client cancelled or the connection ended (then
+	// closed says which).
+	prompt := func(challenge string) (resp string, ok, closed bool) {
+		if err := cl.send(challenge); err != nil {
+			return "", false, true
+		}
+		line, err := cl.readLine()
+		if err != nil {
+			return "", false, true
+		}
+		if line == "*" {
+			_ = cl.send("501 5.7.0 Authentication cancelled")
+			return "", false, false
+		}
+		return line, true, false
+	}
 	for {
 		line, err := cl.readLine()
 		if err != nil {
@@ -70,19 +90,15 @@ func (s *Server) handleSMTP(c net.Conn) {
 				continue
 			}
 			if ir == "" {
-				prompt := "334 "
+				challenge := "334 "
 				if mech == "LOGIN" {
-					prompt = "334 VXNlcm5hbWU6"
+					challenge = "334 VXNlcm5hbWU6"
 				}
-				if err := cl.send(prompt); err != nil {
+				resp, ok, closed := prompt(challenge)
+				if closed {
 					return
 				}
-				resp, err := cl.readLine()
-				if err != nil {
-					return
-				}
-				if resp == "*" {
-					_ = cl.send("501 5.7.0 Authentication cancelled")
+				if !ok {
 					continue
 				}
 				ir = resp
@@ -90,6 +106,36 @@ func (s *Server) handleSMTP(c net.Conn) {
 			raw, ok := decodeB64(ir)
 			if !ok {
 				_ = cl.send("501 5.5.2 Malformed SASL response")
+				continue
+			}
+			if s.local() && (mech == "PLAIN" || mech == "LOGIN") {
+				var username, password string
+				if mech == "PLAIN" {
+					username, password, ok = saslPlain(raw)
+					if !ok {
+						_ = cl.send("535 5.7.8 Authentication failed")
+						s.result(ProtoSubmission, "refused", "", info, Target{}, ErrBadCredentialFormat)
+						continue
+					}
+				} else {
+					username = string(raw)
+					resp, ok, closed := prompt("334 UGFzc3dvcmQ6")
+					if closed {
+						return
+					}
+					if !ok {
+						continue
+					}
+					pw, ok := decodeB64(resp)
+					if !ok {
+						_ = cl.send("501 5.5.2 Malformed SASL response")
+						continue
+					}
+					password = string(pw)
+				}
+				if s.smtpLocal(cl, info, username, password) {
+					return
+				}
 				continue
 			}
 			username, ok := saslUsername(mech, raw)
@@ -107,21 +153,60 @@ func (s *Server) handleSMTP(c net.Conn) {
 	}
 }
 
-// smtpLogin routes, opens the backend, replays EHLO and AUTH and relays
-// the SASL exchange; on 235 the connection is spliced.
-func (s *Server) smtpLogin(cl *lineConn, info client, username, mech string, ir []byte) bool {
+// smtpLocal verifies the password here (and the send role, as the
+// backend does at login) and hands a success over.
+func (s *Server) smtpLocal(cl *lineConn, info client, username, password string) bool {
 	ctx := context.Background()
 	t, err := s.Route(ctx, username)
 	if err != nil {
-		text, outcome := smtpRouteError(err)
-		_ = cl.send(text)
-		s.result(ProtoSubmission, outcome, username, info, t, err)
+		return s.smtpRouteRefused(cl, info, username, t, err)
+	}
+	v, err := s.localVerify(ctx, ProtoSubmission, username, password, info)
+	if err == nil && !canSend(v) {
+		err = errNoSend
+	}
+	if err != nil {
+		_ = cl.send(smtpAuthError(err))
+		s.result(ProtoSubmission, "refused", username, info, t, err)
 		return false
 	}
-	const unavailable = "454 4.7.0 No server available for this account, try again later"
+	if v.Upgrade {
+		return s.smtpRelay(cl, info, t, username, "PLAIN", []byte("\x00"+username+"\x00"+password), false)
+	}
+	ir, err := s.handoffIR(v, ProtoSubmission, info)
+	if err != nil {
+		_ = cl.send(smtpUnavailable)
+		s.result(ProtoSubmission, "error", username, info, t, err)
+		return false
+	}
+	return s.smtpRelay(cl, info, t, username, "XOAUTH2", ir, true)
+}
+
+func (s *Server) smtpRouteRefused(cl *lineConn, info client, username string, t Target, err error) bool {
+	text, outcome := smtpRouteError(err)
+	_ = cl.send(text)
+	s.result(ProtoSubmission, outcome, username, info, t, err)
+	return false
+}
+
+// smtpLogin routes and replays AUTH (pass-through).
+func (s *Server) smtpLogin(cl *lineConn, info client, username, mech string, ir []byte) bool {
+	t, err := s.Route(context.Background(), username)
+	if err != nil {
+		return s.smtpRouteRefused(cl, info, username, t, err)
+	}
+	return s.smtpRelay(cl, info, t, username, mech, ir, false)
+}
+
+// smtpRelay opens the backend, replays EHLO and AUTH and relays the SASL
+// exchange; on 235 the connection is spliced. With handoff set the AUTH
+// is the proxy's own: challenges are answered here and a refusal is
+// reported as temporary.
+func (s *Server) smtpRelay(cl *lineConn, info client, t Target, username, mech string, ir []byte, handoff bool) bool {
+	ctx := context.Background()
 	conn, err := s.connect(ctx, ProtoSubmission, t, username, info)
 	if err != nil {
-		_ = cl.send(unavailable)
+		_ = cl.send(smtpUnavailable)
 		s.result(ProtoSubmission, "no-backend", username, info, t, err)
 		return false
 	}
@@ -129,7 +214,7 @@ func (s *Server) smtpLogin(cl *lineConn, info client, username, mech string, ir 
 	be.deadline(s.cfg.ConnectTimeout)
 	fail := func(outcome string, err error) bool {
 		_ = be.Close()
-		_ = cl.send(unavailable)
+		_ = cl.send(smtpUnavailable)
 		s.result(ProtoSubmission, outcome, username, info, t, err)
 		return false
 	}
@@ -151,13 +236,28 @@ func (s *Server) smtpLogin(cl *lineConn, info client, username, mech string, ir 
 		if err != nil {
 			return fail("error", err)
 		}
+		last := reply[len(reply)-1]
+		if handoff {
+			switch {
+			case strings.HasPrefix(last, "334"):
+				if err := be.send(""); err != nil {
+					return fail("error", err)
+				}
+				continue
+			case strings.HasPrefix(last, "235"):
+			default:
+				_ = be.Close()
+				_ = cl.send("454 4.7.0 The server refused the proxied login, try again later")
+				s.result(ProtoSubmission, "handoff-refused", username, info, t, errors.New(last))
+				return false
+			}
+		}
 		for _, l := range reply {
 			if err := cl.send(l); err != nil {
 				_ = be.Close()
 				return true
 			}
 		}
-		last := reply[len(reply)-1]
 		switch {
 		case strings.HasPrefix(last, "334"):
 			resp, err := cl.readLine()

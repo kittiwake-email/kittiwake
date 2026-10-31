@@ -58,16 +58,28 @@ log: {level: debug, format: text}
 	if _, err := Parse([]byte("modes: [proxy]\nceph: {backend: memory}\n")); err == nil || !strings.Contains(err.Error(), "database.dsn") {
 		t.Fatalf("proxy without a database: %v", err)
 	}
+	if _, err := Parse([]byte("modes: [proxy]\ndatabase: {dsn: x}\n")); err == nil || !strings.Contains(err.Error(), "handoff_key") {
+		t.Fatalf("local auth without a key: %v", err)
+	}
+	if _, err := Parse([]byte("modes: [proxy]\ndatabase: {dsn: x}\nproxy: {handoff_key: bogus}\n")); err == nil || !strings.Contains(err.Error(), "handoff_key") {
+		t.Fatalf("bad key: %v", err)
+	}
+	if _, err := Parse([]byte("proxy: {auth: maybe}\n")); err == nil || !strings.Contains(err.Error(), "proxy.auth") {
+		t.Fatalf("bad auth: %v", err)
+	}
+	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {dsn: x}\nproxy: {auth: passthrough}\n")); err != nil || cfg.Proxy.Auth != "passthrough" {
+		t.Fatalf("passthrough: %v", err)
+	}
 	if _, err := Parse([]byte("proxy: {ingress_tls: maybe}\n")); err == nil || !strings.Contains(err.Error(), "ingress_tls") {
 		t.Fatalf("ingress_tls: %v", err)
 	}
 	if _, err := Parse([]byte("proxy: {ingress_ports: {smtp: 25}}\n")); err == nil || !strings.Contains(err.Error(), "ingress_ports") {
 		t.Fatalf("ingress_ports: %v", err)
 	}
-	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {proxy_dsn: ro}\n")); err != nil || cfg.Database.ProxyDSN != "ro" {
+	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {proxy_dsn: ro}\nproxy: {auth: passthrough}\n")); err != nil || cfg.Database.ProxyDSN != "ro" {
 		t.Fatalf("proxy_dsn alone: %v", err)
 	}
-	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {dsn: x}\nproxy: {ingress_ports: {imap: 1993}}\n")); err != nil || cfg.Proxy.IngressPorts["imap"] != 1993 || cfg.Proxy.IngressPorts["pop3"] != 995 || cfg.Proxy.IngressTLS != "strict" || cfg.Listen.ByMode("proxy").Management != "[::1]:9100" {
+	if cfg, err := Parse([]byte("modes: [proxy]\ndatabase: {dsn: x}\nproxy: {ingress_ports: {imap: 1993}, handoff_key: " + testKey + "}\n")); err != nil || cfg.Proxy.IngressPorts["imap"] != 1993 || cfg.Proxy.IngressPorts["pop3"] != 995 || cfg.Proxy.IngressTLS != "strict" || cfg.Listen.ByMode("proxy").Management != "[::1]:9100" {
 		t.Fatalf("proxy defaults: %+v %v", cfg.Proxy, err)
 	}
 	if _, err := Parse([]byte("log: {level: loud}\n")); err == nil {
@@ -132,3 +144,6 @@ func TestSubmissionConfig(t *testing.T) {
 		t.Fatal("bad submission proxy_protocol accepted")
 	}
 }
+
+// testKey is a base64 Ed25519 seed (not used anywhere real).
+const testKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="

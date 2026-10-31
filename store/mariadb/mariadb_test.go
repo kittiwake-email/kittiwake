@@ -43,7 +43,7 @@ func open(t testing.TB) *mariadb.DB {
 		"TRUNCATE alias_destinations", "TRUNCATE aliases", "TRUNCATE account_passwords", "TRUNCATE tokens", "TRUNCATE accounts",
 		"TRUNCATE attachment_gc", "TRUNCATE maintenance_scans", "TRUNCATE mailbox_removals", "TRUNCATE mailboxes", "TRUNCATE domains", "TRUNCATE storage", "TRUNCATE signing_keys", "TRUNCATE sessions",
 		"TRUNCATE totp_steps", "TRUNCATE tasks", "TRUNCATE scheduler", "TRUNCATE scheduler_lease", "TRUNCATE audit_admin", "TRUNCATE nodes",
-		"TRUNCATE backup_runs", "TRUNCATE backup_blobs", "TRUNCATE backup_blob_refs", "TRUNCATE backup_jobs",
+		"TRUNCATE backup_runs", "TRUNCATE backup_blobs", "TRUNCATE backup_blob_refs", "TRUNCATE backup_jobs", "TRUNCATE proxy_keys",
 		"DELETE FROM namespaces WHERE id <> 1",
 		"SET FOREIGN_KEY_CHECKS = 1",
 	} {

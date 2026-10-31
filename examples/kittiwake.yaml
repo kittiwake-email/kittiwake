@@ -93,6 +93,9 @@ proxy:
   trusted_addresses: []        # proxies whose X-Forwarded-For is trusted (HTTP): the TLS terminator, the proxy mode
   # The proxy mode (README "Proxies"): how it reaches a namespace's ingress when the
   # namespace sets no policy of its own, and the port per protocol on every ingress.
+  auth: local                  # local: verify passwords here, hand verified clients over with a signed token | passthrough: replay every credential to the backend
+  # handoff_key: the proxy site's private key for auth local (kittiwake-admin proxy-key create <site>)
+  # handoff_key: "${KITTIWAKE_PROXY_HANDOFF_KEY}"
   ingress_tls: strict          # strict (verified certificate) | insecure (TLS, any certificate) | off (plain TCP)
   ingress_ports: {imap: 993, pop3: 995, jmap: 443, submission: 465, lmtp: 24}   # lmtp: the socketmap transport map
   connect_timeout: 10s         # one backend connection attempt

@@ -220,16 +220,33 @@ they are, and from outside there is one hostname.
   its user in the signed claims, an API token is one indexed read of the tokens table, a
   refresh token carries its account id, and the account's domain comes from the account and
   domain rows alone.
-- **Credentials pass through.** The proxy verifies nothing: it replays the client's LOGIN,
+- **Two ways to verify** (`proxy.auth`). With **`local`** (the default) the proxy checks the
+  password itself against the account's hashes, so a wrong password is refused at the edge
+  and never costs a backend a connection, a TLS handshake to an ingress or an argon2id
+  verification; the refusal is logged and counted at the proxy (`kittiwake_auth_total`,
+  `kittiwake_proxy_sessions_total{outcome="refused"}` and the audit line in its log, since
+  it writes nothing). A verified client is handed to the backend with a **handoff token**:
+  30 seconds, signed with the proxy site's Ed25519 key, bound to the account, the password
+  that matched, the client address and the protocol, presented as `AUTHENTICATE XOAUTH2`,
+  `AUTH XOAUTH2` or `Bearer`. The backend knows the public keys of the proxy sites
+  (`kittiwake-admin proxy-key create <site>` prints the private key once for the proxy's
+  `proxy.handoff_key`; `generate` makes a pair offline for `create --public-key`; `delete`
+  revokes a site), checks the token with no hashing, re-checks the account's state and
+  writes the `login` audit record with `proxy=<site>` and the real client address. A hash
+  due for an upgrade (an imported Dovecot scheme) takes the pass-through path once, so the
+  backend rewrites it. Session creation (the token endpoint) and bearer logins always pass
+  through. With **`passthrough`** the proxy verifies nothing: it replays the client's LOGIN,
   AUTHENTICATE, USER/PASS or AUTH against the backend (LITERAL+ and SASL-IR, so the replay
   needs no round trips) and relays the answer, continuation requests included
-  (OAUTHBEARER error flows). The backend checks the password, counts the failure and writes
-  the audit record with the real client address, which the proxy forwards with PROXY
-  protocol v2 (with the TLS flag, so submission still offers AUTH only to TLS clients). A
-  wrong password through the proxy reads exactly as a wrong password at the backend; an
-  unknown domain or a disabled namespace is refused the same way; a namespace without a
-  live server gets `NO [UNAVAILABLE]`, `-ERR [SYS/TEMP]`, `454` or `503`. After a
-  successful login the proxy splices the two connections byte for byte.
+  (OAUTHBEARER error flows); the backend checks the password, counts the failure and writes
+  the audit record. Either way the client address travels in PROXY protocol v2 (with the
+  TLS flag, so submission still offers AUTH only to TLS clients), a wrong password through
+  the proxy reads exactly as a wrong password at the backend, an unknown domain or a
+  disabled namespace is refused the same way, a namespace without a live server gets
+  `NO [UNAVAILABLE]`, `-ERR [SYS/TEMP]`, `454` or `503`, and after a successful login the
+  proxy splices the two connections byte for byte. Successful logins cost the same in both
+  modes (one backend connection and one exchange); local mode is about where failures stop
+  and where the hashing CPU runs.
 - **Two ways to a namespace.** Without an ingress, the proxy picks a live node that serves
   the namespace from the node registry (by mode: `imap`, `pop3`, `jmap`, `submission`),
   sticky by rendezvous hash of the login name so a user keeps hitting the node that holds its
@@ -247,11 +264,16 @@ they are, and from outside there is one hostname.
   header (`proxy_protocol: optional`, free for a client-speaks-first protocol).
 - **Read-only, and little of it.** A proxy holds no mail state, never touches Ceph and never
   writes to the database: it does not register in the node registry (anycast or DNS finds
-  it) and it needs `SELECT` on `namespaces`, `domains`, `nodes`, `tokens`, `schema_version`
-  and the `id`, `uuid`, `username` and `domain_id` columns of `accounts`, nothing else. Give
-  the proxy its own database user with exactly those grants (`database.proxy_dsn`, so a
-  proxy sharing a box with backends never holds the read-write credentials): a compromised
-  proxy site then yields no password hashes, no Ceph keys and no backup keys. It runs alone in its process,
+  it). With `passthrough` it needs `SELECT` on `namespaces`, `domains`, `nodes`, `tokens`,
+  `schema_version` and the `id`, `uuid`, `username` and `domain_id` columns of `accounts`,
+  nothing else, so a compromised proxy site yields no password hashes. With `local` it also
+  reads `accounts` in full, `account_passwords` and the `id` and `uuid` columns of
+  `mailboxes` (the account row joins its mailbox): the hashes are then readable at the
+  proxy, which is the price of refusing bad logins there; argon2id makes them slow to
+  attack offline, and a site key leaked with them is revoked with one `proxy-key delete`.
+  Either way give the proxy its own database user with exactly those grants
+  (`database.proxy_dsn`, so a proxy sharing a box with backends never holds the read-write
+  credentials), and it never sees Ceph keys or backup keys. It runs alone in its process,
   with its own listeners (`listen.proxy`) so it can share a box with backends, and exposes
   `kittiwake_proxy_sessions_total{protocol,outcome}` on its management port.
 - **LMTP is not proxied.** Postfix routes per recipient already: the socketmap offers a
@@ -1376,6 +1398,7 @@ The daemon takes a single YAML file as configuration:
 - Trash retention period
 - Audit retention period and per-protocol audit detail level
 - Trusted proxy addresses (PROXY protocol, X-Forwarded-For); the proxy mode's listeners,
+  `proxy.auth` (local verification with a site handoff key, or pass-through),
   default ingress TLS policy, ingress ports and timeouts
 - Session settings: access token lifetime, refresh token lifetime, key rotation interval
 - Cache TTLs: verified credentials, identity objects, mailbox root (see "Caches")

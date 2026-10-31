@@ -117,6 +117,46 @@ type Authenticator interface {
 	VerifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error)
 }
 
+// AuthStatus maps an authentication error to the status and detail the
+// Auth middleware answers with; the proxy mode uses the same words.
+func AuthStatus(err error) (status int, detail string) {
+	status, detail = http.StatusUnauthorized, "invalid credentials"
+	switch {
+	case errors.Is(err, authsvc.ErrTokenExpired):
+		detail = "token expired"
+	case errors.Is(err, authsvc.ErrTOTPRequired):
+		detail = "this password requires a one-time code; use an application password or a session token"
+	case errors.Is(err, authsvc.ErrAccountDisabled):
+		status, detail = http.StatusForbidden, "account disabled"
+	case errors.Is(err, authsvc.ErrServiceDisabled):
+		status, detail = http.StatusForbidden, "this service is not enabled for the account"
+	case errors.Is(err, authsvc.ErrNamespaceDisabled):
+		status, detail = http.StatusForbidden, "account disabled"
+	case errors.Is(err, authsvc.ErrNotServed):
+		status, detail = http.StatusServiceUnavailable, "mailbox is not served by this server"
+	case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken):
+	default:
+		status, detail = http.StatusInternalServerError, "authentication backend error"
+	}
+	return status, detail
+}
+
+// WriteAuthError answers a failed authentication as the Auth middleware
+// does (a 401 carries the challenge).
+func WriteAuthError(w http.ResponseWriter, err error, realm string) {
+	status, detail := AuthStatus(err)
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="`+realm+`", error="invalid_token"`)
+	}
+	WriteProblem(w, status, "about:blank", detail)
+}
+
+// HandoffVerifier accepts proxy handoff tokens (a proxy verified the
+// password; README "Proxies") presented as Bearer.
+type HandoffVerifier interface {
+	VerifyHandoff(ctx context.Context, token, proto, clientIP string) (actor.Actor, error)
+}
+
 // Auth returns middleware that authenticates Bearer tokens (session access
 // tokens or API tokens) and HTTP basic auth, puts the actor in the context
 // and rejects unauthenticated requests with 401. protocol is recorded on
@@ -130,7 +170,12 @@ func Auth(a Authenticator, protocol string, trusted []net.IPNet, realm string) f
 			var err error
 			switch {
 			case strings.HasPrefix(strings.ToLower(h), "bearer "):
-				act, err = a.VerifyBearer(r.Context(), strings.TrimSpace(h[7:]))
+				token := strings.TrimSpace(h[7:])
+				if ho, ok := a.(HandoffVerifier); ok && authsvc.IsHandoff(token) {
+					act, err = ho.VerifyHandoff(r.Context(), token, protocol, ip)
+				} else {
+					act, err = a.VerifyBearer(r.Context(), token)
+				}
 			case strings.HasPrefix(strings.ToLower(h), "basic "):
 				user, pass, ok := r.BasicAuth()
 				if !ok {
@@ -144,28 +189,7 @@ func Auth(a Authenticator, protocol string, trusted []net.IPNet, realm string) f
 				return
 			}
 			if err != nil {
-				status, detail := http.StatusUnauthorized, "invalid credentials"
-				switch {
-				case errors.Is(err, authsvc.ErrTokenExpired):
-					detail = "token expired"
-				case errors.Is(err, authsvc.ErrTOTPRequired):
-					detail = "this password requires a one-time code; use an application password or a session token"
-				case errors.Is(err, authsvc.ErrAccountDisabled):
-					status, detail = http.StatusForbidden, "account disabled"
-				case errors.Is(err, authsvc.ErrServiceDisabled):
-					status, detail = http.StatusForbidden, "this service is not enabled for the account"
-				case errors.Is(err, authsvc.ErrNamespaceDisabled):
-					status, detail = http.StatusForbidden, "account disabled"
-				case errors.Is(err, authsvc.ErrNotServed):
-					status, detail = http.StatusServiceUnavailable, "mailbox is not served by this server"
-				case errors.Is(err, authsvc.ErrInvalidCredentials), errors.Is(err, authsvc.ErrInvalidToken):
-				default:
-					status, detail = http.StatusInternalServerError, "authentication backend error"
-				}
-				if status == http.StatusUnauthorized {
-					w.Header().Set("WWW-Authenticate", `Bearer realm="`+realm+`", error="invalid_token"`)
-				}
-				WriteProblem(w, status, "about:blank", detail)
+				WriteAuthError(w, err, realm)
 				return
 			}
 			act.Protocol, act.ClientIP = protocol, ip

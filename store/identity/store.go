@@ -70,6 +70,12 @@ type Backend interface {
 	CreateAdminToken(ctx context.Context, role, namespace string, expiresAt time.Time, comment string) (Token, string, error)
 	ListAdminTokens(ctx context.Context) ([]Token, error)
 	DeleteAdminToken(ctx context.Context, tokenID string) error
+	// Proxy keys: the public keys of proxy sites allowed to hand clients
+	// over with a verified password (see ProxyKey). Names are unique;
+	// registering the same key twice is ErrExists; listings are by name.
+	CreateProxyKey(ctx context.Context, name string, pub []byte) (ProxyKey, error)
+	ListProxyKeys(ctx context.Context) ([]ProxyKey, error)
+	DeleteProxyKey(ctx context.Context, id string) error
 	LookupToken(ctx context.Context, secret string) (Versioned[Token], error)
 	TouchToken(ctx context.Context, t Versioned[Token])
 	ListTokens(ctx context.Context, accountID uuid.UUID) ([]Token, error)
@@ -314,6 +320,13 @@ func (s *Store) ListAdminTokens(ctx context.Context) ([]Token, error) {
 }
 func (s *Store) DeleteAdminToken(ctx context.Context, tokenID string) error {
 	return s.b.DeleteAdminToken(ctx, tokenID)
+}
+func (s *Store) CreateProxyKey(ctx context.Context, name string, pub []byte) (ProxyKey, error) {
+	return s.b.CreateProxyKey(ctx, name, pub)
+}
+func (s *Store) ListProxyKeys(ctx context.Context) ([]ProxyKey, error) { return s.b.ListProxyKeys(ctx) }
+func (s *Store) DeleteProxyKey(ctx context.Context, id string) error {
+	return s.b.DeleteProxyKey(ctx, id)
 }
 func (s *Store) LookupToken(ctx context.Context, secret string) (Versioned[Token], error) {
 	return s.b.LookupToken(ctx, secret)

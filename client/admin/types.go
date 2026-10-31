@@ -329,6 +329,21 @@ type TokenCreated struct {
 	Secret string `json:"secret"`
 }
 
+// ProxyKey is the registered public key of a proxy site that verifies
+// passwords itself (README "Proxies").
+type ProxyKey struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	PublicKey string    `json:"public_key"` // base64 Ed25519 public key
+	Created   time.Time `json:"created"`
+}
+
+// ProxyKeyRequest registers a proxy key.
+type ProxyKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
 // Destination is one alias target: a mailbox id or another address.
 type Destination struct {
 	MailboxID string `json:"mailbox_id,omitempty"`

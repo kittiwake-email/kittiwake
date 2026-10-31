@@ -66,6 +66,7 @@ commands:
   audit     query the audit log
   queue     stats|dead|retry
   token     create|list|delete     admin tokens (full or --read-only; --namespace binds a tenant admin)
+  proxy-key create|list|delete|generate   keys of proxy sites that verify passwords themselves
   storage   add|list|get|set|enable|disable|remove   Ceph storage registry (placement of new mailboxes)
   node      list [--mode m]       running daemon nodes (registered with heartbeats)
   keys      rotate
@@ -110,7 +111,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if s.Token == "" && rest[0] != "openapi" {
+	offline := rest[0] == "openapi" || (rest[0] == "proxy-key" && len(rest) > 1 && rest[1] == "generate")
+	if s.Token == "" && !offline {
 		return errors.New("no admin token: use -t, KITTIWAKE_ADMIN_TOKEN or ~/.config/kittiwake/admin.yaml")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -145,6 +147,8 @@ func run(args []string) error {
 		return app.queue(sub)
 	case "token":
 		return app.token(sub)
+	case "proxy-key":
+		return app.proxyKey(sub)
 	case "storage":
 		return app.storage(sub)
 	case "node":

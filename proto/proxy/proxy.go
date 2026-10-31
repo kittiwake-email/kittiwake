@@ -5,10 +5,12 @@
 // namespace's servers may sit in their own datacenter. A proxy process
 // holds no mail state and never talks to Ceph: it reads namespaces,
 // domains, nodes and tokens from the database, read-only, and nothing
-// else. Credentials pass through untouched; the backend verifies them,
-// counts failures and writes the audit record with the real client
-// address, which the proxy forwards with PROXY protocol v2. See
-// README.md "Proxies".
+// else. Credentials either pass through untouched (the backend verifies
+// them, counts failures and writes the audit record with the real
+// client address, which the proxy forwards with PROXY protocol v2) or,
+// in local mode, are verified here against the account's hashes and
+// handed over with a signed token, so a wrong password never reaches a
+// backend (local.go). See README.md "Proxies".
 package proxy
 
 import (
@@ -24,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"kittiwake/metrics"
+	authsvc "kittiwake/service/auth"
 	"kittiwake/store/identity"
 )
 
@@ -73,6 +76,10 @@ type Config struct {
 	// TrustedProxies may set X-Forwarded-For on HTTP (the TLS terminator
 	// in front, when it does not send PROXY protocol).
 	TrustedProxies []net.IPNet
+	// Auth verifies passwords at the proxy (proxy.auth local): a
+	// read-only auth service with the site's handoff key. Nil passes
+	// every credential through to the backend untouched.
+	Auth *authsvc.Service
 }
 
 // Server is one proxy process: every protocol front end over one router.

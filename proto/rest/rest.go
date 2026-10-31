@@ -176,6 +176,9 @@ func (s *Server) AdminHandler() http.Handler {
 		route{"POST /v1/admin/tokens", s.adminTokenCreate},
 		route{"GET /v1/admin/tokens", s.adminTokenList},
 		route{"DELETE /v1/admin/tokens/{tid}", s.adminTokenDelete},
+		route{"POST /v1/admin/proxy-keys", s.proxyKeyCreate},
+		route{"GET /v1/admin/proxy-keys", s.proxyKeyList},
+		route{"DELETE /v1/admin/proxy-keys/{kid}", s.proxyKeyDelete},
 	)
 	reg(adm,
 		route{"GET /v1/admin/status", s.adminStatus},
@@ -292,6 +295,63 @@ func (s *Server) adminTokenList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminTokenDelete(w http.ResponseWriter, r *http.Request) {
 	if err := s.admin.DeleteAdminToken(r.Context(), r.PathValue("tid")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// proxyKeyRequest registers a proxy site's public key.
+type proxyKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"` // base64 Ed25519 public key
+}
+
+type proxyKeyView struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	PublicKey string    `json:"public_key"`
+	Created   time.Time `json:"created"`
+}
+
+func viewProxyKey(k identity.ProxyKey) proxyKeyView {
+	return proxyKeyView{ID: k.ID, Name: k.Name, PublicKey: cryptoauth.EncodeHandoffPublic(k.PublicKey), Created: k.Created}
+}
+
+func (s *Server) proxyKeyCreate(w http.ResponseWriter, r *http.Request) {
+	var req proxyKeyRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	pub, err := cryptoauth.ParseHandoffPublic(req.PublicKey)
+	if err != nil {
+		s.fail(w, r, fmt.Errorf("%w: %v", identity.ErrInvalid, err))
+		return
+	}
+	k, err := s.admin.CreateProxyKey(r.Context(), req.Name, pub)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, viewProxyKey(k))
+}
+
+func (s *Server) proxyKeyList(w http.ResponseWriter, r *http.Request) {
+	list, err := s.admin.ListProxyKeys(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := make([]proxyKeyView, 0, len(list))
+	for _, k := range list {
+		out = append(out, viewProxyKey(k))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (s *Server) proxyKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.admin.DeleteProxyKey(r.Context(), r.PathValue("kid")); err != nil {
 		s.fail(w, r, err)
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -18,13 +19,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"kittiwake/app"
+	cryptoauth "kittiwake/auth"
 	"kittiwake/config"
 	"kittiwake/proto/httpx"
 	"kittiwake/proto/imap"
@@ -36,6 +41,8 @@ import (
 	"kittiwake/proto/submission"
 	"kittiwake/service/actor"
 	"kittiwake/service/admin"
+	"kittiwake/service/auditor"
+	authsvc "kittiwake/service/auth"
 	"kittiwake/store/identity"
 )
 
@@ -58,11 +65,43 @@ type fixture struct {
 	ctx   context.Context
 	ports map[string]int // ingress listener ports
 	plain int            // ingress IMAP without TLS
+	local bool
+	key   identity.ProxyKey // the proxy site's registered key (local)
+	auth  *authsvc.Service  // the proxy's own verifier (local)
+	// imapConns counts connections the IMAP backend accepted.
+	imapConns atomic.Int32
 }
 
-func newFixture(t *testing.T) *fixture {
+// newFixture: pass-through proxy. newFixtureMode(t, true): local
+// verification with a registered site key.
+func newFixture(t *testing.T) *fixture { return newFixtureMode(t, false) }
+
+// both runs a test against a pass-through and a local-mode proxy.
+func both(t *testing.T, fn func(t *testing.T, f *fixture)) {
+	t.Run("passthrough", func(t *testing.T) { fn(t, newFixtureMode(t, false)) })
+	t.Run("local", func(t *testing.T) { fn(t, newFixtureMode(t, true)) })
+}
+
+// countingListener counts accepted connections.
+type countingListener struct {
+	net.Listener
+	n *atomic.Int32
+}
+
+func (c countingListener) Accept() (net.Conn, error) {
+	conn, err := c.Listener.Accept()
+	if err == nil {
+		c.n.Add(1)
+	}
+	return conn, err
+}
+
+func newFixtureMode(t *testing.T, local bool) *fixture {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if os.Getenv("KW_TEST_LOG") != "" {
+		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
 	cfg := config.Default()
 	cfg.Ceph.Backend = "memory"
 	cfg.Submission.RequireTLSProxy = false
@@ -75,7 +114,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{t: t, a: a, ctx: actor.With(context.Background(), actor.Actor{AccountID: uuid.New(), Username: "root@example.org", Roles: []string{"admin"}, Protocol: "admin"})}
+	f := &fixture{t: t, a: a, local: local, ctx: actor.With(context.Background(), actor.Actor{AccountID: uuid.New(), Username: "root@example.org", Roles: []string{"admin"}, Protocol: "admin"})}
 	adm := a.Services.Admin
 	for _, ns := range []string{"acme", "lonely", "off", "ingress"} {
 		if _, err := adm.CreateNamespace(f.ctx, identity.Namespace{Name: ns, Enabled: ns != "off"}); err != nil {
@@ -113,7 +152,11 @@ func newFixture(t *testing.T) *fixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		go func() { _ = serve(proxyproto.Wrap(l, proxyproto.Required)) }()
+		var inner net.Listener = l
+		if mode == "imap" {
+			inner = countingListener{l, &f.imapConns}
+		}
+		go func() { _ = serve(proxyproto.Wrap(inner, proxyproto.Required)) }()
 		t.Cleanup(func() { _ = l.Close() })
 		return l.Addr().String()
 	}
@@ -162,7 +205,22 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() { _ = pl.Close() })
 	f.plain = pl.Addr().(*net.TCPAddr).Port
 
-	f.px = proxy.New(proxy.Config{Hostname: "proxy", ConnectTimeout: 2 * time.Second, NodeTTL: time.Millisecond, IngressTLS: "insecure", IngressPorts: f.ports, TrustedProxies: trusted, RequireTLSProxy: false}, a.Stores.Identity, log)
+	pcfg := proxy.Config{Hostname: "proxy", ConnectTimeout: 2 * time.Second, NodeTTL: time.Millisecond, IngressTLS: "insecure", IngressPorts: f.ports, TrustedProxies: trusted, RequireTLSProxy: false}
+	if local {
+		// The proxy site's key, registered on the platform; the proxy's
+		// verifier is read-only and audits to the log only.
+		priv, err := cryptoauth.NewHandoffKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.key, err = adm.CreateProxyKey(f.ctx, "test-site", priv.Public().(ed25519.PublicKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.auth = authsvc.New(a.Stores.Identity, nil, auditor.New(nil, log, nil), authsvc.Config{CacheTTL: 5 * time.Second, ReadOnly: true, HandoffKey: priv})
+		pcfg.Auth = f.auth
+	}
+	f.px = proxy.New(pcfg, a.Stores.Identity, log)
 	t.Cleanup(func() { _ = f.px.Shutdown(context.Background()) })
 	f.imap = serveProxy(t, f.px.ServeIMAP)
 	f.pop3 = serveProxy(t, f.px.ServePOP3)
@@ -258,8 +316,9 @@ func plainIR(user, pass string) string {
 	return base64.StdEncoding.EncodeToString([]byte("\x00" + user + "\x00" + pass))
 }
 
-func TestIMAP(t *testing.T) {
-	f := newFixture(t)
+func TestIMAP(t *testing.T) { both(t, testIMAP) }
+
+func testIMAP(t *testing.T, f *fixture) {
 	c := dial(t, f.imap)
 	if g := c.line(); !strings.HasPrefix(g, "* OK [CAPABILITY IMAP4rev1") || !strings.Contains(g, "AUTH=PLAIN") {
 		t.Fatalf("greeting: %s", g)
@@ -279,7 +338,7 @@ func TestIMAP(t *testing.T) {
 	if r := c.imapCmd("d", `LOGIN nobody@off.example x`); !strings.HasPrefix(r, "d NO [AUTHENTICATIONFAILED] Account disabled") {
 		t.Fatalf("disabled namespace: %s", r)
 	}
-	if r := c.imapCmd("e", `LOGIN lone@lonely.example x`); !strings.HasPrefix(r, "e NO [UNAVAILABLE]") {
+	if r := c.imapCmd("e", `LOGIN lone@lonely.example "`+password+`"`); !strings.HasPrefix(r, "e NO [UNAVAILABLE]") {
 		t.Fatalf("no backend: %s", r)
 	}
 	if r := c.imapCmd("f", `SELECT INBOX`); !strings.HasPrefix(r, "f BAD") {
@@ -355,8 +414,9 @@ func strconvItoa(n int) string {
 	return string(b)
 }
 
-func TestPOP3(t *testing.T) {
-	f := newFixture(t)
+func TestPOP3(t *testing.T) { both(t, testPOP3) }
+
+func testPOP3(t *testing.T, f *fixture) {
 	c := dial(t, f.pop3)
 	if g := c.line(); !strings.HasPrefix(g, "+OK") {
 		t.Fatalf("greeting: %s", g)
@@ -387,7 +447,7 @@ func TestPOP3(t *testing.T) {
 	}
 	c.send("USER lone@lonely.example")
 	c.line()
-	c.send("PASS x")
+	c.send("PASS " + password)
 	if s := c.line(); !strings.HasPrefix(s, "-ERR [SYS/TEMP]") {
 		t.Fatalf("no backend: %s", s)
 	}
@@ -420,8 +480,9 @@ func TestPOP3(t *testing.T) {
 	}
 }
 
-func TestSubmission(t *testing.T) {
-	f := newFixture(t)
+func TestSubmission(t *testing.T) { both(t, testSubmission) }
+
+func testSubmission(t *testing.T, f *fixture) {
 	c := dial(t, f.smtp)
 	if g := c.line(); !strings.HasPrefix(g, "220 ") {
 		t.Fatalf("greeting: %s", g)
@@ -512,15 +573,16 @@ func basic(user, pass string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
 
-func TestHTTP(t *testing.T) {
-	f := newFixture(t)
+func TestHTTP(t *testing.T) { both(t, testHTTP) }
+
+func testHTTP(t *testing.T, f *fixture) {
 	if resp, _ := f.get("/.well-known/jmap", nil); resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") == "" {
 		t.Fatalf("no credential: %d", resp.StatusCode)
 	}
 	if resp, _ := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("nobody@nowhere.example", "x")}); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unknown domain: %d", resp.StatusCode)
 	}
-	if resp, _ := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("lone@lonely.example", "x")}); resp.StatusCode != http.StatusServiceUnavailable {
+	if resp, _ := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("lone@lonely.example", password)}); resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("no backend: %d", resp.StatusCode)
 	}
 	if resp, _ := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("nobody@off.example", "x")}); resp.StatusCode != http.StatusForbidden {
@@ -583,8 +645,9 @@ func TestHTTP(t *testing.T) {
 	}
 }
 
-func TestIngress(t *testing.T) {
-	f := newFixture(t)
+func TestIngress(t *testing.T) { both(t, testIngress) }
+
+func testIngress(t *testing.T, f *fixture) {
 	login := func(expectOK bool, what string) {
 		t.Helper()
 		c := dial(t, f.imap)
@@ -654,5 +717,153 @@ func TestIngressPlain(t *testing.T) {
 	c.line()
 	if r := c.imapCmd("a", `LOGIN ing@ingress.example "`+password+`"`); !strings.HasPrefix(r, "a NO [UNAVAILABLE]") {
 		t.Fatalf("strict against plain: %s", r)
+	}
+}
+
+// TestLocal covers what only local mode does: refusals without a backend
+// connection, the failure limit, the handoff refused by a backend that
+// does not know the key, and the pass-through of a legacy hash.
+func TestLocal(t *testing.T) {
+	f := newFixtureMode(t, true)
+	before := f.imapConns.Load()
+	c := dial(t, f.imap)
+	c.line()
+	if r := c.imapCmd("a", `LOGIN wido@example.org wrong`); !strings.HasPrefix(r, "a NO [AUTHENTICATIONFAILED] Authentication failed") {
+		t.Fatalf("wrong password: %s", r)
+	}
+	if r := c.imapCmd("b", `LOGIN nobody@example.org x`); !strings.HasPrefix(r, "b NO [AUTHENTICATIONFAILED] Authentication failed") {
+		t.Fatalf("unknown user: %s", r)
+	}
+	if r := c.imapCmd("c", "AUTHENTICATE PLAIN "+plainIR("wido@example.org", "wrong")); !strings.HasPrefix(r, "c NO [AUTHENTICATIONFAILED]") {
+		t.Fatalf("wrong password via PLAIN: %s", r)
+	}
+	if n := f.imapConns.Load(); n != before {
+		t.Fatalf("refused logins reached the backend: %d connections", n-before)
+	}
+	if r := c.imapCmd("d", `LOGIN wido@example.org "`+password+`"`); !strings.HasPrefix(r, "d OK") {
+		t.Fatalf("login: %s", r)
+	}
+	if r := c.imapCmd("e", "SELECT INBOX"); !strings.HasPrefix(r, "e OK") {
+		t.Fatalf("select after handoff: %s", r)
+	}
+	if n := f.imapConns.Load(); n != before+1 {
+		t.Fatalf("handoff connections: %d", n-before)
+	}
+	c.send("f LOGOUT")
+
+	// A disabled account and a wrong-password submission are refused in
+	// the backends' words; submission also needs the send role.
+	acct, _ := f.a.Stores.Identity.GetAccountByUsername(f.ctx, "bob@acme.example")
+	if _, err := f.a.Services.Admin.UpdateAccount(f.ctx, acct.Value.ID, func(a *identity.Account) error { a.Roles = []string{"read"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	f.auth.InvalidateCache()
+	f.a.Stores.Identity.InvalidateCache()
+	sc := dial(t, f.smtp)
+	sc.line()
+	sc.send("EHLO x")
+	for l := sc.line(); !strings.HasPrefix(l, "250 "); l = sc.line() {
+	}
+	sc.send("AUTH PLAIN " + plainIR("bob@acme.example", password))
+	if l := sc.line(); l != "535 5.7.8 Account may not send mail" {
+		t.Fatalf("no send role: %s", l)
+	}
+	sc.send("AUTH LOGIN " + base64.StdEncoding.EncodeToString([]byte("wido@example.org")))
+	if l := sc.line(); l != "334 UGFzc3dvcmQ6" {
+		t.Fatalf("password prompt: %s", l)
+	}
+	sc.send(base64.StdEncoding.EncodeToString([]byte("wrong")))
+	if l := sc.line(); l != "535 5.7.8 Authentication failed" {
+		t.Fatalf("wrong password via LOGIN: %s", l)
+	}
+	sc.send("AUTH LOGIN " + base64.StdEncoding.EncodeToString([]byte("wido@example.org")))
+	sc.line()
+	sc.send(base64.StdEncoding.EncodeToString([]byte(password)))
+	if l := sc.line(); !strings.HasPrefix(l, "235") {
+		t.Fatalf("auth login: %s", l)
+	}
+
+	// POP3 closes after three failures, as the backend does.
+	pc := dial(t, f.pop3)
+	pc.line()
+	for i := 0; i < 2; i++ {
+		pc.send("USER wido@example.org")
+		pc.line()
+		pc.send("PASS wrong")
+		if l := pc.line(); l != "-ERR [AUTH] authentication failed" {
+			t.Fatalf("pop3 wrong password: %s", l)
+		}
+	}
+	pc.send("USER wido@example.org")
+	pc.line()
+	pc.send("PASS wrong")
+	if l := pc.line(); !strings.Contains(l, "too many failures") {
+		t.Fatalf("pop3 limit: %s", l)
+	}
+	if _, err := pc.r.ReadString('\n'); err == nil {
+		t.Fatal("pop3 connection stayed open after the failure limit")
+	}
+
+	// HTTP: a wrong password is a 401 from the proxy, a right one is
+	// handed over as Bearer and the backend answers.
+	if resp, _ := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("wido@example.org", "wrong")}); resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") == "" {
+		t.Fatalf("http wrong password: %d", resp.StatusCode)
+	}
+	if resp, sess := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("wido@example.org", password)}); resp.StatusCode != http.StatusOK || sess["username"] != "wido@example.org" {
+		t.Fatalf("http handoff: %d %v", resp.StatusCode, sess)
+	}
+
+	// A legacy hash: verified here, then passed through so the backend
+	// upgrades it; the next login hands off.
+	legacy, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	ing, _ := f.a.Stores.Identity.GetAccountByUsername(f.ctx, "ing@ingress.example")
+	if _, err := f.a.Stores.Identity.UpdateAccount(f.ctx, ing.Value.ID, func(a *identity.Account) error {
+		a.Passwords[0].Hash = "{BLF-CRYPT}" + string(legacy)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.a.Services.Auth.InvalidateCache()
+	f.auth.InvalidateCache()
+	f.setIngress("localhost", identity.IngressTLSInsecure)
+	c = dial(t, f.imap)
+	c.line()
+	if r := c.imapCmd("a", `LOGIN ing@ingress.example "`+password+`"`); !strings.HasPrefix(r, "a OK") {
+		t.Fatalf("legacy login: %s", r)
+	}
+	ing, _ = f.a.Stores.Identity.GetAccountByUsername(f.ctx, "ing@ingress.example")
+	if !strings.HasPrefix(ing.Value.Passwords[0].Hash, "{ARGON2ID}") {
+		t.Fatalf("hash not upgraded by the backend: %s", ing.Value.Passwords[0].Hash[:12])
+	}
+
+	// The key is removed: the backend refuses the handoff and the client
+	// is told the server is unavailable, not that it was wrong.
+	if err := f.a.Services.Admin.DeleteProxyKey(f.ctx, f.key.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.a.Services.Auth.InvalidateProxyKeys()
+	f.auth.InvalidateCache()
+	c = dial(t, f.imap)
+	c.line()
+	if r := c.imapCmd("a", `LOGIN wido@example.org "`+password+`"`); !strings.HasPrefix(r, "a NO [UNAVAILABLE] The server refused the proxied login") {
+		t.Fatalf("handoff without key: %s", r)
+	}
+	pc = dial(t, f.pop3)
+	pc.line()
+	pc.send("AUTH PLAIN " + plainIR("wido@example.org", password))
+	if l := pc.line(); !strings.HasPrefix(l, "-ERR [SYS/TEMP] the server refused") {
+		t.Fatalf("pop3 handoff without key: %s", l)
+	}
+	sc = dial(t, f.smtp)
+	sc.line()
+	sc.send("EHLO x")
+	for l := sc.line(); !strings.HasPrefix(l, "250 "); l = sc.line() {
+	}
+	sc.send("AUTH PLAIN " + plainIR("wido@example.org", password))
+	if l := sc.line(); !strings.HasPrefix(l, "454 4.7.0 The server refused") {
+		t.Fatalf("smtp handoff without key: %s", l)
+	}
+	if resp, _ := f.get("/.well-known/jmap", map[string]string{"Authorization": basic("wido@example.org", password)}); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("http handoff without key: %d", resp.StatusCode)
 	}
 }

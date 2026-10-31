@@ -95,6 +95,27 @@ func (h *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 	}
+	if h.s.local() {
+		if user, pass, ok := r.BasicAuth(); ok {
+			// Local mode: verify here, refuse in the backend's words, and
+			// replace the password with a handoff token (unless its hash
+			// is due for an upgrade, which the backend must see it for).
+			v, err := h.s.localVerify(r.Context(), ProtoJMAP, user, pass, info)
+			if err != nil {
+				h.s.result(ProtoJMAP, "refused", username, info, t, err)
+				httpx.WriteAuthError(w, err, "kittiwake")
+				return
+			}
+			if !v.Upgrade {
+				tok, err := h.s.cfg.Auth.Handoff(v, ProtoJMAP, ip)
+				if err != nil {
+					h.refuse(w, r, username, info, t, err)
+					return
+				}
+				r.Header.Set("Authorization", "Bearer "+tok)
+			}
+		}
+	}
 	ht, err := h.target(r.Context(), t, username)
 	if err != nil {
 		h.refuse(w, r, username, info, t, err)

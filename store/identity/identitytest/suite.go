@@ -5,6 +5,8 @@ package identitytest
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ func Run(t *testing.T, f Factory) {
 		{"Aliases", testAliases},
 		{"Tokens", testTokens},
 		{"AdminTokens", testAdminTokens},
+		{"ProxyKeys", testProxyKeys},
 		{"ConcurrentUpdates", testConcurrentUpdates},
 		{"Services", testServices},
 		{"Storage", testStorages},
@@ -360,6 +363,46 @@ func testTokens(t *testing.T, f Factory) {
 	list, err = s.ListTokens(ctx, a.ID)
 	if err != nil || len(list) != 0 {
 		t.Fatalf("tokens after account delete: %v %v", list, err)
+	}
+}
+
+func testProxyKeys(t *testing.T, f Factory) {
+	s := f(t)
+	ctx := context.Background()
+	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := s.CreateProxyKey(ctx, "", pub1); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("name required: %v", err)
+	}
+	if _, err := s.CreateProxyKey(ctx, "edge", []byte("short")); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("short key: %v", err)
+	}
+	k1, err := s.CreateProxyKey(ctx, " edge ", pub1)
+	if err != nil || k1.Name != "edge" || k1.ID != identity.ProxyKeyID(pub1) || string(k1.PublicKey) != string(pub1) || k1.Created.IsZero() {
+		t.Fatalf("%+v %v", k1, err)
+	}
+	if _, err := s.CreateProxyKey(ctx, "edge2", pub1); !errors.Is(err, identity.ErrExists) {
+		t.Fatalf("same key twice: %v", err)
+	}
+	if _, err := s.CreateProxyKey(ctx, "edge", pub2); !errors.Is(err, identity.ErrExists) {
+		t.Fatalf("same name twice: %v", err)
+	}
+	k2, err := s.CreateProxyKey(ctx, "ams", pub2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ListProxyKeys(ctx)
+	if err != nil || len(list) != 2 || list[0].ID != k2.ID || list[1].ID != k1.ID || string(list[0].PublicKey) != string(pub2) { // by name
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	if err := s.DeleteProxyKey(ctx, k1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteProxyKey(ctx, k1.ID); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("delete twice: %v", err)
+	}
+	if list, _ = s.ListProxyKeys(ctx); len(list) != 1 || list[0].Name != "ams" {
+		t.Fatalf("after delete: %+v", list)
 	}
 }
 

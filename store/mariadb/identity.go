@@ -1216,6 +1216,52 @@ func (d *DB) DeleteAdminToken(ctx context.Context, tokenID string) error {
 	return nil
 }
 
+// ---- proxy keys ----
+
+func (d *DB) CreateProxyKey(ctx context.Context, name string, pub []byte) (identity.ProxyKey, error) {
+	name, err := identity.NormalizeProxyKey(name, pub)
+	if err != nil {
+		return identity.ProxyKey{}, err
+	}
+	k := identity.ProxyKey{ID: identity.ProxyKeyID(pub), Name: name, PublicKey: append([]byte(nil), pub...), Created: d.Now().UTC()}
+	if _, err := d.exec(ctx, "INSERT INTO proxy_keys (id, name, public_key, created) VALUES (?, ?, ?, ?)", k.ID, k.Name, k.PublicKey, k.Created); err != nil {
+		if errors.Is(mapErr(err), identity.ErrExists) {
+			return identity.ProxyKey{}, fmt.Errorf("%w: proxy key %s", identity.ErrExists, name)
+		}
+		return identity.ProxyKey{}, mapErr(err)
+	}
+	return k, nil
+}
+
+func (d *DB) ListProxyKeys(ctx context.Context) ([]identity.ProxyKey, error) {
+	rows, err := d.r(ctx).QueryContext(ctx, "SELECT id, name, public_key, created FROM proxy_keys ORDER BY name")
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []identity.ProxyKey{}
+	for rows.Next() {
+		var k identity.ProxyKey
+		if err := rows.Scan(&k.ID, &k.Name, &k.PublicKey, &k.Created); err != nil {
+			return nil, err
+		}
+		k.Created = k.Created.UTC()
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) DeleteProxyKey(ctx context.Context, id string) error {
+	res, err := d.exec(ctx, "DELETE FROM proxy_keys WHERE id = ?", id)
+	if err != nil {
+		return mapErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return identity.ErrNotFound
+	}
+	return nil
+}
+
 func (d *DB) LookupToken(ctx context.Context, secret string) (identity.Versioned[identity.Token], error) {
 	if !strings.HasPrefix(secret, identity.TokenPrefix) {
 		return identity.Versioned[identity.Token]{}, identity.ErrNotFound

@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"kittiwake/app"
+	cryptoauth "kittiwake/auth"
 	"kittiwake/config"
 	"kittiwake/proto/httpx"
 	"kittiwake/proto/proxy"
+	"kittiwake/service/auditor"
+	authsvc "kittiwake/service/auth"
 	"kittiwake/store/identity"
 	"kittiwake/store/storage"
 )
@@ -45,11 +48,24 @@ func runProxy(cfg config.Config, log *slog.Logger) error {
 		log.Error("proxy.trusted_addresses invalid; ignoring", "error", err.Error())
 	}
 	host, _ := os.Hostname()
-	px := proxy.New(proxy.Config{
+	pcfg := proxy.Config{
 		Hostname: host, ConnectTimeout: cfg.Proxy.ConnectTimeout, PreAuthTimeout: cfg.Proxy.PreAuthTimeout,
 		NodeTTL: cfg.Proxy.NodeTTL, DownFor: cfg.Proxy.DownFor, IngressTLS: cfg.Proxy.IngressTLS, IngressPorts: cfg.Proxy.IngressPorts,
 		MaxMessageSize: cfg.Mail.MaxMessageSize, RequireTLSProxy: cfg.Submission.RequireTLSProxy, TrustedProxies: trusted,
-	}, ids, log)
+	}
+	if cfg.Proxy.Auth == "local" {
+		// Local verification: the auth service over the same read-only
+		// store, writing nothing (no hash upgrades, no sessions) and
+		// auditing to the log only; failures stay in this process's log.
+		key, err := cryptoauth.ParseHandoffPrivate(string(cfg.Proxy.HandoffKey))
+		if err != nil {
+			return err
+		}
+		pcfg.Auth = authsvc.New(ids, nil, auditor.New(nil, log, nil), authsvc.Config{
+			CacheTTL: cfg.Cache.Credentials, ReadOnly: true, HandoffKey: key,
+		})
+	}
+	px := proxy.New(pcfg, ids, log)
 
 	errc := make(chan error, 8)
 	var closers []func(context.Context) error
@@ -103,7 +119,7 @@ func runProxy(cfg config.Config, log *slog.Logger) error {
 	msrv := app.HTTPServer(mgmt, httpx.ConnContext)
 	closers = append(closers, msrv.Shutdown)
 	start("management", func() error { return msrv.Serve(mln) })
-	log.Info("kittiwake starting", "version", app.Version, "modes", cfg.Modes, "ingress_tls", cfg.Proxy.IngressTLS)
+	log.Info("kittiwake starting", "version", app.Version, "modes", cfg.Modes, "auth", cfg.Proxy.Auth, "ingress_tls", cfg.Proxy.IngressTLS)
 
 	select {
 	case <-ctx.Done():

@@ -369,6 +369,49 @@ paths:
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/proxy-keys:
+    get:
+      tags: [admin]
+      summary: List the registered proxy keys (public keys of proxy sites that verify passwords themselves)
+      responses:
+        "200":
+          description: Proxy keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ProxyKey" } }
+    post:
+      tags: [admin]
+      summary: Register a proxy site's public key; backends then accept its handoff tokens in place of a password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, public_key]
+              properties:
+                name: { type: string, description: "Site name, unique" }
+                public_key: { type: string, description: "Base64 Ed25519 public key (kittiwake-admin proxy-key generate)" }
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/proxy-keys/{kid}:
+    parameters:
+      - { name: kid, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [admin]
+      summary: Remove a proxy key; backends stop accepting its handoffs within their key cache TTL
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/status:
     get:
       tags: [admin]
@@ -1568,6 +1611,13 @@ components:
         comment: { type: string }
         created: { type: string, format: date-time }
         last_used: { type: string, format: date-time }
+    ProxyKey:
+      type: object
+      properties:
+        id: { type: string, description: "Derived from the public key" }
+        name: { type: string }
+        public_key: { type: string, description: "Base64 Ed25519 public key" }
+        created: { type: string, format: date-time }
     Destination:
       type: object
       description: Exactly one of mailbox_id or address

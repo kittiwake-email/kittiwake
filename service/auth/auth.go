@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -58,6 +59,13 @@ type Config struct {
 	// CacheTTL caches successful credential verifications (password and
 	// API token) so repeated requests skip RADOS and argon2id. 0 disables.
 	CacheTTL time.Duration
+	// ReadOnly: the service runs in a proxy that never writes (README
+	// "Proxies"): no hash upgrades, no sessions; the audit sink should
+	// be log-only.
+	ReadOnly bool
+	// HandoffKey signs handoff tokens for backends after a local
+	// verification (proxy.auth local); nil in backends.
+	HandoffKey ed25519.PrivateKey
 }
 
 // Service is the auth service.
@@ -77,6 +85,11 @@ type Service struct {
 	keysAt    time.Time
 	keysValid bool
 
+	proxyMu    sync.Mutex
+	proxyKeys  map[string]identity.ProxyKey // by id
+	proxyAt    time.Time
+	proxyValid bool
+
 	cache credCache
 }
 
@@ -91,28 +104,37 @@ type credCache struct {
 }
 
 type credEntry struct {
-	actor actor.Actor
-	at    time.Time
+	v  Verified
+	at time.Time
+}
+
+// Verified is a successful password verification: the actor, and what
+// a proxy needs to hand the client over (which password matched, and
+// whether its hash is due for an upgrade, which only a backend can do).
+type Verified struct {
+	Actor      actor.Actor
+	PasswordID string
+	Upgrade    bool
 }
 
 const maxCredEntries = 20000
 
-func (c *credCache) get(key string, now time.Time, ttl time.Duration) (actor.Actor, bool) {
+func (c *credCache) get(key string, now time.Time, ttl time.Duration) (Verified, bool) {
 	if ttl <= 0 {
-		return actor.Actor{}, false
+		return Verified{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
-	if !ok || now.Sub(e.at) >= ttl || (!e.actor.ExpiresAt.IsZero() && !now.Before(e.actor.ExpiresAt)) {
-		return actor.Actor{}, false
+	if !ok || now.Sub(e.at) >= ttl || (!e.v.Actor.ExpiresAt.IsZero() && !now.Before(e.v.Actor.ExpiresAt)) {
+		return Verified{}, false
 	}
-	a := e.actor
-	a.Roles = append([]string(nil), e.actor.Roles...)
-	return a, true
+	v := e.v
+	v.Actor.Roles = append([]string(nil), e.v.Actor.Roles...)
+	return v, true
 }
 
-func (c *credCache) put(key string, a actor.Actor, now time.Time, ttl time.Duration) {
+func (c *credCache) put(key string, v Verified, now time.Time, ttl time.Duration) {
 	if ttl <= 0 {
 		return
 	}
@@ -126,9 +148,9 @@ func (c *credCache) put(key string, a actor.Actor, now time.Time, ttl time.Durat
 		c.entries = map[string]credEntry{}
 		c.byAcct = map[uuid.UUID][]string{}
 	}
-	c.entries[key] = credEntry{actor: a, at: now}
-	if a.AccountID != uuid.Nil {
-		c.byAcct[a.AccountID] = append(c.byAcct[a.AccountID], key)
+	c.entries[key] = credEntry{v: v, at: now}
+	if v.Actor.AccountID != uuid.Nil {
+		c.byAcct[v.Actor.AccountID] = append(c.byAcct[v.Actor.AccountID], key)
 	}
 }
 
@@ -625,12 +647,12 @@ func (s *Service) VerifyAccessToken(ctx context.Context, token string) (actor.Ac
 // VerifyAPIToken validates a long-lived API token and returns the actor.
 // Successful verifications are cached for Config.CacheTTL.
 func (s *Service) VerifyAPIToken(ctx context.Context, token string) (actor.Actor, error) {
-	if a, ok := s.cache.get(tokenKey(token), s.Now(), s.cfg.CacheTTL); ok {
-		return a, nil
+	if v, ok := s.cache.get(tokenKey(token), s.Now(), s.cfg.CacheTTL); ok {
+		return v.Actor, nil
 	}
 	a, err := s.verifyAPIToken(ctx, token)
 	if err == nil {
-		s.cache.put(tokenKey(token), a, s.Now(), s.cfg.CacheTTL)
+		s.cache.put(tokenKey(token), Verified{Actor: a}, s.Now(), s.cfg.CacheTTL)
 	}
 	return a, err
 }
@@ -700,24 +722,32 @@ func (s *Service) VerifyBearer(ctx context.Context, token string) (actor.Actor, 
 // TOTP-enabled account is refused with ErrTOTPRequired; application
 // passwords always work.
 func (s *Service) VerifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error) {
-	key := identity.ServiceFor(proto) + ":" + passwordKey(strings.ToLower(strings.TrimSpace(username)), password)
-	if a, ok := s.cache.get(key, s.Now(), s.cfg.CacheTTL); ok {
-		a.Protocol, a.ClientIP = proto, clientIP
-		return a, nil
-	}
-	a, err := s.verifyPassword(ctx, username, password, proto, clientIP)
-	if err == nil {
-		s.cache.put(key, a, s.Now(), s.cfg.CacheTTL)
-	}
-	return a, err
+	v, err := s.CheckPassword(ctx, username, password, proto, clientIP)
+	return v.Actor, err
 }
 
-func (s *Service) verifyPassword(ctx context.Context, username, password, proto, clientIP string) (actor.Actor, error) {
+// CheckPassword is VerifyPassword with the details a proxy needs to hand
+// the client over (Verified). In a ReadOnly service a hash due for an
+// upgrade is reported, not rewritten.
+func (s *Service) CheckPassword(ctx context.Context, username, password, proto, clientIP string) (Verified, error) {
+	key := identity.ServiceFor(proto) + ":" + passwordKey(strings.ToLower(strings.TrimSpace(username)), password)
+	if v, ok := s.cache.get(key, s.Now(), s.cfg.CacheTTL); ok {
+		v.Actor.Protocol, v.Actor.ClientIP = proto, clientIP
+		return v, nil
+	}
+	v, err := s.verifyPassword(ctx, username, password, proto, clientIP)
+	if err == nil {
+		s.cache.put(key, v, s.Now(), s.cfg.CacheTTL)
+	}
+	return v, err
+}
+
+func (s *Service) verifyPassword(ctx context.Context, username, password, proto, clientIP string) (Verified, error) {
 	auditCtx := actor.With(ctx, actor.Actor{Username: strings.ToLower(strings.TrimSpace(username)), Protocol: proto, ClientIP: clientIP, Credential: "password"})
-	fail := func(detail string, err error) (actor.Actor, error) {
+	fail := func(detail string, err error) (Verified, error) {
 		metrics.Auth.WithLabelValues(proto, "failed").Inc()
 		s.audit.Log(auditCtx, auditor.Event{Action: "login-failed", Detail: detail, Result: audit.ResultDenied})
-		return actor.Actor{}, err
+		return Verified{}, err
 	}
 	acct, err := s.ids.GetAccountByUsernameCached(ctx, username)
 	if err != nil {
@@ -725,7 +755,7 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 			_, _ = cryptoauth.VerifyPassword(dummyHash, password)
 			return fail("unknown account", ErrInvalidCredentials)
 		}
-		return actor.Actor{}, err
+		return Verified{}, err
 	}
 	pw, ok := s.matchPassword(&acct, password)
 	if !ok {
@@ -753,16 +783,166 @@ func (s *Service) verifyPassword(ctx context.Context, username, password, proto,
 	}
 	metrics.Auth.WithLabelValues(proto, "ok").Inc()
 	s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: acct.MailboxID, Action: "login"})
-	if cryptoauth.NeedsRehash(pw.Hash) {
+	v := Verified{Actor: a, PasswordID: pw.ID, Upgrade: cryptoauth.NeedsRehash(pw.Hash)}
+	if v.Upgrade && !s.cfg.ReadOnly {
 		s.rehash(ctx, acct.ID, pw.ID, password)
 	}
+	return v, nil
+}
+
+// ---- proxy handoff ----
+
+// Handoff signs a handoff token for a verified login, for the proxy to
+// present to a backend in place of the password (XOAUTH2 on IMAP, POP3
+// and submission, Bearer on HTTP).
+func (s *Service) Handoff(v Verified, proto, clientIP string) (string, error) {
+	if s.cfg.HandoffKey == nil {
+		return "", errors.New("auth: no handoff key configured")
+	}
+	now := s.Now().UTC()
+	return cryptoauth.SignHandoff(s.cfg.HandoffKey, cryptoauth.Handoff{
+		AccountID: v.Actor.AccountID, Username: v.Actor.Username, PasswordID: v.PasswordID, Credential: v.Actor.Credential,
+		Service: handoffService(proto), ClientIP: clientIP, IssuedAt: now, ExpiresAt: now.Add(cryptoauth.HandoffLifetime),
+	})
+}
+
+// handoffService is what a handoff token is bound to: the protocol, with
+// the HTTP front ends (JMAP and the REST account endpoints, one
+// listener) as one.
+func handoffService(proto string) string {
+	switch proto {
+	case "jmap", "rest":
+		return "http"
+	}
+	return proto
+}
+
+// IsHandoff reports whether a token is a proxy handoff token.
+func IsHandoff(token string) bool { return strings.HasPrefix(token, cryptoauth.HandoffPrefix) }
+
+// VerifyHandoff accepts a handoff token from a proxy site whose key is
+// registered: the proxy verified the password, this process checks the
+// token's signature, age, binding to the client address and service,
+// and the account's current state, then writes the login audit record
+// as it would for the password itself.
+func (s *Service) VerifyHandoff(ctx context.Context, token, proto, clientIP string) (actor.Actor, error) {
+	auditCtx := actor.With(ctx, actor.Actor{Protocol: proto, ClientIP: clientIP, Credential: "password"})
+	fail := func(detail string, err error) (actor.Actor, error) {
+		metrics.Auth.WithLabelValues(proto, "failed").Inc()
+		s.audit.Log(auditCtx, auditor.Event{Action: "login-failed", Detail: "handoff: " + detail, Result: audit.ResultDenied})
+		return actor.Actor{}, err
+	}
+	var key identity.ProxyKey
+	keyFor := func(kid string) (ed25519.PublicKey, bool) {
+		k, ok := s.proxyKey(ctx, kid)
+		if ok {
+			key = k
+		}
+		return ed25519.PublicKey(k.PublicKey), ok
+	}
+	h, err := cryptoauth.VerifyHandoff(token, keyFor, s.Now())
+	if err != nil {
+		if errors.Is(err, cryptoauth.ErrTokenExpired) {
+			return fail("expired", ErrTokenExpired)
+		}
+		return fail(err.Error(), ErrInvalidToken)
+	}
+	if h.Service != handoffService(proto) {
+		return fail("service mismatch", ErrInvalidToken)
+	}
+	if subtle.ConstantTimeCompare([]byte(h.ClientIP), []byte(clientIP)) != 1 {
+		return fail("client address mismatch", ErrInvalidToken)
+	}
+	v, err := s.ids.GetAccount(ctx, h.AccountID)
+	if err != nil {
+		if errors.Is(err, identity.ErrNotFound) {
+			return fail("unknown account", ErrInvalidCredentials)
+		}
+		return actor.Actor{}, err
+	}
+	acct := v.Value
+	if !strings.EqualFold(acct.Username, h.Username) {
+		return fail("username mismatch", ErrInvalidCredentials)
+	}
+	var pw *identity.Password
+	for i := range acct.Passwords {
+		if acct.Passwords[i].ID == h.PasswordID && !acct.Passwords[i].Expired(s.Now()) {
+			pw = &acct.Passwords[i]
+		}
+	}
+	if pw == nil {
+		return fail("password gone", ErrInvalidCredentials)
+	}
+	if !acct.Enabled {
+		return fail("account disabled", ErrAccountDisabled)
+	}
+	if err := s.checkNamespace(ctx, &acct); err != nil {
+		return fail(err.Error(), err)
+	}
+	if !serviceAllowed(&acct, proto) {
+		return fail("service "+identity.ServiceFor(proto)+" not enabled", ErrServiceDisabled)
+	}
+	if totpRequired(&acct, pw) {
+		return fail("totp required", ErrTOTPRequired)
+	}
+	cred := "password"
+	if pw.Kind == identity.PasswordApplication {
+		cred = "app-password"
+	}
+	a := s.actorFor(&acct, acct.Roles, cred, "", "", proto, clientIP)
+	if pw.ExpiresAt != nil {
+		a.ExpiresAt = *pw.ExpiresAt
+	}
+	metrics.Auth.WithLabelValues(proto, "ok").Inc()
+	s.audit.Log(actor.With(ctx, a), auditor.Event{Mailbox: acct.MailboxID, Action: "login", Detail: "proxy=" + key.Name})
 	return a, nil
+}
+
+// proxyKey returns a registered proxy key by id, from a listing cached
+// for KeyCacheTTL; an unknown id reloads the listing once (a key
+// registered since).
+func (s *Service) proxyKey(ctx context.Context, id string) (identity.ProxyKey, bool) {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	for attempt := 0; attempt < 2; attempt++ {
+		if !s.proxyValid || s.Now().Sub(s.proxyAt) >= s.cfg.KeyCacheTTL {
+			list, err := s.ids.ListProxyKeys(ctx)
+			if err != nil {
+				return identity.ProxyKey{}, false
+			}
+			s.proxyKeys = make(map[string]identity.ProxyKey, len(list))
+			for _, k := range list {
+				s.proxyKeys[k.ID] = k
+			}
+			s.proxyAt, s.proxyValid = s.Now(), true
+		}
+		if k, ok := s.proxyKeys[id]; ok {
+			return k, true
+		}
+		s.proxyValid = false
+	}
+	return identity.ProxyKey{}, false
+}
+
+// InvalidateProxyKeys forces the next handoff to reload the proxy keys
+// (after a registration or removal in this process).
+func (s *Service) InvalidateProxyKeys() {
+	s.proxyMu.Lock()
+	s.proxyValid = false
+	s.proxyMu.Unlock()
 }
 
 // VerifyOAuthBearer authenticates IMAP/POP3 OAUTHBEARER/XOAUTH2: the token
 // must be a session access token (or API token) whose account matches the
 // presented username (if any).
 func (s *Service) VerifyOAuthBearer(ctx context.Context, username, token, proto, clientIP string) (actor.Actor, error) {
+	if IsHandoff(token) {
+		a, err := s.VerifyHandoff(ctx, token, proto, clientIP)
+		if err == nil && username != "" && !strings.EqualFold(username, a.Username) {
+			return actor.Actor{}, ErrInvalidCredentials
+		}
+		return a, err
+	}
 	a, err := s.VerifyBearer(ctx, token)
 	if err != nil {
 		s.audit.Log(actor.With(ctx, actor.Actor{Username: strings.ToLower(username), Protocol: proto, ClientIP: clientIP, Credential: "session"}),

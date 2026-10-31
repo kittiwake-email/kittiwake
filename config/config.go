@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"kittiwake/auth"
 )
 
 // Config is the whole configuration file.
@@ -178,6 +180,16 @@ type Proxy struct {
 	PreAuthTimeout time.Duration `yaml:"pre_auth_timeout"`
 	NodeTTL        time.Duration `yaml:"node_ttl"`
 	DownFor        time.Duration `yaml:"down_for"`
+	// Auth: "local" (default) verifies passwords at the proxy against
+	// the account's hashes and hands verified clients to the backend
+	// with a token signed by HandoffKey, so a wrong password never
+	// reaches a backend; "passthrough" replays every credential against
+	// the backend untouched and needs no hashes at the proxy.
+	Auth string `yaml:"auth"`
+	// HandoffKey is this proxy site's private Ed25519 key (base64 seed,
+	// from `kittiwake-admin proxy-key create|generate`); its public half
+	// is registered with the admin API. Required with auth local.
+	HandoffKey Secret `yaml:"handoff_key"`
 }
 
 // SMTP is the outbound relay.
@@ -509,6 +521,7 @@ func Default() Config {
 		},
 		Proxy: Proxy{
 			IngressTLS:     "strict",
+			Auth:           "local",
 			IngressPorts:   map[string]int{"imap": 993, "pop3": 995, "jmap": 443, "submission": 465, "lmtp": 24},
 			ConnectTimeout: 10 * time.Second, PreAuthTimeout: time.Minute, NodeTTL: 5 * time.Second, DownFor: 15 * time.Second,
 		},
@@ -595,6 +608,19 @@ func (c *Config) Validate() error {
 		if c.Database.DSN == "" && c.Database.ProxyDSN == "" {
 			return errors.New("config: the proxy mode needs database.proxy_dsn or database.dsn (a read-only user suffices)")
 		}
+		if c.Proxy.Auth == "local" {
+			if c.Proxy.HandoffKey == "" {
+				return errors.New("config: proxy.auth local needs proxy.handoff_key (kittiwake-admin proxy-key create <site>), or set proxy.auth to passthrough")
+			}
+			if _, err := auth.ParseHandoffPrivate(string(c.Proxy.HandoffKey)); err != nil {
+				return fmt.Errorf("config: proxy.handoff_key: %w", err)
+			}
+		}
+	}
+	switch c.Proxy.Auth {
+	case "local", "passthrough":
+	default:
+		return fmt.Errorf("config: proxy.auth must be local or passthrough, got %q", c.Proxy.Auth)
 	}
 	switch c.Proxy.IngressTLS {
 	case "strict", "insecure", "off":

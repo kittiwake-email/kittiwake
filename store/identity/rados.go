@@ -1283,6 +1283,70 @@ func (s *Rados) DeleteAdminToken(ctx context.Context, tokenID string) error {
 	return mapErr(err)
 }
 
+// ---- Proxy keys ----
+
+const proxyKeysObject = "_proxy-keys"
+
+// CreateProxyKey registers a proxy site's public key under a name.
+func (s *Rados) CreateProxyKey(ctx context.Context, name string, pub []byte) (ProxyKey, error) {
+	name, err := NormalizeProxyKey(name, pub)
+	if err != nil {
+		return ProxyKey{}, err
+	}
+	existing, err := s.ListProxyKeys(ctx)
+	if err != nil {
+		return ProxyKey{}, err
+	}
+	k := ProxyKey{ID: ProxyKeyID(pub), Name: name, PublicKey: append([]byte(nil), pub...), Created: s.Now().UTC()}
+	for _, e := range existing {
+		if e.ID == k.ID || e.Name == name {
+			return ProxyKey{}, fmt.Errorf("%w: proxy key %s", ErrExists, name)
+		}
+	}
+	data, err := json.Marshal(k)
+	if err != nil {
+		return ProxyKey{}, err
+	}
+	if _, err := s.tokens.Write(ctx, proxyKeysObject, rados.NewWriteTx().OmapSet(map[string][]byte{"key/" + k.ID: data})); err != nil {
+		return ProxyKey{}, mapErr(err)
+	}
+	return k, nil
+}
+
+// ListProxyKeys lists the registered proxy keys.
+func (s *Rados) ListProxyKeys(ctx context.Context) ([]ProxyKey, error) {
+	kv, _, err := listOmap(ctx, s.tokens, proxyKeysObject, "key/", "", 0)
+	if err != nil {
+		return nil, err
+	}
+	out := []ProxyKey{}
+	for _, e := range kv {
+		var k ProxyKey
+		if err := json.Unmarshal(e.Value, &k); err != nil {
+			return nil, fmt.Errorf("identity: decode proxy key %s: %w", e.Key, err)
+		}
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// DeleteProxyKey removes a proxy key by id.
+func (s *Rados) DeleteProxyKey(ctx context.Context, id string) error {
+	m, err := s.tokens.OmapGet(ctx, proxyKeysObject, []string{"key/" + id})
+	if err != nil {
+		if errors.Is(err, rados.ErrNotFound) {
+			return ErrNotFound
+		}
+		return mapErr(err)
+	}
+	if _, ok := m["key/"+id]; !ok {
+		return ErrNotFound
+	}
+	_, err = s.tokens.Write(ctx, proxyKeysObject, rados.NewWriteTx().OmapRemove("key/"+id))
+	return mapErr(err)
+}
+
 // LookupToken resolves a presented token to its record. It does not check
 // expiry; callers do, so they can report it distinctly.
 func (s *Rados) LookupToken(ctx context.Context, secret string) (Versioned[Token], error) {

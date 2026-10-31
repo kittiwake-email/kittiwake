@@ -105,10 +105,16 @@ Proxies (README "Proxies"): `proto/proxy` fronts IMAP, POP3, submission and JMAP
 the domain of the login name (`Server.Route`; tokens via `RouteAccount` and
 `identity.AccountDomain`, the only account read), replays the untouched credential against
 a node from the registry or the namespace's `Ingress` (`dialer`, PROXY v2 first, then TLS
-per policy) and splices. The proxy process (`cmd/kittiwake/proxy.go`) never writes to the
-database and runs alone (`config.Validate`); keep every read it makes answerable from
-`namespaces`, `domains`, `nodes`, `tokens` and the non-secret `accounts` columns, and keep
-its refusals in the backends' vocabulary. Its tests run real backends on the memory backend.
+per policy) and splices. `proxy.auth local` (`local.go`) verifies the password at the proxy
+with a read-only `auth.Service` (`CheckPassword`, no rehash, log-only auditor) and hands the
+client over with a handoff token (`auth.SignHandoff`, verified by `auth.Service.VerifyHandoff`
+against the registered `identity.ProxyKey` list on IMAP/POP3/submission XOAUTH2 and HTTP
+Bearer); `passthrough` replays the credential. The proxy process (`cmd/kittiwake/proxy.go`)
+never writes to the database and runs alone (`config.Validate`); keep every read it makes
+answerable from the grants README "Proxies" lists per mode, and keep its refusals in the
+backends' vocabulary (the texts in `local.go` mirror `proto/imap`, `proto/pop3` and
+`proto/submission`; change them together). Its tests run real backends on the memory
+backend in both modes.
 
 ## What this is
 

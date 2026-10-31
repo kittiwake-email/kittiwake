@@ -13,12 +13,15 @@ import (
 
 // ServeIMAP fronts IMAP: it answers CAPABILITY, NOOP and LOGOUT itself,
 // reads the login name out of LOGIN or the AUTHENTICATE initial response,
-// and replays the exact login against a server of the namespace.
+// and replays the exact login against a server of the namespace, or
+// verifies the password here and hands the client over (local mode).
 func (s *Server) ServeIMAP(l net.Listener) error {
 	return s.serveTCP(l, ProtoIMAP, s.handleIMAP)
 }
 
 func imapCaps() string { return strings.Join(imap.Capabilities, " ") }
+
+const imapUnavailable = " NO [UNAVAILABLE] No server available for this mailbox, try again later"
 
 func (s *Server) handleIMAP(c net.Conn) {
 	cl := newLineConn(c)
@@ -55,6 +58,12 @@ func (s *Server) handleIMAP(c net.Conn) {
 				_ = cl.send(tag + " BAD " + err.Error())
 				continue
 			}
+			if s.local() {
+				if s.imapLocal(cl, info, tag, args[0], args[1]) {
+					return
+				}
+				continue
+			}
 			if s.imapLogin(cl, info, tag, args[0], func(be *lineConn) error {
 				return be.write(imapLoginCommand(tag, args[0], args[1]))
 			}) {
@@ -89,6 +98,18 @@ func (s *Server) handleIMAP(c net.Conn) {
 				_ = cl.send(tag + " BAD Malformed SASL response")
 				continue
 			}
+			if s.local() && mech == "PLAIN" {
+				user, pass, ok := saslPlain(raw)
+				if !ok {
+					_ = cl.send(tag + " NO [AUTHENTICATIONFAILED] Authentication failed")
+					s.result(ProtoIMAP, "refused", "", info, Target{}, ErrBadCredentialFormat)
+					continue
+				}
+				if s.imapLocal(cl, info, tag, user, pass) {
+					return
+				}
+				continue
+			}
 			username, ok := saslUsername(mech, raw)
 			if !ok {
 				_ = cl.send(tag + " NO [AUTHENTICATIONFAILED] Authentication failed")
@@ -110,22 +131,67 @@ func (s *Server) handleIMAP(c net.Conn) {
 	}
 }
 
-// imapLogin routes username, replays the login with send against the
-// backend and relays the exchange until the tagged reply. On success the
-// connection is spliced and true is returned (the client loop ends); on
-// failure the client gets the backend's reply and may try again.
-func (s *Server) imapLogin(cl *lineConn, info client, tag, username string, send func(be *lineConn) error) bool {
+// imapLocal verifies the password here, refuses a failure in the
+// backend's words and hands a success over with a handoff token (or the
+// password itself when its hash is due for an upgrade).
+func (s *Server) imapLocal(cl *lineConn, info client, tag, username, password string) bool {
 	ctx := context.Background()
 	t, err := s.Route(ctx, username)
 	if err != nil {
-		code, text, outcome := imapRouteError(err)
+		return s.imapRouteRefused(cl, info, tag, username, t, err)
+	}
+	v, err := s.localVerify(ctx, ProtoIMAP, username, password, info)
+	if err != nil {
+		code, text := imapAuthError(err)
 		_ = cl.send(tag + " NO [" + code + "] " + text)
-		s.result(ProtoIMAP, outcome, username, info, t, err)
+		s.result(ProtoIMAP, "refused", username, info, t, err)
 		return false
 	}
+	if v.Upgrade {
+		return s.imapRelay(cl, info, t, tag, username, false, func(be *lineConn) error {
+			return be.write(imapLoginCommand(tag, username, password))
+		})
+	}
+	ir, err := s.handoffIR(v, ProtoIMAP, info)
+	if err != nil {
+		_ = cl.send(tag + imapUnavailable)
+		s.result(ProtoIMAP, "error", username, info, t, err)
+		return false
+	}
+	return s.imapRelay(cl, info, t, tag, username, true, func(be *lineConn) error {
+		return be.send(tag + " AUTHENTICATE XOAUTH2 " + encodeB64(ir))
+	})
+}
+
+func (s *Server) imapRouteRefused(cl *lineConn, info client, tag, username string, t Target, err error) bool {
+	code, text, outcome := imapRouteError(err)
+	_ = cl.send(tag + " NO [" + code + "] " + text)
+	s.result(ProtoIMAP, outcome, username, info, t, err)
+	return false
+}
+
+// imapLogin routes username and replays the login with send against the
+// backend (pass-through).
+func (s *Server) imapLogin(cl *lineConn, info client, tag, username string, send func(be *lineConn) error) bool {
+	t, err := s.Route(context.Background(), username)
+	if err != nil {
+		return s.imapRouteRefused(cl, info, tag, username, t, err)
+	}
+	return s.imapRelay(cl, info, t, tag, username, false, send)
+}
+
+// imapRelay opens the backend, sends the login and relays the exchange
+// until the tagged reply. On success the connection is spliced and true
+// is returned (the client loop ends); on failure the client gets the
+// backend's reply and may try again. With handoff set the login is the
+// proxy's own (a handoff token): its continuation requests are answered
+// here and a refusal is reported as unavailable, since it means the
+// backend does not trust this proxy, not that the client was wrong.
+func (s *Server) imapRelay(cl *lineConn, info client, t Target, tag, username string, handoff bool, send func(be *lineConn) error) bool {
+	ctx := context.Background()
 	conn, err := s.connect(ctx, ProtoIMAP, t, username, info)
 	if err != nil {
-		_ = cl.send(tag + " NO [UNAVAILABLE] No server available for this mailbox, try again later")
+		_ = cl.send(tag + imapUnavailable)
 		s.result(ProtoIMAP, "no-backend", username, info, t, err)
 		return false
 	}
@@ -134,14 +200,14 @@ func (s *Server) imapLogin(cl *lineConn, info client, tag, username string, send
 	greeting, err := be.readLine()
 	if err != nil || !strings.HasPrefix(greeting, "* OK") && !strings.HasPrefix(greeting, "* PREAUTH") {
 		_ = be.Close()
-		_ = cl.send(tag + " NO [UNAVAILABLE] No server available for this mailbox, try again later")
+		_ = cl.send(tag + imapUnavailable)
 		s.result(ProtoIMAP, "no-backend", username, info, t, fmt.Errorf("backend greeting %q: %v", greeting, err))
 		return false
 	}
 	be.deadline(s.cfg.PreAuthTimeout)
 	if err := send(be); err != nil {
 		_ = be.Close()
-		_ = cl.send(tag + " NO [UNAVAILABLE] No server available for this mailbox, try again later")
+		_ = cl.send(tag + imapUnavailable)
 		s.result(ProtoIMAP, "no-backend", username, info, t, err)
 		return false
 	}
@@ -155,11 +221,20 @@ func (s *Server) imapLogin(cl *lineConn, info client, tag, username string, send
 			s.result(ProtoIMAP, "error", username, info, t, err)
 			return false
 		}
-		if err := cl.send(line); err != nil {
-			_ = be.Close()
-			return true
-		}
 		if strings.HasPrefix(line, "+") {
+			if handoff {
+				if err := be.send(""); err != nil {
+					_ = be.Close()
+					_ = cl.send(tag + imapUnavailable)
+					s.result(ProtoIMAP, "error", username, info, t, err)
+					return false
+				}
+				continue
+			}
+			if err := cl.send(line); err != nil {
+				_ = be.Close()
+				return true
+			}
 			resp, err := cl.readLine()
 			if err != nil {
 				_ = be.Close()
@@ -175,11 +250,25 @@ func (s *Server) imapLogin(cl *lineConn, info client, tag, username string, send
 			status := strings.ToUpper(strings.SplitN(line[len(tag)+1:], " ", 2)[0])
 			if status != "OK" {
 				_ = be.Close()
+				if handoff {
+					_ = cl.send(tag + " NO [UNAVAILABLE] The server refused the proxied login, try again later")
+					s.result(ProtoIMAP, "handoff-refused", username, info, t, errors.New(line))
+					return false
+				}
+				_ = cl.send(line)
 				s.result(ProtoIMAP, "refused", username, info, t, errors.New(line))
 				return false
 			}
+			if err := cl.send(line); err != nil {
+				_ = be.Close()
+				return true
+			}
 			s.result(ProtoIMAP, "routed", username, info, t, nil)
 			splice(cl, be)
+			return true
+		}
+		if err := cl.send(line); err != nil {
+			_ = be.Close()
 			return true
 		}
 	}

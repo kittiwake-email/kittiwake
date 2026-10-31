@@ -4,6 +4,8 @@
 package identity
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -452,4 +454,36 @@ func ServesNamespace(served []string, namespace string) bool {
 type Versioned[T any] struct {
 	Value   T
 	Version uint64
+}
+
+// ProxyKey is the registered public key of a proxy site that verifies
+// passwords itself (proxy.auth local) and hands clients to the backends
+// with a token signed by the private half (README "Proxies"). The id is
+// derived from the key (ProxyKeyID), so the proxy and the registry agree
+// on it without being told.
+type ProxyKey struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	PublicKey []byte    `json:"public_key"` // 32-byte Ed25519 public key
+	Created   time.Time `json:"created"`
+}
+
+// ProxyKeyID names a key by its public half: 16 hex characters of its
+// SHA-256 (the same derivation as auth.HandoffKeyID).
+func ProxyKeyID(pub []byte) string {
+	sum := sha256.Sum256(pub)
+	return hex.EncodeToString(sum[:8])
+}
+
+// NormalizeProxyKey validates a key registration: a name of 1..64
+// printable characters and a 32-byte public key.
+func NormalizeProxyKey(name string, pub []byte) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 64 || strings.ContainsAny(name, " \t\r\n") {
+		return "", fmt.Errorf("%w: proxy key name must be 1..64 characters without spaces", ErrInvalid)
+	}
+	if len(pub) != 32 {
+		return "", fmt.Errorf("%w: proxy key must be a 32-byte Ed25519 public key", ErrInvalid)
+	}
+	return name, nil
 }

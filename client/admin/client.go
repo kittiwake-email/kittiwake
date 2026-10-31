@@ -606,6 +606,27 @@ func (c *Client) DeleteAdminToken(ctx context.Context, tokenID string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/admin/tokens/"+pathEscape(tokenID), nil, nil, "", nil)
 }
 
+// ---- proxy keys ----
+
+// CreateProxyKey registers the public key of a proxy site.
+func (c *Client) CreateProxyKey(ctx context.Context, req ProxyKeyRequest) (ProxyKey, error) {
+	var out ProxyKey
+	return out, c.do(ctx, http.MethodPost, "/v1/admin/proxy-keys", nil, req, "", &out)
+}
+
+// ListProxyKeys lists the registered proxy keys.
+func (c *Client) ListProxyKeys(ctx context.Context) ([]ProxyKey, error) {
+	var out struct {
+		Items []ProxyKey `json:"items"`
+	}
+	return out.Items, c.do(ctx, http.MethodGet, "/v1/admin/proxy-keys", nil, nil, "", &out)
+}
+
+// DeleteProxyKey removes a proxy key.
+func (c *Client) DeleteProxyKey(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/admin/proxy-keys/"+pathEscape(id), nil, nil, "", nil)
+}
+
 // ---- aliases ----
 
 // CreateAlias creates an alias ("@domain" address = catch-all).

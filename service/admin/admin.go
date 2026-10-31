@@ -1068,6 +1068,43 @@ func (s *Service) DeleteAdminToken(ctx context.Context, id string) error {
 	return nil
 }
 
+// ---- proxy keys ----
+
+// CreateProxyKey registers the public key of a proxy site that verifies
+// passwords itself (platform-level; README "Proxies").
+func (s *Service) CreateProxyKey(ctx context.Context, name string, pub []byte) (identity.ProxyKey, error) {
+	if err := s.authorizeGlobal(ctx, "proxy-key-create", name); err != nil {
+		return identity.ProxyKey{}, err
+	}
+	k, err := s.ids.CreateProxyKey(ctx, name, pub)
+	if err != nil {
+		return identity.ProxyKey{}, s.fail(ctx, uuid.Nil, "proxy-key-create", name, err)
+	}
+	s.ok(ctx, uuid.Nil, "proxy-key-create", k.ID, "name="+k.Name)
+	return k, nil
+}
+
+// ListProxyKeys lists the registered proxy keys (platform-level).
+func (s *Service) ListProxyKeys(ctx context.Context) ([]identity.ProxyKey, error) {
+	if err := s.authorizeReadGlobal(ctx, "proxy-key-list", ""); err != nil {
+		return nil, err
+	}
+	return s.ids.ListProxyKeys(ctx)
+}
+
+// DeleteProxyKey removes a proxy key; backends stop accepting its
+// handoffs within their key cache TTL.
+func (s *Service) DeleteProxyKey(ctx context.Context, id string) error {
+	if err := s.authorizeGlobal(ctx, "proxy-key-delete", id); err != nil {
+		return err
+	}
+	if err := s.ids.DeleteProxyKey(ctx, id); err != nil {
+		return s.fail(ctx, uuid.Nil, "proxy-key-delete", id, err)
+	}
+	s.ok(ctx, uuid.Nil, "proxy-key-delete", id, "")
+	return nil
+}
+
 // Bootstrap mints the first full admin token. It refuses when admin tokens
 // already exist, so it cannot be used to sneak in a token later (use
 // `kittiwake admin token`, which is also audited, for recovery).

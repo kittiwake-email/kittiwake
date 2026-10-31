@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	cryptoauth "kittiwake/auth"
 	"kittiwake/client/admin"
 )
 
@@ -1515,4 +1517,89 @@ func (a *cli) backup(args []string) error {
 		})
 	}
 	return fmt.Errorf("unknown backup subcommand %q\nusage: kittiwake-admin %s", args[0], u)
+}
+
+// proxyKey manages the keys of proxy sites that verify passwords
+// themselves (README "Proxies"). create generates the key pair here
+// unless --public-key hands in one generated elsewhere; the private key
+// is printed once, for the proxy's proxy.handoff_key.
+func (a *cli) proxyKey(args []string) error {
+	const u = `proxy-key create <name> [--public-key base64]   register a site; without --public-key a key pair is generated and the private key printed once
+       proxy-key list
+       proxy-key delete <id>
+       proxy-key generate                              print a key pair without registering it (register the public key with create --public-key)`
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("usage: kittiwake-admin " + u)
+		return nil
+	}
+	switch args[0] {
+	case "generate":
+		priv, err := cryptoauth.NewHandoffKey()
+		if err != nil {
+			return err
+		}
+		pub := priv.Public().(ed25519.PublicKey)
+		out := map[string]string{"id": cryptoauth.HandoffKeyID(pub), "public_key": cryptoauth.EncodeHandoffPublic(pub), "private_key": cryptoauth.EncodeHandoffPrivate(priv)}
+		return emit(out, func() {
+			fmt.Printf("id:          %s\npublic key:  %s\nprivate key: %s\n", out["id"], out["public_key"], out["private_key"])
+			fmt.Println("Put the private key in the proxy's proxy.handoff_key and register the public key with proxy-key create --public-key.")
+		})
+	case "create":
+		fs := newFlagSet("proxy-key create")
+		pubText := fs.String("public-key", "", "base64 Ed25519 public key generated on the proxy (default: generate a pair here)")
+		pos, rest, err := splitArgs(args[1:], 1, u)
+		if err != nil {
+			return err
+		}
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		var priv ed25519.PrivateKey
+		if *pubText == "" {
+			if priv, err = cryptoauth.NewHandoffKey(); err != nil {
+				return err
+			}
+			*pubText = cryptoauth.EncodeHandoffPublic(priv.Public().(ed25519.PublicKey))
+		}
+		k, err := a.c.CreateProxyKey(a.ctx, admin.ProxyKeyRequest{Name: pos[0], PublicKey: *pubText})
+		if err != nil {
+			return err
+		}
+		type created struct {
+			admin.ProxyKey
+			PrivateKey string `json:"private_key,omitempty"`
+		}
+		out := created{ProxyKey: k}
+		if priv != nil {
+			out.PrivateKey = cryptoauth.EncodeHandoffPrivate(priv)
+		}
+		return emit(out, func() {
+			fmt.Printf("id:          %s\nname:        %s\npublic key:  %s\n", k.ID, k.Name, k.PublicKey)
+			if out.PrivateKey != "" {
+				fmt.Printf("private key: %s\n", out.PrivateKey)
+				fmt.Println("The private key is shown once; put it in the proxy's proxy.handoff_key.")
+			}
+		})
+	case "list":
+		list, err := a.c.ListProxyKeys(a.ctx)
+		if err != nil {
+			return err
+		}
+		return emit(list, func() {
+			var rows [][]string
+			for _, k := range list {
+				rows = append(rows, []string{k.ID, k.Name, k.PublicKey, fmtTime(k.Created)})
+			}
+			table([]string{"ID", "NAME", "PUBLIC KEY", "CREATED"}, rows)
+		})
+	case "delete":
+		if len(args) != 2 {
+			return errors.New("usage: kittiwake-admin proxy-key delete <id>")
+		}
+		if err := a.c.DeleteProxyKey(a.ctx, args[1]); err != nil {
+			return err
+		}
+		return ok("removed proxy key " + args[1])
+	}
+	return fmt.Errorf("unknown proxy-key subcommand %q\nusage: kittiwake-admin %s", args[0], u)
 }
