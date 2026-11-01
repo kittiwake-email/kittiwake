@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnvOverrides(t *testing.T) {
@@ -21,6 +22,11 @@ func TestEnvOverrides(t *testing.T) {
 		"KITTIWAKE_BACKUP_TARGET":                "filesystem",
 		"KITTIWAKE_BACKUP_DIRECTORY":             "/var/lib/kittiwake/backups",
 		"KITTIWAKE_BACKUP_KEY":                   strings.Repeat("ab", 32),
+		"KITTIWAKE_BACKUP_PREFIX":                "lab/",
+		"KITTIWAKE_BACKUP_LOCK":                  "false",
+		"KITTIWAKE_BACKUP_INTERVAL":              "12h",
+		"KITTIWAKE_BACKUP_MIN_INTERVAL":          "1m",
+		"KITTIWAKE_BACKUP_RETENTION":             "168h",
 		"KITTIWAKE_LOG_FORMAT":                   "text",
 		"KITTIWAKE_LOG_LEVEL":                    "",    // empty: ignored
 		"KITTIWAKE_PROXY_HANDOFF_KEY":            "   ", // blank: ignored
@@ -51,6 +57,9 @@ func TestEnvOverrides(t *testing.T) {
 	if cfg.Backup.Target != "filesystem" || cfg.Backup.Directory == "" || len(cfg.Backup.Keys) != 1 || cfg.Backup.Keys[0].ID != 1 || cfg.Backup.CurrentKey != 1 {
 		t.Fatalf("backup: %+v", cfg.Backup.BackupTarget)
 	}
+	if cfg.Backup.Prefix != "lab/" || cfg.Backup.Lock || cfg.Backup.Interval != 12*time.Hour || cfg.Backup.MinInterval != time.Minute || cfg.Backup.Retention != 168*time.Hour {
+		t.Fatalf("backup policy: %+v", cfg.Backup)
+	}
 	if cfg.Log.Format != "text" || cfg.Log.Level != "warn" || cfg.Proxy.HandoffKey != "" {
 		t.Fatalf("log/handoff: %+v %q", cfg.Log, cfg.Proxy.HandoffKey)
 	}
@@ -60,6 +69,9 @@ func TestEnvOverrides(t *testing.T) {
 	}
 	if _, err := ParseEnv(nil, func(k string) (string, bool) { return "bogus", k == "KITTIWAKE_MODES" }); err == nil || !strings.Contains(err.Error(), "unknown mode") {
 		t.Fatalf("bad mode: %v", err)
+	}
+	if _, err := ParseEnv(nil, func(k string) (string, bool) { return "soon", k == "KITTIWAKE_BACKUP_INTERVAL" }); err == nil || !strings.Contains(err.Error(), "KITTIWAKE_BACKUP_INTERVAL") {
+		t.Fatalf("bad duration: %v", err)
 	}
 	// Parse ignores the process environment.
 	t.Setenv("KITTIWAKE_LOG_FORMAT", "text")

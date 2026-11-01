@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Environment overrides (README "Containers"): a set KITTIWAKE_* variable
@@ -61,6 +62,11 @@ var EnvVars = []EnvVar{
 		return nil
 	}},
 	{"KITTIWAKE_BACKUP_SPOOL_DIR", "backup.spool_dir", func(c *Config, v string) error { c.Backup.SpoolDir = v; return nil }},
+	{"KITTIWAKE_BACKUP_PREFIX", "backup.prefix: prepended to every key on the target", func(c *Config, v string) error { c.Backup.Prefix = v; return nil }},
+	{"KITTIWAKE_BACKUP_LOCK", "backup.lock: object lock retention on the target (true/false)", boolSet(func(c *Config, b bool) { c.Backup.Lock = b })},
+	{"KITTIWAKE_BACKUP_INTERVAL", "backup.interval between runs of a mailbox, e.g. 24h", durationSet(func(c *Config, d time.Duration) { c.Backup.Interval = d })},
+	{"KITTIWAKE_BACKUP_MIN_INTERVAL", "backup.min_interval: the floor of every per-mailbox interval", durationSet(func(c *Config, d time.Duration) { c.Backup.MinInterval = d })},
+	{"KITTIWAKE_BACKUP_RETENTION", "backup.retention of runs on the target, e.g. 2160h", durationSet(func(c *Config, d time.Duration) { c.Backup.Retention = d })},
 	{"KITTIWAKE_LOG_LEVEL", "log.level: debug, info, warn or error", func(c *Config, v string) error { c.Log.Level = v; return nil }},
 	{"KITTIWAKE_LOG_FORMAT", "log.format: json or text", func(c *Config, v string) error { c.Log.Format = v; return nil }},
 }
@@ -100,6 +106,17 @@ func list(v string) []string {
 		}
 	}
 	return out
+}
+
+func durationSet(f func(*Config, time.Duration)) func(*Config, string) error {
+	return func(c *Config, v string) error {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("%q is not a duration such as 30m or 24h", v)
+		}
+		f(c, d)
+		return nil
+	}
 }
 
 func boolSet(f func(*Config, bool)) func(*Config, string) error {
