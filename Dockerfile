@@ -1,4 +1,4 @@
-# Kittiwake container image (README "Containers"): one image runs any mode.
+# Kittiwake container image (ARCHITECTURE.md "Containers"): one image runs any mode.
 # The mode comes from KITTIWAKE_MODES (one per container), everything else
 # from contrib/docker/kittiwake.yaml and the KITTIWAKE_* environment
 # (config/env.go). Containers get their own address on an IPv6-routed

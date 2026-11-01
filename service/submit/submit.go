@@ -1,7 +1,7 @@
 // Package submit sends outbound mail: it validates the sender identity,
 // relays the message to the configured SMTP host and stores a copy in the
 // Sent folder. JMAP EmailSubmission is a thin adapter over it. See
-// README.md "Sending mail".
+// ARCHITECTURE.md "Sending mail".
 package submit
 
 import (

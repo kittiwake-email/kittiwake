@@ -1,5 +1,5 @@
 // Package auditor writes audit records to the structured log and to the
-// audit store, taking the actor from the context. See README.md "Auditing".
+// audit store, taking the actor from the context. See ARCHITECTURE.md "Auditing".
 package auditor
 
 import (

@@ -1,6 +1,6 @@
 // Package proxyproto wraps a net.Listener so accepted connections parse the
 // HAProxy PROXY protocol (v1 and v2) and report the real client address.
-// See README.md "Client IP passthrough".
+// See ARCHITECTURE.md "Client IP passthrough".
 package proxyproto
 
 import (

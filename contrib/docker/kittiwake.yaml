@@ -1,4 +1,4 @@
-# Configuration baked into the container image (README "Containers").
+# Configuration baked into the container image (ARCHITECTURE.md "Containers").
 # One container runs one mode (KITTIWAKE_MODES), has its own address, and
 # listens on the standard ports; the management endpoint (metrics, health,
 # /storage) is [::]:9090 in every mode. Everything deployment-specific

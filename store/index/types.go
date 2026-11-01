@@ -1,7 +1,7 @@
 // Package index persists the per-mailbox index in the RADOS index pool:
 // the mailbox root object (collections, counters, quota usage), one folder
 // index object per folder (omap keyed by UID), the change log, the retention
-// set and the message-id/thread maps. See README.md "Mailbox index".
+// set and the message-id/thread maps. See ARCHITECTURE.md "Mailbox index".
 package index
 
 import (

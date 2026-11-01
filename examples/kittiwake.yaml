@@ -6,7 +6,7 @@
 # runs `serve --modes <mode>`), so the line is left out there.
 # modes: [lmtp, jmap, admin, socketmap]
 
-# Namespaces this process serves (tenant isolation, see README "Namespaces").
+# Namespaces this process serves (tenant isolation, see ARCHITECTURE.md "Namespaces").
 # Empty or absent: every namespace. A restricted process connects only to its
 # namespaces' storage, takes only their tasks and refuses logins and deliveries
 # for mailboxes elsewhere, so IMAP, POP3, JMAP, workers and backup nodes can be
@@ -23,7 +23,7 @@ database:
   # this process reads from the primary for read_stickiness so it sees its
   # own changes despite replication lag.
   # read_dsn: "kittiwake:${KITTIWAKE_DB_PASSWORD}@unix(/run/mysqld/mysqld.sock)/kittiwake"
-  # proxy_dsn: the proxy mode's read-only user (README "Proxies" lists its grants)
+  # proxy_dsn: the proxy mode's read-only user (ARCHITECTURE.md "Proxies" lists its grants)
   # proxy_dsn: "kittiwake_proxy:${KITTIWAKE_PROXY_DB_PASSWORD}@tcp(db.example:3306)/kittiwake"
   read_stickiness: 2s
   max_open_connections: 32
@@ -91,7 +91,7 @@ proxy:
   # listeners; behind the proxy mode set listen.jmap.proxy_protocol to optional
   # (pooled HTTP connections carry the client in X-Forwarded-For, not PROXY).
   trusted_addresses: []        # proxies whose X-Forwarded-For is trusted (HTTP): the TLS terminator, the proxy mode
-  # The proxy mode (README "Proxies"): how it reaches a namespace's ingress when the
+  # The proxy mode (ARCHITECTURE.md "Proxies"): how it reaches a namespace's ingress when the
   # namespace sets no policy of its own, and the port per protocol on every ingress.
   auth: local                  # local: verify passwords here, hand verified clients over with a signed token | passthrough: replay every credential to the backend
   # handoff_key: the proxy site's private key for auth local (kittiwake-admin proxy-key create <site>)
@@ -151,7 +151,7 @@ audit:
   retention: 8760h             # 365 days
   detail: {}                   # per protocol: full (default) | session, e.g. {imap: session}
 
-# Mailbox backups (see README "Backups"). The backup mode (kittiwake@backup) is
+# Mailbox backups (see ARCHITECTURE.md "Backups"). The backup mode (kittiwake@backup) is
 # the only process that needs the target and the keys; every other process only
 # reads the schedule limits. Back up MariaDB (with binary logs) yourself: it is
 # not covered here.

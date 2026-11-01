@@ -1,7 +1,7 @@
 // Package delivery stores inbound (LMTP) and imported (JMAP, IMAP APPEND,
 // Sent copies) messages: recipient resolution, domain/mailbox/hold/quota
 // checks, parsing, attachment dedup, message objects, index entry, change
-// log, search events, notifications and audit. See README.md "LMTP
+// log, search events, notifications and audit. See ARCHITECTURE.md "LMTP
 // delivery" and "Delivery ordering and crash safety".
 package delivery
 

@@ -4,8 +4,8 @@ Guidance for coding agents (Claude Code, Codex and others) working in this repos
 
 ## Project state
 
-`README.md` is the authoritative design document, agreed with the owner; read it before
-designing anything. See its "Status" section for what is implemented (nearly everything in
+`ARCHITECTURE.md` is the authoritative design document, agreed with the owner; read it before
+designing anything (`README.md` is the short introduction). See its "Status" section for what is implemented (nearly everything in
 the mail design: LMTP, JMAP incl. submission, SMTP submission, IMAP, POP3, REST/admin, sessions/TOTP, workers,
 legal hold, backups with restore/export/verify) and what is not (CONDSTORE, WebSocket,
 search backend, reconciliation worker, DAV, Ceph integration tests).
@@ -97,7 +97,7 @@ clock (audit objects are per UTC day). Smoke-test the binary with
 `make run-dev` plus Python's smtplib.LMTP/imaplib/poplib and curl against 127.0.0.1 ports
 2424/1143/1110/8080 (jmap) and 8081 (admin) (see examples/dev.yaml); kill it by PID, not by `pkill -f`.
 
-Namespaces (README "Namespaces"): every domain, mailbox and storage carries one; the admin
+Namespaces (ARCHITECTURE.md "Namespaces"): every domain, mailbox and storage carries one; the admin
 service confines a tenant token with `inScope` (records elsewhere read as not found),
 `createNamespace` (creates land in the token's namespace) and `listNamespace`, and
 platform-level operations use `authorizeGlobal`. Task rows carry a namespace (MariaDB
@@ -106,7 +106,7 @@ derives it from the payload's `namespace` or `mailbox` field); schedulers lead p
 under `storage.WithNamespace(ctx, ns)`; backup operations bind the namespace's target with
 `Service.enter`.
 
-Proxies (README "Proxies"): `proto/proxy` fronts IMAP, POP3, submission and JMAP, routes by
+Proxies (ARCHITECTURE.md "Proxies"): `proto/proxy` fronts IMAP, POP3, submission and JMAP, routes by
 the domain of the login name (`Server.Route`; tokens via `RouteAccount` and
 `identity.AccountDomain`, the only account read), replays the untouched credential against
 a node from the registry or the namespace's `Ingress` (`dialer`, PROXY v2 first, then TLS
@@ -116,7 +116,7 @@ client over with a handoff token (`auth.SignHandoff`, verified by `auth.Service.
 against the registered `identity.ProxyKey` list on IMAP/POP3/submission XOAUTH2 and HTTP
 Bearer); `passthrough` replays the credential. The proxy process (`cmd/kittiwake/proxy.go`)
 never writes to the database and runs alone (`config.Validate`); keep every read it makes
-answerable from the grants README "Proxies" lists per mode, and keep its refusals in the
+answerable from the grants ARCHITECTURE.md "Proxies" lists per mode, and keep its refusals in the
 backends' vocabulary (the texts in `local.go` mirror `proto/imap`, `proto/pop3` and
 `proto/submission`; change them together). Its tests run real backends on the memory
 backend in both modes.
@@ -169,7 +169,7 @@ These are settled. Do not design around them.
   commit decision with CAS, replays version-fenced target writes, then atomically publishes
   counters/modseq/change log. Private delivery data is undone only before acceptance;
   ErrPending must preserve it for recovery. Readers help pending mutations complete. Sweeps
-  are crash insurance. Never deploy alongside old writers; see README rollout instructions.
+  are crash insurance. Never deploy alongside old writers; see the rollout instructions in ARCHITECTURE.md.
 - **Admin API is the only way identity data is created/changed.** `kittiwake admin` does only
   bootstrap/token; operators use `kittiwake-admin` (client/admin). Do not add admin features
   to cmd/kittiwake; add them to the API + spec + client.
@@ -271,7 +271,7 @@ These are settled. Do not design around them.
   deletion, keeps accepting delivery by default, refuses sending by default, optionally
   `sealed` (no user access). Enforced in the `Mailbox` service. Release is audited and
   purges resume with a grace period.
-- **Backups** (README "Backups"): the `backup` mode is the only process with the target
+- **Backups** (ARCHITECTURE.md "Backups"): the `backup` mode is the only process with the target
   credentials and keys; every other mode files tasks (`backup`, `backup-job`) and reads the
   catalog (`backup.Catalog`: MariaDB in production, `backup.Memory` otherwise). A run is
   logical (documents, raw, attachments verbatim; index as folder entries), sealed per entry

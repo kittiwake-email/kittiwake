@@ -1,6 +1,6 @@
 // Package lmtp is the inbound delivery adapter: an LMTP server (RFC 2033)
 // on top of github.com/emersion/go-smtp that hands each recipient to the
-// delivery service and answers per recipient. See README.md "LMTP delivery".
+// delivery service and answers per recipient. See ARCHITECTURE.md "LMTP delivery".
 package lmtp
 
 import (

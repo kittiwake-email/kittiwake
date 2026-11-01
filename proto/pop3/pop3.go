@@ -2,7 +2,7 @@
 // RFC 5034) over the mailbox service. It serves INBOX only; UIDLs are
 // derived from the folder's UIDVALIDITY and UID; DELE is lazy: deleted
 // messages are expunged into the retention set at QUIT. TLS is terminated
-// upstream, so no STLS. See README.md "Protocols".
+// upstream, so no STLS. See ARCHITECTURE.md "Protocols".
 package pop3
 
 import (

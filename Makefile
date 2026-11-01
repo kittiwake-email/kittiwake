@@ -74,7 +74,7 @@ deploy-units:
 	scp examples/lab.yaml $(DEPLOY_SCP):/etc/kittiwake/kittiwake.yaml.example
 	ssh $(DEPLOY_SSH) 'test -f /etc/kittiwake/kittiwake.yaml || cp /etc/kittiwake/kittiwake.yaml.example /etc/kittiwake/kittiwake.yaml; systemctl daemon-reload'
 
-# Container images (README "Containers"). `make docker` builds the image that
+# Container images (ARCHITECTURE.md "Containers"). `make docker` builds the image that
 # runs any mode (KITTIWAKE_MODES at run time, every port exposed);
 # `make docker-<mode>` pins the mode and exposes only its ports. Both embed
 # the version. DOCKER=sudo docker when the socket needs it.

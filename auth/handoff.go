@@ -17,7 +17,7 @@ import (
 
 // Handoff tokens: a proxy that verified a password itself tells the
 // backend so with a short-lived token signed by its site's Ed25519 key
-// (README "Proxies"). The backend knows the public keys of the proxy
+// (ARCHITECTURE.md "Proxies"). The backend knows the public keys of the proxy
 // sites (registered through the admin API) and accepts the token in
 // place of the password on IMAP, POP3, submission (XOAUTH2) and HTTP
 // (Bearer). The token is bound to the account, the client address and

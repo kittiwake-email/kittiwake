@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Environment overrides (README "Containers"): a set KITTIWAKE_* variable
+// Environment overrides (ARCHITECTURE.md "Containers"): a set KITTIWAKE_* variable
 // replaces the corresponding value of the file, so a container image
 // ships one config file and takes everything deployment-specific from
 // its environment. An empty variable is ignored (an image may export

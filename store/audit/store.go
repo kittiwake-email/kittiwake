@@ -1,7 +1,7 @@
 // Package audit persists audit records in bounded daily segments
 // (`<mailbox>/audit/<YYYY-MM-DD>/<segment>`, with scalar daily headers) in the index pool of the mailbox's storage; platform-wide
 // admin actions go to an AdminLog (a MariaDB table in production, the
-// `audit/admin/<YYYY-MM-DD>` object on the memory backend). See README.md
+// `audit/admin/<YYYY-MM-DD>` object on the memory backend). See ARCHITECTURE.md
 // "Auditing".
 package audit
 

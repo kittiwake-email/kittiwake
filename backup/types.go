@@ -1,7 +1,7 @@
 // Package backup implements mailbox backups to an S3-compatible target:
 // the per-mailbox backup run, side-by-side restore, Maildir export from a
 // backup, verification and garbage collection, and the `backup` daemon
-// mode that executes them from the task queue. See README.md "Backups".
+// mode that executes them from the task queue. See ARCHITECTURE.md "Backups".
 //
 // A backup is logical, not a copy of RADOS objects: message documents,
 // kept original bytes and attachment payloads are stored as they are, the

@@ -1,7 +1,7 @@
 // Package queue is the RADOS-backed task queue for workers: one object per
 // task type (`queue/<type>`) in the index pool, tasks as omap entries, and a
 // RADOS lock so concurrent workers never claim the same task. Every state
-// move is a single atomic omap transaction. See README.md "Workers".
+// move is a single atomic omap transaction. See ARCHITECTURE.md "Workers".
 package queue
 
 import (

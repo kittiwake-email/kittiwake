@@ -8,7 +8,7 @@
 // The surface is deliberately small: whole-object reads and writes, xattrs,
 // omap (the per-object sorted key/value map), atomic write transactions with
 // assertions, exclusive locks, watch/notify and object listing. That is the
-// subset the design in README.md relies on.
+// subset the design in ARCHITECTURE.md relies on.
 package rados
 
 import (

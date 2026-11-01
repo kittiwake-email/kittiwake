@@ -1520,7 +1520,7 @@ func (a *cli) backup(args []string) error {
 }
 
 // proxyKey manages the keys of proxy sites that verify passwords
-// themselves (README "Proxies"). create generates the key pair here
+// themselves (ARCHITECTURE.md "Proxies"). create generates the key pair here
 // unless --public-key hands in one generated elsewhere; the private key
 // is printed once, for the proxy's proxy.handoff_key.
 func (a *cli) proxyKey(args []string) error {

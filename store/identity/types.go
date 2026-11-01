@@ -1,5 +1,5 @@
 // Package identity persists domains, mailboxes, accounts, aliases and API
-// tokens in the RADOS meta pool. See README.md "Object naming" and "Identity
+// tokens in the RADOS meta pool. See ARCHITECTURE.md "Object naming" and "Identity
 // store semantics" for the layout.
 package identity
 
@@ -458,7 +458,7 @@ type Versioned[T any] struct {
 
 // ProxyKey is the registered public key of a proxy site that verifies
 // passwords itself (proxy.auth local) and hands clients to the backends
-// with a token signed by the private half (README "Proxies"). The id is
+// with a token signed by the private half (ARCHITECTURE.md "Proxies"). The id is
 // derived from the key (ProxyKeyID), so the proxy and the registry agree
 // on it without being told.
 type ProxyKey struct {

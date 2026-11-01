@@ -2,7 +2,7 @@
 // protocol (netstrings: "<name> <key>" → "OK <value>", "NOTFOUND ",
 // "TEMP <reason>", "PERM <reason>"). Maps: domains, mailboxes, aliases,
 // transport (the LMTP ingress of a recipient's namespace).
-// See README.md "Postfix integration".
+// See ARCHITECTURE.md "Postfix integration".
 package socketmap
 
 import (

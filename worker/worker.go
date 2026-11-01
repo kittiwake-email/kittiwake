@@ -3,7 +3,7 @@
 // recalculation, audit purge, orphan sweep and search-index events. One
 // worker at a time (elected with a lease) also acts as the scheduler
 // that enqueues the periodic tasks. Backup tasks are not drained here:
-// the backup mode has its own runner. See README.md "Workers and
+// the backup mode has its own runner. See ARCHITECTURE.md "Workers and
 // background tasks".
 package worker
 

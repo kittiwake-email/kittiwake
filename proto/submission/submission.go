@@ -3,7 +3,7 @@
 // on port 465 (RFC 8314) and forwards with PROXY v2; the daemon never
 // speaks TLS itself. Clients authenticate (SASL PLAIN, LOGIN, OAUTHBEARER,
 // XOAUTH2) and every message goes through the submit service, the same
-// path as JMAP EmailSubmission. See README.md "Sending mail".
+// path as JMAP EmailSubmission. See ARCHITECTURE.md "Sending mail".
 package submission
 
 import (

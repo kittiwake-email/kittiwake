@@ -152,7 +152,7 @@ func WriteAuthError(w http.ResponseWriter, err error, realm string) {
 }
 
 // HandoffVerifier accepts proxy handoff tokens (a proxy verified the
-// password; README "Proxies") presented as Bearer.
+// password; ARCHITECTURE.md "Proxies") presented as Bearer.
 type HandoffVerifier interface {
 	VerifyHandoff(ctx context.Context, token, proto, clientIP string) (actor.Actor, error)
 }

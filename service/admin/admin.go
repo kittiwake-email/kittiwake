@@ -1071,7 +1071,7 @@ func (s *Service) DeleteAdminToken(ctx context.Context, id string) error {
 // ---- proxy keys ----
 
 // CreateProxyKey registers the public key of a proxy site that verifies
-// passwords itself (platform-level; README "Proxies").
+// passwords itself (platform-level; ARCHITECTURE.md "Proxies").
 func (s *Service) CreateProxyKey(ctx context.Context, name string, pub []byte) (identity.ProxyKey, error) {
 	if err := s.authorizeGlobal(ctx, "proxy-key-create", name); err != nil {
 		return identity.ProxyKey{}, err

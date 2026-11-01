@@ -1,5 +1,5 @@
 // Package session persists OAuth sessions (refresh tokens), JWT signing keys
-// and TOTP replay state in the RADOS index pool. See README.md "API
+// and TOTP replay state in the RADOS index pool. See ARCHITECTURE.md "API
 // authentication: sessions and tokens".
 package session
 

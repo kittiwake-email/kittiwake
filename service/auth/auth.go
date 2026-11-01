@@ -59,7 +59,7 @@ type Config struct {
 	// CacheTTL caches successful credential verifications (password and
 	// API token) so repeated requests skip RADOS and argon2id. 0 disables.
 	CacheTTL time.Duration
-	// ReadOnly: the service runs in a proxy that never writes (README
+	// ReadOnly: the service runs in a proxy that never writes (ARCHITECTURE.md
 	// "Proxies"): no hash upgrades, no sessions; the audit sink should
 	// be log-only.
 	ReadOnly bool

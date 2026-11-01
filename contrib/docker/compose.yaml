@@ -1,6 +1,6 @@
 # Kittiwake on Docker Compose: one container per mode on an IPv6-routed
 # network, so every container has a real address and listens on its
-# standard ports (README "Containers"). Copy env.example to .env, fill it
+# standard ports (ARCHITECTURE.md "Containers"). Copy env.example to .env, fill it
 # in, then:
 #
 #   make docker                            # in the product root: builds kittiwake:latest
@@ -12,7 +12,7 @@
 # add), so no container needs a keyring; a ceph.conf for librados defaults
 # can be mounted in (see x-kittiwake). TLS termination (HAProxy or the like)
 # is not part of this file: put it in front of imap, pop3, submission and
-# jmap (or in front of proxy) with PROXY protocol v2, as README "TLS" says.
+# jmap (or in front of proxy) with PROXY protocol v2, as ARCHITECTURE.md "TLS" says.
 # MariaDB runs here for convenience; a real deployment points
 # KITTIWAKE_DB_DSN at its own.
 
@@ -75,7 +75,7 @@ services:
     volumes: [spool:/var/lib/kittiwake]
     ports: ["[::]:9090:9090"]
     profiles: [backup]
-  # The proxy (README "Proxies") fronts the four client protocols and needs
+  # The proxy (ARCHITECTURE.md "Proxies") fronts the four client protocols and needs
   # only a read-only database user (KITTIWAKE_DB_PROXY_DSN) and its site key
   # (KITTIWAKE_PROXY_HANDOFF_KEY, registered with kittiwake-admin proxy-key).
   # Scale it out and point anycast or DNS at the replicas.

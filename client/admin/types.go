@@ -330,7 +330,7 @@ type TokenCreated struct {
 }
 
 // ProxyKey is the registered public key of a proxy site that verifies
-// passwords itself (README "Proxies").
+// passwords itself (ARCHITECTURE.md "Proxies").
 type ProxyKey struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`

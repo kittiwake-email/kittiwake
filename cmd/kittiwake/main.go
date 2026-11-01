@@ -82,7 +82,7 @@ flags:
 }
 
 func usageEnv() {
-	fmt.Fprintln(os.Stderr, "Environment variables overriding the config file (set and non-empty; README \"Containers\"):")
+	fmt.Fprintln(os.Stderr, "Environment variables overriding the config file (set and non-empty; ARCHITECTURE.md \"Containers\"):")
 	for _, e := range config.EnvVars {
 		fmt.Fprintf(os.Stderr, "  %-40s %s\n", e.Name, e.Doc)
 	}

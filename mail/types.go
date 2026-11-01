@@ -4,7 +4,7 @@
 // document holds the verbatim headers (Received trace, Message-ID, DKIM) and
 // every part's content, and Render produces a deterministic equivalent.
 //
-// See README.md: "Message parsing", "Raw message", "Attachments".
+// See ARCHITECTURE.md: "Message parsing", "Raw message", "Attachments".
 package mail
 
 import "time"

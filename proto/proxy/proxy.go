@@ -10,7 +10,7 @@
 // client address, which the proxy forwards with PROXY protocol v2) or,
 // in local mode, are verified here against the account's hashes and
 // handed over with a signed token, so a wrong password never reaches a
-// backend (local.go). See README.md "Proxies".
+// backend (local.go). See ARCHITECTURE.md "Proxies".
 package proxy
 
 import (

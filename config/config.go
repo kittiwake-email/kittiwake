@@ -160,7 +160,7 @@ func (l Listen) ManagementAddress(modes []string) string {
 }
 
 // Proxy: what every daemon trusts in front of it, and the settings of the
-// proxy mode itself (README "Proxies").
+// proxy mode itself (ARCHITECTURE.md "Proxies").
 type Proxy struct {
 	// TrustedAddresses may set X-Forwarded-For on HTTP: the TLS terminator
 	// in front, and the proxy mode when it is in front of this daemon.
@@ -301,7 +301,7 @@ type Database struct {
 	// from the primary) for SELECT-only operations. Empty = primary only.
 	ReadDSN Secret `yaml:"read_dsn"`
 	// ProxyDSN is what the proxy mode connects with instead of dsn: the
-	// read-only user with the grants README "Proxies" lists, so a proxy
+	// read-only user with the grants ARCHITECTURE.md "Proxies" lists, so a proxy
 	// process on a box that also runs backends never holds the
 	// read-write credentials. Empty = dsn.
 	ProxyDSN Secret `yaml:"proxy_dsn"`
